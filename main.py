@@ -11,7 +11,7 @@ import time
 import httpx
 
 # ==========================================
-# إعدادات التلجرام
+# إعدادات التلجرام الخاصة بك
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
@@ -26,31 +26,24 @@ async def send_telegram_msg(message):
             print(f"❌ خطأ تلجرام: {e}")
 
 # ==========================================
-# نظام جلب "كل" عملات الفيوتشر (إصلاح مشكلة الـ 0 عملة)
+# قائمة العملات اليدوية (The Golden 20)
 # ==========================================
-async def get_all_futures_symbols(exchange):
-    try:
-        markets = await exchange.load_markets()
-        # البحث عن العملات التي تحتوي على :USDT وهو النمط القياسي لفيوتشر KuCoin في CCXT
-        all_symbols = [
-            symbol for symbol, market in markets.items() 
-            if (market.get('linear') or market.get('type') == 'swap') and 'USDT' in symbol
-        ]
-        
-        # إذا لم يجد شيئاً، نستخدم فلتر أوسع
-        if not all_symbols:
-            all_symbols = [s for s in exchange.symbols if ':USDT' in s]
-            
-        print(f"✅ تم اكتشاف {len(all_symbols)} عملة فيوتشر للمراقبة.")
-        return all_symbols
-    except Exception as e:
-        print(f"❌ خطأ في جلب الأسواق: {e}")
-        return []
+# ملاحظة: استخدمنا تنسيق KuCoin القياسي في مكتبة CCXT وهو SYMBOL/USDT:USDT
+MANUAL_SYMBOLS = [
+    'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'AVAX/USDT:USDT',
+    'DOGE/USDT:USDT', 'ADA/USDT:USDT', 'NEAR/USDT:USDT', 'XRP/USDT:USDT',
+    'MATIC/USDT:USDT', 'LINK/USDT:USDT', 'DOT/USDT:USDT', 'LTC/USDT:USDT',
+    'ATOM/USDT:USDT', 'UNI/USDT:USDT', 'ALGO/USDT:USDT', 'VET/USDT:USDT',
+    'ICP/USDT:USDT', 'FIL/USDT:USDT', 'HBAR/USDT:USDT', 'FTM/USDT:USDT'
+]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.symbols = await get_all_futures_symbols(exchange)
+    # تحميل العملات من القائمة اليدوية مباشرة
+    app.state.symbols = MANUAL_SYMBOLS
     app.state.sent_signals = {} 
+    print(f"✅ تم تفعيل مراقبة {len(MANUAL_SYMBOLS)} عملة يدوياً.")
+    
     task = asyncio.create_task(start_scanning(app))
     yield
     await exchange.close()
@@ -84,7 +77,7 @@ async def get_signal(symbol):
         
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        df['ema200'] = ta.ema(df['close'], length=200) # الاتجاه العام
+        df['ema200'] = ta.ema(df['close'], length=200) # فلتر الاتجاه
         macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
         df = pd.concat([df, macd], axis=1)
         df['rsi'] = ta.rsi(df['close'], length=14)
@@ -93,11 +86,11 @@ async def get_signal(symbol):
         prev = df.iloc[-2]
         hist_col = 'MACDh_12_26_9'
 
-        # إشارة LONG: سعر فوق EMA200 + تقاطع ماكد + RSI > 50
+        # إشارة LONG: سعر > EMA200 + تقاطع ماكد إيجابي + RSI > 50
         if last['close'] > last['ema200'] and last[hist_col] > 0 and prev[hist_col] <= 0 and last['rsi'] > 50:
             return "LONG", last['close']
             
-        # إشارة SHORT: سعر تحت EMA200 + تقاطع ماكد عكسي + RSI < 50
+        # إشارة SHORT: سعر < EMA200 + تقاطع ماكد سلبي + RSI < 50
         if last['close'] < last['ema200'] and last[hist_col] < 0 and prev[hist_col] >= 0 and last['rsi'] < 50:
             return "SHORT", last['close']
             
@@ -105,24 +98,18 @@ async def get_signal(symbol):
     except: return None, None
 
 async def start_scanning(app):
-    print("🛰️ رادار المسح الشامل (الاستراتيجية الذهبية) بدأ العمل...")
+    print("🛰️ رادار المسح اليدوي (الاستراتيجية الذهبية) بدأ العمل...")
     while True:
-        if not app.state.symbols:
-            app.state.symbols = await get_all_futures_symbols(exchange)
-            await asyncio.sleep(10)
-            continue
-
         for sym in app.state.symbols:
             side, entry = await get_signal(sym)
             if side:
                 current_time = time.time()
                 signal_key = f"{sym}_{side}"
                 
-                # إشارة واحدة كل 4 ساعات لنفس العملة (فريم الساعة)
+                # منع التكرار (إشارة واحدة كل 4 ساعات لفريم الساعة)
                 if signal_key not in app.state.sent_signals or (current_time - app.state.sent_signals[signal_key]) > 14400:
                     app.state.sent_signals[signal_key] = current_time
                     
-                    # تنظيف اسم العملة للعرض
                     symbol_clean = sym.split(':')[0].replace('-', '/')
                     
                     if side == "LONG":
@@ -144,16 +131,17 @@ async def start_scanning(app):
                         f"🎯 <b>هدف 3:</b> <code>{tp3}</code>\n"
                         f"🚫 <b>استوب:</b> <code>{sl}</code>\n"
                         f"━━━━━━━━━━━━━━\n"
-                        f"📊 <b>الفلتر:</b> EMA 200 + MACD Scan\n"
+                        f"📊 <b>الفلتر:</b> EMA 200 + MACD Confirmation\n"
                         f"🕒 {time.strftime('%H:%M')}"
                     )
                     await send_telegram_msg(msg)
                     await manager.broadcast(json.dumps({"symbol": symbol_clean, "side": side, "entry": round(entry, 5), "tp": tp1, "sl": sl}))
+                    print(f"✅ تم إرسال صفقة: {symbol_clean}")
             
-            # تأخير بسيط بين العملات (0.2 ثانية) لتجنب الحظر
-            await asyncio.sleep(0.2)
+            # تأخير بسيط جداً بين العملات لتجنب ضغط الـ API
+            await asyncio.sleep(0.5)
 
-        await asyncio.sleep(60) # راحة دقيقة بعد كل مسح شامل للسوق
+        await asyncio.sleep(60)
 
 @app.get("/", response_class=HTMLResponse)
 async def get_ui():
@@ -161,7 +149,7 @@ async def get_ui():
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
     <head>
-        <meta charset="UTF-8"><title>Golden VIP Scanner</title>
+        <meta charset="UTF-8"><title>Golden VIP Radar</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style> body { background: #0b0e11; color: white; font-family: sans-serif; } </style>
     </head>
@@ -169,10 +157,10 @@ async def get_ui():
         <div class="max-w-2xl mx-auto text-right">
             <header class="flex justify-between items-center mb-8 border-b border-gray-800 pb-5">
                 <h1 class="text-2xl font-black text-yellow-500 italic">GOLDEN RADAR VIP 🛰️</h1>
-                <span class="text-[10px] text-green-500 font-bold uppercase animate-pulse">Scanning All Pairs</span>
+                <span class="text-[10px] text-green-500 font-bold uppercase animate-pulse">Monitoring Manual List</span>
             </header>
             <div id="signals" class="space-y-4">
-                <div id="empty" class="text-center py-20 text-gray-700 italic">جاري جلب بيانات السوق والبحث عن فرص ذهبية...</div>
+                <div id="empty" class="text-center py-20 text-gray-700 italic">بانتظار الإشارات القوية على فريم الساعة...</div>
             </div>
         </div>
         <script>
