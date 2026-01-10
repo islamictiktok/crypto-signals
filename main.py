@@ -7,24 +7,25 @@ import ccxt.async_support as ccxt
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
-import time # أضفنا مكتبة الوقت
+import time
 
+# --- نظام اختيار العملات (تم إضافة DOGE وحذف PEPE) ---
 async def find_correct_symbols(exchange):
     await exchange.load_markets()
-    targets = ['BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', 'PEPE', 'ADA', 'NEAR', 'XRP']
+    # القائمة المحدثة حسب طلبك
+    targets = ['BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', 'ADA', 'NEAR', 'XRP']
     all_symbols = exchange.symbols
     found_symbols = []
     for target in targets:
         match = [s for s in all_symbols if target in s and 'USDT' in s]
         if match:
             found_symbols.append(match[0])
-            print(f"✅ مراقبة: {match[0]}")
+            print(f"✅ مراقبة نشطة: {match[0]}")
     return found_symbols
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.symbols = await find_correct_symbols(exchange)
-    # --- إضافة قاموس لتتبع آخر الصفقات المرسلة ---
     app.state.sent_signals = {} 
     task = asyncio.create_task(start_scanning(app))
     yield
@@ -51,6 +52,7 @@ manager = ConnectionManager()
 
 async def get_signal(symbol):
     try:
+        # جلب بيانات الشموع (فريم 5 دقائق)
         bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=50)
         if not bars: return None, None
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
@@ -61,6 +63,7 @@ async def get_signal(symbol):
         last = df.iloc[-1]
         prev = df.iloc[-2]
         
+        # استراتيجية التقاطع السريع
         if last['close'] > last['ema'] and prev['rsi'] < 50 and last['rsi'] >= 50:
             return "LONG", last['close']
         
@@ -68,11 +71,10 @@ async def get_signal(symbol):
             return "SHORT", last['close']
             
         return None, None
-    except Exception as e:
-        return None, None
+    except: return None, None
 
 async def start_scanning(app):
-    print("🔥 رادار المضاربة السريعة بدأ العمل مع مانع التكرار...")
+    print("⚡ رادار السرعة القصوى بدأ العمل...")
     while True:
         if not app.state.symbols:
             app.state.symbols = await find_correct_symbols(exchange)
@@ -82,11 +84,10 @@ async def start_scanning(app):
         for sym in app.state.symbols:
             side, entry = await get_signal(sym)
             if side:
-                # --- منطق منع التكرار ---
                 current_time = time.time()
-                signal_key = f"{sym}_{side}" # مفتاح فريد لكل عملة ونوع صفقة
+                signal_key = f"{sym}_{side}"
                 
-                # إرسال الصفقة فقط إذا لم تُرسل من قبل أو مر عليها أكثر من 10 دقائق (600 ثانية)
+                # منع التكرار لمدة 10 دقائق للسماح بصفقات جديدة لنفس العملة لاحقاً
                 if signal_key not in app.state.sent_signals or (current_time - app.state.sent_signals[signal_key]) > 600:
                     app.state.sent_signals[signal_key] = current_time
                     
@@ -99,14 +100,11 @@ async def start_scanning(app):
                         "leverage": "20x"
                     }
                     await manager.broadcast(json.dumps(signal_data))
-                    print(f"🚀 صفقة جديدة (تم الإرسال): {sym} | {side}")
-                else:
-                    # تم اكتشافها ولكنها مكررة، نتجاهلها
-                    pass
+                    print(f"🚀 صفقة فورية مكتشفة: {sym} | {side}")
         
-        await asyncio.sleep(20)
+        # تم تقليل وقت الانتظار لـ 5 ثوانٍ فقط لزيادة السرعة
+        await asyncio.sleep(5) 
 
-# واجهة الموقع (نفس التصميم)
 @app.get("/", response_class=HTMLResponse)
 async def get_ui():
     return """
@@ -114,25 +112,25 @@ async def get_ui():
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <title>Scalper Pro | صفقات سريعة</title>
+        <title>Turbo Scalper | سرعة فائقة</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
             body { background: #0b0e11; font-family: sans-serif; color: white; }
-            .card { animation: slideIn 0.3s ease-out; background: #1a1e23; }
-            @keyframes slideIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+            .card { animation: slideIn 0.2s ease-out; background: #1a1e23; }
+            @keyframes slideIn { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: scale(1); } }
         </style>
     </head>
     <body class="p-4">
         <div class="max-w-xl mx-auto">
             <header class="flex justify-between items-center mb-6 border-b border-gray-800 pb-4">
-                <h1 class="text-xl font-bold text-blue-400 font-mono">SCALPER-RADAR v3.2</h1>
+                <h1 class="text-xl font-bold text-yellow-500 font-mono italic">TURBO-RADAR v4.0</h1>
                 <div class="flex items-center gap-2 text-xs">
-                    <span class="w-2 h-2 bg-green-500 rounded-full animate-ping"></span>
-                    <span class="text-gray-400">ACTIVE SCAN</span>
+                    <span class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
+                    <span class="text-red-400 font-bold uppercase tracking-widest">High Speed Mode</span>
                 </div>
             </header>
             <div id="signals" class="space-y-3">
-                <div id="empty" class="text-center py-20 text-gray-700 italic">في انتظار الصفقات غير المكررة...</div>
+                <div id="empty" class="text-center py-20 text-gray-700 italic">جاري صيد الفرص بسرعة فائقة...</div>
             </div>
         </div>
         <script>
@@ -143,14 +141,13 @@ async def get_ui():
                 const list = document.getElementById('signals');
                 const isL = d.side === 'LONG';
                 
-                // مسح أقدم كرت إذا زاد العدد عن 15 للحفاظ على أداء المتصفح
-                if (list.children.length > 15) list.removeChild(list.lastChild);
+                if (list.children.length > 20) list.removeChild(list.lastChild);
 
                 const html = `
-                <div class="card p-5 rounded-2xl border-l-4 ${isL ? 'border-green-500' : 'border-red-500'} shadow-xl mb-3">
+                <div class="card p-5 rounded-2xl border-l-4 ${isL ? 'border-green-500' : 'border-red-500'} shadow-2xl mb-3">
                     <div class="flex justify-between items-center mb-3">
-                        <span class="font-bold text-xl uppercase tracking-tighter">${d.symbol}</span>
-                        <span class="text-xs px-3 py-1 rounded-full font-black ${isL ? 'bg-green-500 text-black' : 'bg-red-500 text-white'}">${d.side}</span>
+                        <span class="font-black text-xl uppercase">${d.symbol}</span>
+                        <span class="text-[10px] px-3 py-1 rounded-full font-black ${isL ? 'bg-green-500 text-black' : 'bg-red-500 text-white'}">${d.side}</span>
                     </div>
                     <div class="grid grid-cols-3 gap-2 text-center bg-black/40 p-3 rounded-xl border border-gray-800">
                         <div><p class="text-[9px] text-gray-500 uppercase">Entry</p><p class="text-yellow-500 font-bold">${d.entry}</p></div>
@@ -159,12 +156,7 @@ async def get_ui():
                     </div>
                 </div>`;
                 list.insertAdjacentHTML('afterbegin', html);
-                
-                if(window.Notification && Notification.permission === 'granted') {
-                    new Notification(`إشارة: ${d.symbol}`, { body: `${d.side} @ ${d.entry}` });
-                }
             };
-            Notification.requestPermission();
         </script>
     </body>
     </html>
