@@ -7,10 +7,10 @@ import ccxt.async_support as ccxt
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
+import time # أضفنا مكتبة الوقت
 
 async def find_correct_symbols(exchange):
     await exchange.load_markets()
-    # كثرنا العملات هنا عشان الصفقات تزيد
     targets = ['BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', 'PEPE', 'ADA', 'NEAR', 'XRP']
     all_symbols = exchange.symbols
     found_symbols = []
@@ -24,6 +24,8 @@ async def find_correct_symbols(exchange):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.symbols = await find_correct_symbols(exchange)
+    # --- إضافة قاموس لتتبع آخر الصفقات المرسلة ---
+    app.state.sent_signals = {} 
     task = asyncio.create_task(start_scanning(app))
     yield
     await exchange.close()
@@ -53,19 +55,15 @@ async def get_signal(symbol):
         if not bars: return None, None
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # مؤشرات سريعة جداً للمضاربة
         df['ema'] = ta.ema(df['close'], length=20)
-        df['rsi'] = ta.rsi(df['close'], length=10) # RSI قصير المدى لسرعة الإشارة
+        df['rsi'] = ta.rsi(df['close'], length=10)
         
         last = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # استراتيجية الـ Scalping السريعة:
-        # شراء: السعر فوق EMA و RSI قطع خط الـ 50 للأعلى
         if last['close'] > last['ema'] and prev['rsi'] < 50 and last['rsi'] >= 50:
             return "LONG", last['close']
         
-        # بيع: السعر تحت EMA و RSI قطع خط الـ 50 للأسفل
         if last['close'] < last['ema'] and prev['rsi'] > 50 and last['rsi'] <= 50:
             return "SHORT", last['close']
             
@@ -74,7 +72,7 @@ async def get_signal(symbol):
         return None, None
 
 async def start_scanning(app):
-    print("🔥 رادار المضاربة السريعة (Scalper) بدأ العمل...")
+    print("🔥 رادار المضاربة السريعة بدأ العمل مع مانع التكرار...")
     while True:
         if not app.state.symbols:
             app.state.symbols = await find_correct_symbols(exchange)
@@ -84,20 +82,31 @@ async def start_scanning(app):
         for sym in app.state.symbols:
             side, entry = await get_signal(sym)
             if side:
-                signal_data = {
-                    "symbol": sym.split(':')[0].replace('-', '/'),
-                    "side": side,
-                    "entry": round(entry, 5),
-                    "tp": round(entry * 1.006, 5) if side == "LONG" else round(entry * 0.994, 5), # أهداف قريبة 0.6%
-                    "sl": round(entry * 0.995, 5) if side == "LONG" else round(entry * 1.005, 5), # ستوب قريب 0.5%
-                    "leverage": "20x"
-                }
-                await manager.broadcast(json.dumps(signal_data))
-                print(f"🚀 صفقة فورية: {sym}")
+                # --- منطق منع التكرار ---
+                current_time = time.time()
+                signal_key = f"{sym}_{side}" # مفتاح فريد لكل عملة ونوع صفقة
+                
+                # إرسال الصفقة فقط إذا لم تُرسل من قبل أو مر عليها أكثر من 10 دقائق (600 ثانية)
+                if signal_key not in app.state.sent_signals or (current_time - app.state.sent_signals[signal_key]) > 600:
+                    app.state.sent_signals[signal_key] = current_time
+                    
+                    signal_data = {
+                        "symbol": sym.split(':')[0].replace('-', '/'),
+                        "side": side,
+                        "entry": round(entry, 5),
+                        "tp": round(entry * 1.006, 5) if side == "LONG" else round(entry * 0.994, 5),
+                        "sl": round(entry * 0.995, 5) if side == "LONG" else round(entry * 1.005, 5),
+                        "leverage": "20x"
+                    }
+                    await manager.broadcast(json.dumps(signal_data))
+                    print(f"🚀 صفقة جديدة (تم الإرسال): {sym} | {side}")
+                else:
+                    # تم اكتشافها ولكنها مكررة، نتجاهلها
+                    pass
         
-        await asyncio.sleep(20) # فحص كل 20 ثانية (أسرع بمرتين من قبل)
+        await asyncio.sleep(20)
 
-# واجهة الموقع (نفس الكود السابق مع تحسين بسيط في الألوان)
+# واجهة الموقع (نفس التصميم)
 @app.get("/", response_class=HTMLResponse)
 async def get_ui():
     return """
@@ -116,14 +125,14 @@ async def get_ui():
     <body class="p-4">
         <div class="max-w-xl mx-auto">
             <header class="flex justify-between items-center mb-6 border-b border-gray-800 pb-4">
-                <h1 class="text-xl font-bold text-blue-400 font-mono">SCALPER-RADAR v3.0</h1>
-                <div class="flex items-center gap-2">
+                <h1 class="text-xl font-bold text-blue-400 font-mono">SCALPER-RADAR v3.2</h1>
+                <div class="flex items-center gap-2 text-xs">
                     <span class="w-2 h-2 bg-green-500 rounded-full animate-ping"></span>
-                    <span class="text-[10px] text-gray-400">FAST SCANNING</span>
+                    <span class="text-gray-400">ACTIVE SCAN</span>
                 </div>
             </header>
             <div id="signals" class="space-y-3">
-                <div id="empty" class="text-center py-20 text-gray-700">جاري صيد الصفقات...</div>
+                <div id="empty" class="text-center py-20 text-gray-700 italic">في انتظار الصفقات غير المكررة...</div>
             </div>
         </div>
         <script>
@@ -131,22 +140,28 @@ async def get_ui():
             ws.onmessage = (e) => {
                 document.getElementById('empty').style.display = 'none';
                 const d = JSON.parse(e.data);
+                const list = document.getElementById('signals');
                 const isL = d.side === 'LONG';
+                
+                // مسح أقدم كرت إذا زاد العدد عن 15 للحفاظ على أداء المتصفح
+                if (list.children.length > 15) list.removeChild(list.lastChild);
+
                 const html = `
-                <div class="card p-4 rounded-xl border-r-4 ${isL ? 'border-green-500' : 'border-red-500'} shadow-lg mb-3">
-                    <div class="flex justify-between items-center mb-2">
-                        <span class="font-bold text-lg">${d.symbol}</span>
-                        <span class="text-[10px] px-2 py-0.5 rounded ${isL ? 'bg-green-500/20 text-green-500' : 'bg-red-500/20 text-red-500'}">${d.side}</span>
+                <div class="card p-5 rounded-2xl border-l-4 ${isL ? 'border-green-500' : 'border-red-500'} shadow-xl mb-3">
+                    <div class="flex justify-between items-center mb-3">
+                        <span class="font-bold text-xl uppercase tracking-tighter">${d.symbol}</span>
+                        <span class="text-xs px-3 py-1 rounded-full font-black ${isL ? 'bg-green-500 text-black' : 'bg-red-500 text-white'}">${d.side}</span>
                     </div>
-                    <div class="flex justify-between text-center bg-black/20 p-2 rounded-lg">
-                        <div><p class="text-[8px] text-gray-500">ENTRY</p><p class="text-blue-400 font-bold text-xs">${d.entry}</p></div>
-                        <div><p class="text-[8px] text-gray-400">TARGET</p><p class="text-green-500 font-bold text-xs">${d.tp}</p></div>
-                        <div><p class="text-[8px] text-gray-400">STOP</p><p class="text-red-500 font-bold text-xs">${d.sl}</p></div>
+                    <div class="grid grid-cols-3 gap-2 text-center bg-black/40 p-3 rounded-xl border border-gray-800">
+                        <div><p class="text-[9px] text-gray-500 uppercase">Entry</p><p class="text-yellow-500 font-bold">${d.entry}</p></div>
+                        <div><p class="text-[9px] text-gray-500 uppercase">Target</p><p class="text-green-500 font-bold">${d.tp}</p></div>
+                        <div><p class="text-[9px] text-gray-500 uppercase">Stop</p><p class="text-red-500 font-bold">${d.sl}</p></div>
                     </div>
                 </div>`;
-                document.getElementById('signals').insertAdjacentHTML('afterbegin', html);
+                list.insertAdjacentHTML('afterbegin', html);
+                
                 if(window.Notification && Notification.permission === 'granted') {
-                    new Notification(`صفقة جديدة: ${d.symbol}`, { body: `${d.side} بسعر ${d.entry}` });
+                    new Notification(`إشارة: ${d.symbol}`, { body: `${d.side} @ ${d.entry}` });
                 }
             };
             Notification.requestPermission();
