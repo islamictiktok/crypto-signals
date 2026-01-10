@@ -3,23 +3,27 @@ import os
 import json
 import pandas as pd
 import pandas_ta as ta
-import ccxt.pro as ccxt # سنستخدم المكتبة الأساسية لضمان الاستقرار
+import ccxt.async_support as ccxt # التغيير هنا لاستخدام نسخة الأسمبلر الصحيحة
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 
+# --- إدارة تشغيل السيرفر ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # تشغيل الرادار عند البدء
     task = asyncio.create_task(start_scanning())
     yield
+    # إغلاق الاتصال بالمنصة عند التوقف
+    await exchange.close()
     task.cancel()
 
 app = FastAPI(lifespan=lifespan)
 
-# التبديل إلى KuCoin - أكثر مرونة مع سيرفرات Render
+# إعداد منصة كوكوين للفيوتشر
 exchange = ccxt.kucoin({
     'enableRateLimit': True,
-    'options': {'defaultType': 'swap'} # للتداول في الفيوتشر
+    'options': {'defaultType': 'swap'}
 })
 
 class ConnectionManager:
@@ -42,15 +46,18 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+# --- محرك التحليل الفني المصلح ---
 async def get_signal(symbol):
     try:
-        # جلب البيانات من KuCoin
-        # ملاحظة: في كوكوين رموز الفيوتشر تنتهي بـ USDTM
-        market_symbol = symbol.replace("/", "-") + "M" if "/" in symbol else symbol
+        # جلب الشموع (await مباشرة)
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
         
-        bars = await asyncio.to_thread(exchange.fetch_ohlcv, symbol, timeframe='5m', limit=100)
+        if not bars or len(bars) < 50:
+            return None, None
+            
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
+        # حساب المؤشرات
         df['ema'] = ta.ema(df['close'], length=20)
         df['rsi'] = ta.rsi(df['close'], length=14)
         
@@ -58,10 +65,10 @@ async def get_signal(symbol):
         prev = df.iloc[-2]
         price = last['close']
         
-        # استراتيجية RSI (أقل من 35 شراء / أكثر من 65 بيع) - للمضاربة السريعة
-        if price > last['ema'] and prev['rsi'] < 35 and last['rsi'] > 35:
+        # استراتيجية RSI (دخول آمن)
+        if price > last['ema'] and prev['rsi'] < 40 and last['rsi'] > 40:
             return "LONG", price
-        if price < last['ema'] and prev['rsi'] > 65 and last['rsi'] < 65:
+        if price < last['ema'] and prev['rsi'] > 60 and last['rsi'] < 60:
             return "SHORT", price
             
         return None, None
@@ -69,20 +76,21 @@ async def get_signal(symbol):
         print(f"⚠️ خطأ في فحص {symbol}: {e}")
         return None, None
 
+# --- الماسح الضوئي المصلح ---
 async def start_scanning():
-    # كوكوين تستخدم أزواج مثل BTC/USDT:USDT للفيوتشر في ccxt
-    symbols = ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT']
-    print("🛰️ رادار KuCoin بدأ المسح الآن...")
+    # رموز فيوتشر كوكوين الصحيحة
+    symbols = ['BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'AVAX/USDT:USDT']
+    print("🛰️ رادار KuCoin المطور بدأ العمل...")
     
     while True:
         for sym in symbols:
             side, entry = await get_signal(sym)
             if side:
-                tp = entry * 1.01 if side == "LONG" else entry * 0.99
-                sl = entry * 0.994 if side == "LONG" else entry * 1.006
+                tp = entry * 1.012 if side == "LONG" else entry * 0.988
+                sl = entry * 0.993 if side == "LONG" else entry * 1.007
                 
                 signal_data = {
-                    "symbol": sym.split(":")[0], # عرض الرمز بدون الزوائد
+                    "symbol": sym.split(":")[0],
                     "side": side,
                     "entry": round(entry, 4),
                     "tp": round(tp, 4),
@@ -90,68 +98,75 @@ async def start_scanning():
                     "leverage": "20x"
                 }
                 await manager.broadcast(json.dumps(signal_data))
-            await asyncio.sleep(5) # تأخير بسيط لتجنب الحظر
-        await asyncio.sleep(40)
+                print(f"✅ تم إرسال صفقة: {sym}")
+        
+        await asyncio.sleep(60) # فحص كل دقيقة
 
+# --- واجهة الموقع (نفس التصميم الاحترافي) ---
 @app.get("/")
 async def get_ui():
-    # نفس كود الـ HTML السابق دون تغيير
     html_content = """
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <title>رادار صفقات KuCoin</title>
+        <title>KuCoin Radar | صفقات مباشرة</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
-            body { background: #0b0e11; color: white; }
-            .signal-card { animation: slideIn 0.4s ease; }
-            @keyframes slideIn { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
+            body { background: #0b0e11; color: white; font-family: sans-serif; }
+            .card { animation: slideUp 0.5s ease-out; }
+            @keyframes slideUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: translateY(0); } }
         </style>
     </head>
     <body class="p-4 md:p-10">
-        <div class="max-w-4xl mx-auto">
-            <header class="flex justify-between items-center mb-8 border-b border-gray-800 pb-6">
-                <h1 class="text-3xl font-black text-green-500 underline decoration-yellow-500">KuCoin Radar 🛰️</h1>
-                <div class="flex items-center gap-2 bg-gray-900 p-2 rounded-lg">
-                    <span class="w-2 h-2 bg-green-500 rounded-full"></span>
-                    <span class="text-xs">Live Feed</span>
+        <div class="max-w-3xl mx-auto">
+            <header class="flex justify-between items-center mb-10 border-b border-gray-800 pb-6">
+                <h1 class="text-3xl font-black text-green-400 uppercase">KuCoin Radar 🛰️</h1>
+                <div id="status" class="flex items-center gap-2 bg-green-900/20 px-3 py-1 rounded-full border border-green-500/30">
+                    <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                    <span class="text-[10px] font-bold text-green-500 uppercase">Live</span>
                 </div>
             </header>
-            <div id="signals-list" class="grid gap-6"></div>
+            <div id="signals-list" class="grid gap-6">
+                <div id="empty-msg" class="text-center text-gray-600 py-20">جاري فحص السوق بحثاً عن فرص...</div>
+            </div>
         </div>
         <script>
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+            
             ws.onmessage = function(event) {
+                document.getElementById('empty-msg').style.display = 'none';
                 const data = JSON.parse(event.data);
                 const list = document.getElementById('signals-list');
                 const isLong = data.side === 'LONG';
+                
                 const card = `
-                <div class="signal-card bg-gray-800 p-6 rounded-2xl border-l-8 ${isLong ? 'border-green-500' : 'border-red-500'}">
+                <div class="card bg-gray-800 p-6 rounded-2xl border-r-8 ${isLong ? 'border-green-500' : 'border-red-500'} shadow-2xl">
                     <div class="flex justify-between items-center mb-4">
                         <h2 class="text-2xl font-bold">${data.symbol}</h2>
-                        <span class="px-4 py-1 rounded-full text-xs font-black ${isLong ? 'bg-green-500 text-black' : 'bg-red-500 text-white'} uppercase">
-                            ${data.side}
+                        <span class="px-4 py-1 rounded text-xs font-black ${isLong ? 'bg-green-500 text-black' : 'bg-red-500 text-white'}">
+                            ${data.side} ${data.leverage}
                         </span>
                     </div>
-                    <div class="grid grid-cols-3 gap-3">
-                        <div class="text-center bg-black/20 p-2 rounded">
-                            <p class="text-[10px] text-gray-400">Entry</p>
+                    <div class="grid grid-cols-3 gap-2">
+                        <div class="bg-black/30 p-3 rounded-lg text-center">
+                            <p class="text-gray-500 text-[10px] mb-1">دخول</p>
                             <p class="text-yellow-500 font-bold">${data.entry}</p>
                         </div>
-                        <div class="text-center bg-black/20 p-2 rounded">
-                            <p class="text-[10px] text-gray-400">Target</p>
+                        <div class="bg-black/30 p-3 rounded-lg text-center">
+                            <p class="text-gray-500 text-[10px] mb-1">الهدف</p>
                             <p class="text-green-500 font-bold">${data.tp}</p>
                         </div>
-                        <div class="text-center bg-black/20 p-2 rounded">
-                            <p class="text-[10px] text-gray-400">Stop</p>
+                        <div class="bg-black/30 p-3 rounded-lg text-center">
+                            <p class="text-gray-500 text-[10px] mb-1">الاستوب</p>
                             <p class="text-red-500 font-bold">${data.sl}</p>
                         </div>
                     </div>
                 </div>`;
                 list.insertAdjacentHTML('afterbegin', card);
             };
+            ws.onclose = () => { document.getElementById('status').innerHTML = '<span class="text-red-500 text-xs font-bold">DISCONNECTED</span>'; };
         </script>
     </body>
     </html>
