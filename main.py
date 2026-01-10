@@ -1,177 +1,60 @@
-import asyncio
-import os
-import json
-import pandas as pd
-import pandas_ta as ta
-import ccxt.async_support as ccxt
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
-from contextlib import asynccontextmanager
-import time
+# --- إعدادات التلغرام المحدثة ---
+# استبدل التوكن بتوكن بوتك
+TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg" 
+# استبدل هذا الرقم بمعرف القناة الذي يبدأ بـ -100
+CHAT_ID = "-1003653652451" 
 
-# --- نظام اختيار العملات الدقيق (حل مشكلة BABYDOGE و ACTSOL) ---
-async def find_correct_symbols(exchange):
-    await exchange.load_markets()
-    # القائمة المطلوبة
-    targets = ['BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', 'ADA', 'NEAR', 'XRP']
-    all_symbols = exchange.symbols
-    found_symbols = []
-    
-    for target in targets:
-        # البحث عن الرمز الدقيق لعقود الفيوتشر (Swap)
-        # في KuCoin التنسيق غالباً يكون SYMBOL/USDT:USDT أو SYMBOL/USDT
-        exact_pattern = f"{target}/USDT:USDT"
-        simple_pattern = f"{target}/USDT"
-        
-        if exact_pattern in all_symbols:
-            found_symbols.append(exact_pattern)
-            print(f"✅ مراقبة دقيقة (Swap): {exact_pattern}")
-        elif simple_pattern in all_symbols:
-            found_symbols.append(simple_pattern)
-            print(f"✅ مراقبة دقيقة (Standard): {simple_pattern}")
-            
-    return found_symbols
+async def send_telegram_msg(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID, 
+        "text": message, 
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True # لإبقاء الرسالة منظمة بدون روابط معاينة
+    }
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, json=payload)
+            if response.status_code != 200:
+                print(f"❌ خطأ من تلجرام: {response.text}")
+        except Exception as e:
+            print(f"❌ فشل الاتصال بتلجرام: {e}")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    app.state.symbols = await find_correct_symbols(exchange)
-    app.state.sent_signals = {} 
-    task = asyncio.create_task(start_scanning(app))
-    yield
-    await exchange.close()
-    task.cancel()
-
-app = FastAPI(lifespan=lifespan)
-# ضبط المنصة
-exchange = ccxt.kucoin({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
-
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-    async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            try: await connection.send_text(message)
-            except: pass
-
-manager = ConnectionManager()
-
-async def get_signal(symbol):
-    try:
-        # جلب البيانات لآخر 50 شمعة
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=50)
-        if not bars: return None, None
-        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        
-        df['ema'] = ta.ema(df['close'], length=20)
-        df['rsi'] = ta.rsi(df['close'], length=10)
-        
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        
-        # استراتيجية المضاربة السريعة
-        if last['close'] > last['ema'] and prev['rsi'] < 50 and last['rsi'] >= 50:
-            return "LONG", last['close']
-        
-        if last['close'] < last['ema'] and prev['rsi'] > 50 and last['rsi'] <= 50:
-            return "SHORT", last['close']
-            
-        return None, None
-    except: return None, None
-
+# --- دالة start_scanning (تأكد من تعديل شكل الرسالة لتكون جذابة في القناة) ---
 async def start_scanning(app):
-    print("⚡ رادار السرعة القصوى (V4.1) بدأ العمل...")
+    print("🛰️ رادار القناة الخاصة بدأ العمل...")
     while True:
-        if not app.state.symbols:
-            app.state.symbols = await find_correct_symbols(exchange)
-            await asyncio.sleep(5)
-            continue
-
         for sym in app.state.symbols:
             side, entry = await get_signal(sym)
             if side:
                 current_time = time.time()
                 signal_key = f"{sym}_{side}"
                 
-                # منع تكرار نفس العملة لمدة 10 دقائق
-                if signal_key not in app.state.sent_signals or (current_time - app.state.sent_signals[signal_key]) > 600:
+                # منع التكرار لمدة 15 دقيقة (900 ثانية) لعدم إزعاج المشتركين
+                if signal_key not in app.state.sent_signals or (current_time - app.state.sent_signals[signal_key]) > 900:
                     app.state.sent_signals[signal_key] = current_time
                     
-                    signal_data = {
-                        "symbol": sym.split(':')[0].split('/')[0] + "/USDT",
-                        "side": side,
-                        "entry": round(entry, 5),
-                        "tp": round(entry * 1.006, 5) if side == "LONG" else round(entry * 0.994, 5),
-                        "sl": round(entry * 0.995, 5) if side == "LONG" else round(entry * 1.005, 5),
-                        "leverage": "20x"
-                    }
-                    await manager.broadcast(json.dumps(signal_data))
-                    print(f"🚀 صفقة فورية: {sym} | {side}")
-        
-        # فحص فائق السرعة كل 5 ثوانٍ
-        await asyncio.sleep(5) 
+                    symbol_clean = sym.split(':')[0].split('/')[0] + "/USDT"
+                    tp = round(entry * 1.006, 5) if side == "LONG" else round(entry * 0.994, 5)
+                    sl = round(entry * 0.995, 5) if side == "LONG" else round(entry * 1.005, 5)
 
-@app.get("/", response_class=HTMLResponse)
-async def get_ui():
-    return """
-    <!DOCTYPE html>
-    <html lang="ar" dir="rtl">
-    <head>
-        <meta charset="UTF-8">
-        <title>Turbo Scalper | النسخة المصححة</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <style>
-            body { background: #0b0e11; font-family: sans-serif; color: white; }
-            .card { animation: slideIn 0.2s ease-out; background: #1a1e23; }
-            @keyframes slideIn { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: scale(1); } }
-        </style>
-    </head>
-    <body class="p-4">
-        <div class="max-w-xl mx-auto">
-            <header class="flex justify-between items-center mb-6 border-b border-gray-800 pb-4">
-                <h1 class="text-xl font-bold text-yellow-500 font-mono italic">TURBO-RADAR v4.1</h1>
-                <div class="flex items-center gap-2 text-xs">
-                    <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
-                    <span class="text-green-400 font-bold uppercase tracking-widest text-[10px]">Corrected Symbols Mode</span>
-                </div>
-            </header>
-            <div id="signals" class="space-y-3">
-                <div id="empty" class="text-center py-20 text-gray-700 italic">بانتظار العملات الصحيحة...</div>
-            </div>
-        </div>
-        <script>
-            const ws = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`);
-            ws.onmessage = (e) => {
-                document.getElementById('empty').style.display = 'none';
-                const d = JSON.parse(e.data);
-                const list = document.getElementById('signals');
-                const isL = d.side === 'LONG';
-                
-                if (list.children.length > 20) list.removeChild(list.lastChild);
+                    # إعداد نص الرسالة بتنسيق احترافي للقناة
+                    msg = (
+                        f"📊 <b>إشارة تداول جديدة</b>\n"
+                        f"━━━━━━━━━━━━━━\n"
+                        f"<b>العملة:</b> <code>{symbol_clean}</code>\n"
+                        f"<b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
+                        f"<b>الدخول:</b> <code>{round(entry, 5)}</code>\n"
+                        f"<b>الهدف (TP):</b> <code>{tp}</code>\n"
+                        f"<b>الاستوب (SL):</b> <code>{sl}</code>\n"
+                        f"━━━━━━━━━━━━━━\n"
+                        f"⚡ <b>الرافعة:</b> 20x | <b>الفريم:</b> 5m\n"
+                        f"🕒 {time.strftime('%H:%M:%S')}"
+                    )
+                    
+                    # الإرسال للموقع وللقناة
+                    await manager.broadcast(json.dumps({"symbol": symbol_clean, "side": side, "entry": round(entry, 5), "tp": tp, "sl": sl}))
+                    await send_telegram_msg(msg)
+                    print(f"✅ تم النشر في القناة: {symbol_clean}")
 
-                const html = `
-                <div class="card p-5 rounded-2xl border-l-4 ${isL ? 'border-green-500' : 'border-red-500'} shadow-2xl mb-3">
-                    <div class="flex justify-between items-center mb-3">
-                        <span class="font-black text-xl uppercase">${d.symbol}</span>
-                        <span class="text-[10px] px-3 py-1 rounded-full font-black ${isL ? 'bg-green-500 text-black' : 'bg-red-500 text-white'}">${d.side}</span>
-                    </div>
-                    <div class="grid grid-cols-3 gap-2 text-center bg-black/40 p-3 rounded-xl border border-gray-800">
-                        <div><p class="text-[9px] text-gray-500 uppercase">Entry</p><p class="text-yellow-500 font-bold">${d.entry}</p></div>
-                        <div><p class="text-[9px] text-gray-500 uppercase">Target</p><p class="text-green-500 font-bold">${d.tp}</p></div>
-                        <div><p class="text-[9px] text-gray-500 uppercase">Stop</p><p class="text-red-500 font-bold">${d.sl}</p></div>
-                    </div>
-                </div>`;
-                list.insertAdjacentHTML('afterbegin', html);
-            };
-        </script>
-    </body>
-    </html>
-    """
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+        await asyncio.sleep(5)
