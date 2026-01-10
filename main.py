@@ -9,18 +9,27 @@ from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 import time
 
-# --- نظام اختيار العملات (تم إضافة DOGE وحذف PEPE) ---
+# --- نظام اختيار العملات الدقيق (حل مشكلة BABYDOGE و ACTSOL) ---
 async def find_correct_symbols(exchange):
     await exchange.load_markets()
-    # القائمة المحدثة حسب طلبك
+    # القائمة المطلوبة
     targets = ['BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', 'ADA', 'NEAR', 'XRP']
     all_symbols = exchange.symbols
     found_symbols = []
+    
     for target in targets:
-        match = [s for s in all_symbols if target in s and 'USDT' in s]
-        if match:
-            found_symbols.append(match[0])
-            print(f"✅ مراقبة نشطة: {match[0]}")
+        # البحث عن الرمز الدقيق لعقود الفيوتشر (Swap)
+        # في KuCoin التنسيق غالباً يكون SYMBOL/USDT:USDT أو SYMBOL/USDT
+        exact_pattern = f"{target}/USDT:USDT"
+        simple_pattern = f"{target}/USDT"
+        
+        if exact_pattern in all_symbols:
+            found_symbols.append(exact_pattern)
+            print(f"✅ مراقبة دقيقة (Swap): {exact_pattern}")
+        elif simple_pattern in all_symbols:
+            found_symbols.append(simple_pattern)
+            print(f"✅ مراقبة دقيقة (Standard): {simple_pattern}")
+            
     return found_symbols
 
 @asynccontextmanager
@@ -33,6 +42,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 app = FastAPI(lifespan=lifespan)
+# ضبط المنصة
 exchange = ccxt.kucoin({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 class ConnectionManager:
@@ -52,7 +62,7 @@ manager = ConnectionManager()
 
 async def get_signal(symbol):
     try:
-        # جلب بيانات الشموع (فريم 5 دقائق)
+        # جلب البيانات لآخر 50 شمعة
         bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=50)
         if not bars: return None, None
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
@@ -63,7 +73,7 @@ async def get_signal(symbol):
         last = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # استراتيجية التقاطع السريع
+        # استراتيجية المضاربة السريعة
         if last['close'] > last['ema'] and prev['rsi'] < 50 and last['rsi'] >= 50:
             return "LONG", last['close']
         
@@ -74,7 +84,7 @@ async def get_signal(symbol):
     except: return None, None
 
 async def start_scanning(app):
-    print("⚡ رادار السرعة القصوى بدأ العمل...")
+    print("⚡ رادار السرعة القصوى (V4.1) بدأ العمل...")
     while True:
         if not app.state.symbols:
             app.state.symbols = await find_correct_symbols(exchange)
@@ -87,12 +97,12 @@ async def start_scanning(app):
                 current_time = time.time()
                 signal_key = f"{sym}_{side}"
                 
-                # منع التكرار لمدة 10 دقائق للسماح بصفقات جديدة لنفس العملة لاحقاً
+                # منع تكرار نفس العملة لمدة 10 دقائق
                 if signal_key not in app.state.sent_signals or (current_time - app.state.sent_signals[signal_key]) > 600:
                     app.state.sent_signals[signal_key] = current_time
                     
                     signal_data = {
-                        "symbol": sym.split(':')[0].replace('-', '/'),
+                        "symbol": sym.split(':')[0].split('/')[0] + "/USDT",
                         "side": side,
                         "entry": round(entry, 5),
                         "tp": round(entry * 1.006, 5) if side == "LONG" else round(entry * 0.994, 5),
@@ -100,9 +110,9 @@ async def start_scanning(app):
                         "leverage": "20x"
                     }
                     await manager.broadcast(json.dumps(signal_data))
-                    print(f"🚀 صفقة فورية مكتشفة: {sym} | {side}")
+                    print(f"🚀 صفقة فورية: {sym} | {side}")
         
-        # تم تقليل وقت الانتظار لـ 5 ثوانٍ فقط لزيادة السرعة
+        # فحص فائق السرعة كل 5 ثوانٍ
         await asyncio.sleep(5) 
 
 @app.get("/", response_class=HTMLResponse)
@@ -112,7 +122,7 @@ async def get_ui():
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <title>Turbo Scalper | سرعة فائقة</title>
+        <title>Turbo Scalper | النسخة المصححة</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
             body { background: #0b0e11; font-family: sans-serif; color: white; }
@@ -123,14 +133,14 @@ async def get_ui():
     <body class="p-4">
         <div class="max-w-xl mx-auto">
             <header class="flex justify-between items-center mb-6 border-b border-gray-800 pb-4">
-                <h1 class="text-xl font-bold text-yellow-500 font-mono italic">TURBO-RADAR v4.0</h1>
+                <h1 class="text-xl font-bold text-yellow-500 font-mono italic">TURBO-RADAR v4.1</h1>
                 <div class="flex items-center gap-2 text-xs">
-                    <span class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
-                    <span class="text-red-400 font-bold uppercase tracking-widest">High Speed Mode</span>
+                    <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                    <span class="text-green-400 font-bold uppercase tracking-widest text-[10px]">Corrected Symbols Mode</span>
                 </div>
             </header>
             <div id="signals" class="space-y-3">
-                <div id="empty" class="text-center py-20 text-gray-700 italic">جاري صيد الفرص بسرعة فائقة...</div>
+                <div id="empty" class="text-center py-20 text-gray-700 italic">بانتظار العملات الصحيحة...</div>
             </div>
         </div>
         <script>
@@ -161,13 +171,6 @@ async def get_ui():
     </body>
     </html>
     """
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        while True: await websocket.receive_text()
-    except WebSocketDisconnect: manager.disconnect(websocket)
 
 if __name__ == "__main__":
     import uvicorn
