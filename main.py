@@ -8,13 +8,27 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 
-# --- نظام جلب كل عملات الفيوتشر في المنصة ---
+# --- نظام جلب كل عملات الفيوتشر الذكي ---
 async def get_all_futures_symbols(exchange):
     try:
-        await exchange.load_markets()
-        # جلب كل الرموز التي تعمل بنظام الـ Swap (الفيوتشر) وتنتهي بـ USDT
-        all_symbols = [s for s in exchange.symbols if ':USDT' in s]
+        markets = await exchange.load_markets()
+        # البحث عن كل العملات التي نوعها 'swap' (فيوتشر) وتتعامل بالـ USDT
+        all_symbols = [
+            symbol for symbol, market in markets.items() 
+            if market.get('swap') and ('USDT' in symbol)
+        ]
+        
+        # إذا لم يجد شيئاً، نجرب البحث عن العملات الخطية (Linear)
+        if not all_symbols:
+            all_symbols = [
+                symbol for symbol, market in markets.items() 
+                if market.get('linear') and ('USDT' in symbol)
+            ]
+
         print(f"✅ تم اكتشاف {len(all_symbols)} عملة فيوتشر للمراقبة.")
+        if len(all_symbols) == 0:
+            print(f"⚠️ عينة من الرموز المتاحة للفحص: {list(markets.keys())[:10]}")
+            
         return all_symbols
     except Exception as e:
         print(f"❌ خطأ في تحميل الأسواق: {e}")
@@ -22,6 +36,7 @@ async def get_all_futures_symbols(exchange):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # تحميل العملات عند البدء
     app.state.symbols = await get_all_futures_symbols(exchange)
     app.state.sent_signals = {} 
     task = asyncio.create_task(start_scanning(app))
@@ -30,7 +45,11 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 app = FastAPI(lifespan=lifespan)
-exchange = ccxt.kucoin({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+# ضبط المنصة لتكون متوافقة تماماً مع الفيوتشر
+exchange = ccxt.kucoin({
+    'enableRateLimit': True, 
+    'options': {'defaultType': 'swap'}
+})
 
 class ConnectionManager:
     def __init__(self):
@@ -47,36 +66,30 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# --- استراتيجية "صياد الفرص" السريعة ---
 async def get_signal(symbol):
     try:
-        # جلب بيانات أقل (30 شمعة) لزيادة سرعة المسح الشامل
+        # جلب البيانات
         bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=30)
         if not bars or len(bars) < 20: return None, None
         
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        
-        # مؤشرات حساسة جداً (Scalping)
-        df['ema'] = ta.ema(df['close'], length=10) # سريع جداً
-        df['rsi'] = ta.rsi(df['close'], length=7)   # حساس جداً
+        df['ema'] = ta.ema(df['close'], length=10)
+        df['rsi'] = ta.rsi(df['close'], length=7)
         
         last = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # شرط الشراء: السعر فوق الـ EMA والـ RSI كسر الـ 50 صعوداً
+        # استراتيجية سريعة جداً للمضاربة
         if last['close'] > last['ema'] and prev['rsi'] < 50 and last['rsi'] >= 50:
             return "LONG", last['close']
-        
-        # شرط البيع: السعر تحت الـ EMA والـ RSI كسر الـ 50 هبوطاً
         if last['close'] < last['ema'] and prev['rsi'] > 50 and last['rsi'] <= 50:
             return "SHORT", last['close']
             
         return None, None
-    except:
-        return None, None
+    except: return None, None
 
 async def start_scanning(app):
-    print("🚀 رادار المسح الشامل بدأ العمل على كل العملات...")
+    print("🚀 الرادار بدأ المسح الشامل...")
     while True:
         if not app.state.symbols:
             app.state.symbols = await get_all_futures_symbols(exchange)
@@ -86,7 +99,7 @@ async def start_scanning(app):
         for sym in app.state.symbols:
             side, entry = await get_signal(sym)
             if side:
-                # منع التكرار (إشارة واحدة كل 20 دقيقة لنفس العملة)
+                # منع التكرار لمدة 20 دقيقة
                 signal_key = f"{sym}_{side}"
                 current_time = asyncio.get_event_loop().time()
                 
@@ -102,13 +115,12 @@ async def start_scanning(app):
                         "leverage": "20x"
                     }
                     await manager.broadcast(json.dumps(signal_data))
-                    print(f"🔥 إشارة مكتشفة: {sym}")
+                    print(f"🔥 تم إرسال صفقة: {sym}")
             
-            # تأخير بسيط جداً (0.1 ثانية) بين كل عملة عشان ما يحصل حظر من المنصة
-            await asyncio.sleep(0.1) 
+            # سرعة المسح (0.05 ثانية بين كل عملة لمسح مئات العملات بسرعة)
+            await asyncio.sleep(0.05) 
         
-        # بعد ما يخلص كل العملات، ينتظر دقيقة ويبدأ من جديد
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)
 
 @app.get("/", response_class=HTMLResponse)
 async def get_ui():
@@ -117,7 +129,7 @@ async def get_ui():
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <title>Full Market Scalper | مسح شامل</title>
+        <title>Full Scalper | رادار شامل</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
             body { background: #0b0e11; color: white; font-family: sans-serif; }
@@ -125,16 +137,16 @@ async def get_ui():
             @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         </style>
     </head>
-    <body class="p-4 md:p-8">
+    <body class="p-4 md:p-8 text-right">
         <div class="max-w-2xl mx-auto">
             <header class="flex justify-between items-center mb-8 border-b border-gray-800 pb-4">
-                <h1 class="text-2xl font-black text-blue-500 italic">FULL-SCAN RADAR 🛰️</h1>
+                <h1 class="text-2xl font-black text-blue-500 italic">FULL MARKET RADAR 🛰️</h1>
                 <div class="bg-blue-900/20 px-3 py-1 rounded-full border border-blue-500/30">
-                    <span class="text-[10px] text-blue-400 font-bold animate-pulse font-mono">SCANNING ALL SYMBOLS</span>
+                    <span class="text-[10px] text-blue-400 font-bold animate-pulse">SCANNING ALL SYMBOLS</span>
                 </div>
             </header>
             <div id="signals" class="grid gap-4">
-                <div id="empty" class="text-center py-20 text-gray-700">جاري مسح أكثر من 100 عملة... الصفقات ستظهر هنا</div>
+                <div id="empty" class="text-center py-20 text-gray-700 italic">جاري جلب بيانات السوق الشاملة...</div>
             </div>
         </div>
         <script>
@@ -144,12 +156,11 @@ async def get_ui():
                 const d = JSON.parse(e.data);
                 const list = document.getElementById('signals');
                 const isL = d.side === 'LONG';
-                
-                const card = `
-                <div class="card p-5 rounded-2xl border-r-8 ${isL ? 'border-green-500' : 'border-red-500'} shadow-2xl">
+                const html = `
+                <div class="card p-5 rounded-2xl border-l-8 ${isL ? 'border-green-500' : 'border-red-500'} shadow-2xl">
                     <div class="flex justify-between items-center mb-3">
                         <span class="font-black text-xl tracking-tighter">${d.symbol}</span>
-                        <span class="text-xs px-3 py-1 rounded-lg font-bold ${isL ? 'bg-green-500 text-black' : 'bg-red-500 text-white'}">${d.side} 20X</span>
+                        <span class="text-xs px-3 py-1 rounded-lg font-bold ${isL ? 'bg-green-500 text-black' : 'bg-red-500 text-white'}">${d.side}</span>
                     </div>
                     <div class="grid grid-cols-3 gap-2">
                         <div class="bg-black/30 p-2 rounded-lg text-center">
@@ -167,7 +178,7 @@ async def get_ui():
                     </div>
                 </div>`;
                 list.insertAdjacentHTML('afterbegin', card);
-                if (list.children.length > 20) list.removeChild(list.lastChild);
+                if (list.children.length > 30) list.removeChild(list.lastChild);
             };
         </script>
     </body>
