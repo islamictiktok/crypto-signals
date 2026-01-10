@@ -4,3 +4,4 @@ ccxt
 pandas
 pandas_ta
 websockets
+httpx
