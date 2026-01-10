@@ -8,48 +8,29 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 
-# --- نظام جلب كل عملات الفيوتشر الذكي ---
-async def get_all_futures_symbols(exchange):
-    try:
-        markets = await exchange.load_markets()
-        # البحث عن كل العملات التي نوعها 'swap' (فيوتشر) وتتعامل بالـ USDT
-        all_symbols = [
-            symbol for symbol, market in markets.items() 
-            if market.get('swap') and ('USDT' in symbol)
-        ]
-        
-        # إذا لم يجد شيئاً، نجرب البحث عن العملات الخطية (Linear)
-        if not all_symbols:
-            all_symbols = [
-                symbol for symbol, market in markets.items() 
-                if market.get('linear') and ('USDT' in symbol)
-            ]
-
-        print(f"✅ تم اكتشاف {len(all_symbols)} عملة فيوتشر للمراقبة.")
-        if len(all_symbols) == 0:
-            print(f"⚠️ عينة من الرموز المتاحة للفحص: {list(markets.keys())[:10]}")
-            
-        return all_symbols
-    except Exception as e:
-        print(f"❌ خطأ في تحميل الأسواق: {e}")
-        return []
+async def find_correct_symbols(exchange):
+    await exchange.load_markets()
+    # كثرنا العملات هنا عشان الصفقات تزيد
+    targets = ['BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', 'PEPE', 'ADA', 'NEAR', 'XRP']
+    all_symbols = exchange.symbols
+    found_symbols = []
+    for target in targets:
+        match = [s for s in all_symbols if target in s and 'USDT' in s]
+        if match:
+            found_symbols.append(match[0])
+            print(f"✅ مراقبة: {match[0]}")
+    return found_symbols
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # تحميل العملات عند البدء
-    app.state.symbols = await get_all_futures_symbols(exchange)
-    app.state.sent_signals = {} 
+    app.state.symbols = await find_correct_symbols(exchange)
     task = asyncio.create_task(start_scanning(app))
     yield
     await exchange.close()
     task.cancel()
 
 app = FastAPI(lifespan=lifespan)
-# ضبط المنصة لتكون متوافقة تماماً مع الفيوتشر
-exchange = ccxt.kucoin({
-    'enableRateLimit': True, 
-    'options': {'defaultType': 'swap'}
-})
+exchange = ccxt.kucoin({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 class ConnectionManager:
     def __init__(self):
@@ -68,60 +49,55 @@ manager = ConnectionManager()
 
 async def get_signal(symbol):
     try:
-        # جلب البيانات
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=30)
-        if not bars or len(bars) < 20: return None, None
-        
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=50)
+        if not bars: return None, None
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        df['ema'] = ta.ema(df['close'], length=10)
-        df['rsi'] = ta.rsi(df['close'], length=7)
+        
+        # مؤشرات سريعة جداً للمضاربة
+        df['ema'] = ta.ema(df['close'], length=20)
+        df['rsi'] = ta.rsi(df['close'], length=10) # RSI قصير المدى لسرعة الإشارة
         
         last = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # استراتيجية سريعة جداً للمضاربة
+        # استراتيجية الـ Scalping السريعة:
+        # شراء: السعر فوق EMA و RSI قطع خط الـ 50 للأعلى
         if last['close'] > last['ema'] and prev['rsi'] < 50 and last['rsi'] >= 50:
             return "LONG", last['close']
+        
+        # بيع: السعر تحت EMA و RSI قطع خط الـ 50 للأسفل
         if last['close'] < last['ema'] and prev['rsi'] > 50 and last['rsi'] <= 50:
             return "SHORT", last['close']
             
         return None, None
-    except: return None, None
+    except Exception as e:
+        return None, None
 
 async def start_scanning(app):
-    print("🚀 الرادار بدأ المسح الشامل...")
+    print("🔥 رادار المضاربة السريعة (Scalper) بدأ العمل...")
     while True:
         if not app.state.symbols:
-            app.state.symbols = await get_all_futures_symbols(exchange)
-            await asyncio.sleep(10)
+            app.state.symbols = await find_correct_symbols(exchange)
+            await asyncio.sleep(5)
             continue
 
         for sym in app.state.symbols:
             side, entry = await get_signal(sym)
             if side:
-                # منع التكرار لمدة 20 دقيقة
-                signal_key = f"{sym}_{side}"
-                current_time = asyncio.get_event_loop().time()
-                
-                if signal_key not in app.state.sent_signals or (current_time - app.state.sent_signals[signal_key]) > 1200:
-                    app.state.sent_signals[signal_key] = current_time
-                    
-                    signal_data = {
-                        "symbol": sym.split(':')[0].replace('-', '/'),
-                        "side": side,
-                        "entry": round(entry, 5),
-                        "tp": round(entry * 1.008, 5) if side == "LONG" else round(entry * 0.992, 5),
-                        "sl": round(entry * 0.994, 5) if side == "LONG" else round(entry * 1.006, 5),
-                        "leverage": "20x"
-                    }
-                    await manager.broadcast(json.dumps(signal_data))
-                    print(f"🔥 تم إرسال صفقة: {sym}")
-            
-            # سرعة المسح (0.05 ثانية بين كل عملة لمسح مئات العملات بسرعة)
-            await asyncio.sleep(0.05) 
+                signal_data = {
+                    "symbol": sym.split(':')[0].replace('-', '/'),
+                    "side": side,
+                    "entry": round(entry, 5),
+                    "tp": round(entry * 1.006, 5) if side == "LONG" else round(entry * 0.994, 5), # أهداف قريبة 0.6%
+                    "sl": round(entry * 0.995, 5) if side == "LONG" else round(entry * 1.005, 5), # ستوب قريب 0.5%
+                    "leverage": "20x"
+                }
+                await manager.broadcast(json.dumps(signal_data))
+                print(f"🚀 صفقة فورية: {sym}")
         
-        await asyncio.sleep(30)
+        await asyncio.sleep(20) # فحص كل 20 ثانية (أسرع بمرتين من قبل)
 
+# واجهة الموقع (نفس الكود السابق مع تحسين بسيط في الألوان)
 @app.get("/", response_class=HTMLResponse)
 async def get_ui():
     return """
@@ -129,24 +105,25 @@ async def get_ui():
     <html lang="ar" dir="rtl">
     <head>
         <meta charset="UTF-8">
-        <title>Full Scalper | رادار شامل</title>
+        <title>Scalper Pro | صفقات سريعة</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
-            body { background: #0b0e11; color: white; font-family: sans-serif; }
+            body { background: #0b0e11; font-family: sans-serif; color: white; }
             .card { animation: slideIn 0.3s ease-out; background: #1a1e23; }
-            @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+            @keyframes slideIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
         </style>
     </head>
-    <body class="p-4 md:p-8 text-right">
-        <div class="max-w-2xl mx-auto">
-            <header class="flex justify-between items-center mb-8 border-b border-gray-800 pb-4">
-                <h1 class="text-2xl font-black text-blue-500 italic">FULL MARKET RADAR 🛰️</h1>
-                <div class="bg-blue-900/20 px-3 py-1 rounded-full border border-blue-500/30">
-                    <span class="text-[10px] text-blue-400 font-bold animate-pulse">SCANNING ALL SYMBOLS</span>
+    <body class="p-4">
+        <div class="max-w-xl mx-auto">
+            <header class="flex justify-between items-center mb-6 border-b border-gray-800 pb-4">
+                <h1 class="text-xl font-bold text-blue-400 font-mono">SCALPER-RADAR v3.0</h1>
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 bg-green-500 rounded-full animate-ping"></span>
+                    <span class="text-[10px] text-gray-400">FAST SCANNING</span>
                 </div>
             </header>
-            <div id="signals" class="grid gap-4">
-                <div id="empty" class="text-center py-20 text-gray-700 italic">جاري جلب بيانات السوق الشاملة...</div>
+            <div id="signals" class="space-y-3">
+                <div id="empty" class="text-center py-20 text-gray-700">جاري صيد الصفقات...</div>
             </div>
         </div>
         <script>
@@ -154,32 +131,25 @@ async def get_ui():
             ws.onmessage = (e) => {
                 document.getElementById('empty').style.display = 'none';
                 const d = JSON.parse(e.data);
-                const list = document.getElementById('signals');
                 const isL = d.side === 'LONG';
                 const html = `
-                <div class="card p-5 rounded-2xl border-l-8 ${isL ? 'border-green-500' : 'border-red-500'} shadow-2xl">
-                    <div class="flex justify-between items-center mb-3">
-                        <span class="font-black text-xl tracking-tighter">${d.symbol}</span>
-                        <span class="text-xs px-3 py-1 rounded-lg font-bold ${isL ? 'bg-green-500 text-black' : 'bg-red-500 text-white'}">${d.side}</span>
+                <div class="card p-4 rounded-xl border-r-4 ${isL ? 'border-green-500' : 'border-red-500'} shadow-lg mb-3">
+                    <div class="flex justify-between items-center mb-2">
+                        <span class="font-bold text-lg">${d.symbol}</span>
+                        <span class="text-[10px] px-2 py-0.5 rounded ${isL ? 'bg-green-500/20 text-green-500' : 'bg-red-500/20 text-red-500'}">${d.side}</span>
                     </div>
-                    <div class="grid grid-cols-3 gap-2">
-                        <div class="bg-black/30 p-2 rounded-lg text-center">
-                            <p class="text-[8px] text-gray-500 uppercase">Entry</p>
-                            <p class="text-yellow-500 font-bold text-sm">${d.entry}</p>
-                        </div>
-                        <div class="bg-black/30 p-2 rounded-lg text-center">
-                            <p class="text-[8px] text-gray-500 uppercase">Target</p>
-                            <p class="text-green-500 font-bold text-sm">${d.tp}</p>
-                        </div>
-                        <div class="bg-black/30 p-2 rounded-lg text-center">
-                            <p class="text-[8px] text-gray-500 uppercase">Stop</p>
-                            <p class="text-red-500 font-bold text-sm">${d.sl}</p>
-                        </div>
+                    <div class="flex justify-between text-center bg-black/20 p-2 rounded-lg">
+                        <div><p class="text-[8px] text-gray-500">ENTRY</p><p class="text-blue-400 font-bold text-xs">${d.entry}</p></div>
+                        <div><p class="text-[8px] text-gray-400">TARGET</p><p class="text-green-500 font-bold text-xs">${d.tp}</p></div>
+                        <div><p class="text-[8px] text-gray-400">STOP</p><p class="text-red-500 font-bold text-xs">${d.sl}</p></div>
                     </div>
                 </div>`;
-                list.insertAdjacentHTML('afterbegin', card);
-                if (list.children.length > 30) list.removeChild(list.lastChild);
+                document.getElementById('signals').insertAdjacentHTML('afterbegin', html);
+                if(window.Notification && Notification.permission === 'granted') {
+                    new Notification(`صفقة جديدة: ${d.symbol}`, { body: `${d.side} بسعر ${d.entry}` });
+                }
             };
+            Notification.requestPermission();
         </script>
     </body>
     </html>
@@ -194,5 +164,4 @@ async def websocket_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
