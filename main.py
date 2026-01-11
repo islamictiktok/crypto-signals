@@ -69,71 +69,82 @@ app = FastAPI(lifespan=lifespan)
 exchange = ccxt.kucoin({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 # ==========================================
-# استراتيجية القناص الاحترافية (Dynamic RR)
+# استراتيجية القناص الاستراتيجي (1H + EMA 200 + BB)
 # ==========================================
 async def get_signal(symbol):
     try:
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=50)
+        # جلب 250 شمعة لفريم الساعة
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=250)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        df['ema50'] = ta.ema(df['close'], length=50)
+        
+        # 1. فلتر الاتجاه العام
+        df['ema200'] = ta.ema(df['close'], length=200)
+        
+        # 2. حدود البولنجر (Bollinger Bands)
+        bb = ta.bbands(df['close'], length=20, std=2)
+        df = pd.concat([df, bb], axis=1)
+        
         last = df.iloc[-1]
         
         body = abs(last['open'] - last['close'])
         upper_wick = last['high'] - max(last['open'], last['close'])
         lower_wick = min(last['open'], last['close']) - last['low']
-        
-        # فلتر السيولة
-        if last['vol'] < df['vol'].tail(10).mean(): return None
-        
         entry = last['close']
         
-        # 🎯 اقتناص ذيل سفلي (LONG)
-        if lower_wick > (body * 2.5) and entry > last['ema50']:
-            sl = last['low'] - (last['low'] * 0.001) # ستوب خلف الذيل بـ 0.1%
+        # 🎯 شروط LONG (اقتناص ذيل سفلي عند قاع البولنجر وفوق EMA 200)
+        if (lower_wick > (body * 2.5) and 
+            entry > last['ema200'] and 
+            last['low'] <= last['BBL_20_2.0']):
+            
+            sl = last['low'] - (last['low'] * 0.001)
             risk = entry - sl
             if risk <= 0: return None
-            return "LONG", entry, sl, entry + (risk * 1.5), entry + (risk * 2.5), entry + (risk * 4.0)
+            return "LONG", entry, sl, entry + (risk * 2), entry + (risk * 3.5), entry + (risk * 5)
 
-        # 🎯 اقتناص ذيل علوي (SHORT)
-        if upper_wick > (body * 2.5) and entry < last['ema50']:
-            sl = last['high'] + (last['high'] * 0.001) # ستوب خلف الذيل بـ 0.1%
+        # 🎯 شروط SHORT (اقتناص ذيل علوي عند قمة البولنجر وتحت EMA 200)
+        if (upper_wick > (body * 2.5) and 
+            entry < last['ema200'] and 
+            last['high'] >= last['BBU_20_2.0']):
+            
+            sl = last['high'] + (last['high'] * 0.001)
             risk = sl - entry
             if risk <= 0: return None
-            return "SHORT", entry, sl, entry - (risk * 1.5), entry - (risk * 2.5), entry - (risk * 4.0)
+            return "SHORT", entry, sl, entry - (risk * 2), entry - (risk * 3.5), entry - (risk * 5)
 
         return None
     except: return None
 
 async def start_scanning(app):
-    print("🛰️ رادار القناص الاحترافي (Dynamic Risk) بدأ العمل...")
+    print("🛰️ رادار القناص الاستراتيجي (1H) بدأ العمل...")
     while True:
         for sym in app.state.symbols:
+            print(f"🔎 Scanning 1H: {sym.split('/')[0]}...")
             result = await get_signal(sym)
             if result:
                 side, entry, sl, tp1, tp2, tp3 = result
                 key = f"{sym}_{side}"
-                if key not in app.state.sent_signals or (time.time() - app.state.sent_signals[key]) > 1800:
+                if key not in app.state.sent_signals or (time.time() - app.state.sent_signals[key]) > 7200:
                     app.state.sent_signals[key] = time.time()
                     app.state.stats["total"] += 1
                     lev = get_recommended_leverage(sym); name = sym.split('/')[0]
                     
-                    msg = (f"🎯 <b>قناص الذيول | نظام ديناميكي</b>\n\n"
+                    msg = (f"💎 <b>إشارة القناص الذهبية (1H)</b>\n\n"
                            f"🪙 <b>العملة:</b> {name}\n"
                            f"📈 <b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
                            f"⚡ <b>الرافعة:</b> <code>{lev}</code>\n"
                            f"📥 <b>الدخول:</b> <code>{format_price(entry)}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
-                           f"🎯 <b>هدف 1 (1.5x):</b> <code>{format_price(tp1)}</code>\n"
-                           f"🎯 <b>هدف 2 (2.5x):</b> <code>{format_price(tp2)}</code>\n"
-                           f"🎯 <b>هدف 3 (4.0x):</b> <code>{format_price(tp3)}</code>\n"
-                           f"🚫 <b>استوب (خلف الذيل):</b> <code>{format_price(sl)}</code>\n"
+                           f"🎯 <b>هدف 1:</b> <code>{format_price(tp1)}</code>\n"
+                           f"🎯 <b>هدف 2:</b> <code>{format_price(tp2)}</code>\n"
+                           f"🎯 <b>هدف 3:</b> <code>{format_price(tp3)}</code>\n"
+                           f"🚫 <b>استوب:</b> <code>{format_price(sl)}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
-                           f"⚖️ <i>توزيع الأهداف بناءً على حجم المخاطرة</i>")
+                           f"⚖️ <i>فلتر: EMA 200 + Bollinger Rejection</i>")
                     
                     mid = await send_telegram_msg(msg)
                     if mid: app.state.active_trades[sym] = {"side":side,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl":sl,"msg_id":mid,"hit":[]}
             await asyncio.sleep(0.3)
-        await asyncio.sleep(20)
+        await asyncio.sleep(60) # فحص كل دقيقة لفريم الساعة
 
 async def monitor_trades(app):
     while True:
@@ -144,17 +155,17 @@ async def monitor_trades(app):
                 for target in ["tp1", "tp2", "tp3"]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            await reply_telegram_msg(f"✅ <b>تحقق هدف القناص {target.upper()}!</b>", trade["msg_id"])
+                            await reply_telegram_msg(f"🔥 <b>تم اكتساح الهدف {target.upper()} بنجاح!</b>", trade["msg_id"])
                             trade["hit"].append(target)
                             if target == "tp1": app.state.stats["wins"] += 1
                 
                 if (s == "LONG" and p <= trade["sl"]) or (s == "SHORT" and p >= trade["sl"]):
                     app.state.stats["losses"] += 1
-                    await reply_telegram_msg(f"❌ <b>ضرب الاستوب (SL)</b>\nالخسارة كانت محسوبة خلف الذيل.", trade["msg_id"])
+                    await reply_telegram_msg(f"❌ <b>ضرب الاستوب (SL)</b>", trade["msg_id"])
                     del app.state.active_trades[sym]
                 elif "tp3" in trade["hit"]: del app.state.active_trades[sym]
             except: pass
-        await asyncio.sleep(10)
+        await asyncio.sleep(15)
 
 async def daily_report_task(app):
     while True:
@@ -162,12 +173,12 @@ async def daily_report_task(app):
         if now.hour == 23 and now.minute == 59:
             stats = app.state.stats
             wr = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
-            await send_telegram_msg(f"📊 <b>إحصائيات القناص الديناميكي</b>\n━━━━━━━━━━━━━━\n✅ رابحة: {stats['wins']}\n❌ خاسرة: {stats['losses']}\n📝 الإجمالي: {stats['total']}\n🎯 الدقة: {wr:.1f}%")
+            await send_telegram_msg(f"📊 <b>تقرير القناص الاستراتيجي (1H)</b>\n━━━━━━━━━━━━━━\n✅ رابحة: {stats['wins']}\n❌ خاسرة: {stats['losses']}\n🎯 الدقة: {wr:.1f}%")
             app.state.stats = {"total": 0, "wins": 0, "losses": 0}; await asyncio.sleep(70)
         await asyncio.sleep(30)
 
 @app.get("/")
-async def home(): return {"status": "Wick Sniper Dynamic is Active"}
+async def home(): return {"status": "Strategic Sniper 1H is Active"}
 
 if __name__ == "__main__":
     import uvicorn
