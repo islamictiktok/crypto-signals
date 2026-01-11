@@ -69,64 +69,39 @@ app = FastAPI(lifespan=lifespan)
 exchange = ccxt.kucoin({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 # ==========================================
-# استراتيجية الـ 15 دقيقة المطورة (Triple Confirm)
+# استراتيجية RSI + ATR (معدل الذبذبة والزخم)
 # ==========================================
 async def get_signal(symbol):
     try:
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=210)
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # المتوسطات الأساسية
-        df['ema9'] = ta.ema(df['close'], length=9)
-        df['ema21'] = ta.ema(df['close'], length=21)
-        df['ema200'] = ta.ema(df['close'], length=200)
         df['rsi'] = ta.rsi(df['close'], length=14)
-        df['vol_sma'] = ta.sma(df['vol'], length=20)
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        df['ema50'] = ta.ema(df['close'], length=50) # فلتر الاتجاه
         
         last = df.iloc[-1]
         prev = df.iloc[-2]
         entry = last['close']
-        
-        # حسابات الشمعة (البرايس أكشن)
-        body = abs(last['open'] - last['close'])
-        upper_wick = last['high'] - max(last['open'], last['close'])
-        lower_wick = min(last['open'], last['close']) - last['low']
-        
-        # فلتر السيولة
-        vol_ok = last['vol'] > last['vol_sma']
+        atr_val = last['atr']
 
-        # 🎯 إشارة LONG:
-        # 1. السعر فوق EMA 200 (اتجاه صاعد)
-        # 2. ذيل سفلي قوي (رفض) أو تقاطع EMA 9/21 صعوداً
-        # 3. RSI فوق 52 (زخم)
-        if entry > last['ema200'] and vol_ok:
-            is_pin = lower_wick > (body * 2.0)
-            is_cross = last['ema9'] > last['ema21'] and prev['ema9'] <= prev['ema21']
-            if (is_pin or is_cross) and last['rsi'] > 52:
-                sl = min(last['low'], last['ema21']) - (entry * 0.001)
-                risk = entry - sl
-                return "LONG", entry, sl, entry + (risk * 1.5), entry + (risk * 3)
+        # 🎯 إشارة LONG: ارتداد من تحت 35 والسعر فوق الـ EMA 50
+        if prev['rsi'] < 35 and last['rsi'] > 35 and entry > last['ema50']:
+            sl = entry - (atr_val * 1.5)
+            return "LONG", entry, sl, entry + (atr_val * 1.5), entry + (atr_val * 3.0)
 
-        # 🎯 إشارة SHORT:
-        # 1. السعر تحت EMA 200 (اتجاه هابط)
-        # 2. ذيل علوي قوي (رفض) أو تقاطع EMA 9/21 هبوطاً
-        # 3. RSI تحت 48 (زخم)
-        if entry < last['ema200'] and vol_ok:
-            is_pin = upper_wick > (body * 2.0)
-            is_cross = last['ema9'] < last['ema21'] and prev['ema9'] >= prev['ema21']
-            if (is_pin or is_cross) and last['rsi'] < 48:
-                sl = max(last['high'], last['ema21']) + (entry * 0.001)
-                risk = sl - entry
-                return "SHORT", entry, sl, entry - (risk * 1.5), entry - (risk * 3)
+        # 🎯 إشارة SHORT: ارتداد من فوق 65 والسعر تحت الـ EMA 50
+        if prev['rsi'] > 65 and last['rsi'] < 65 and entry < last['ema50']:
+            sl = entry + (atr_val * 1.5)
+            return "SHORT", entry, sl, entry - (atr_val * 1.5), entry - (atr_val * 3.0)
 
         return None
     except: return None
 
 async def start_scanning(app):
-    print("🛰️ رادار الـ 15 دقيقة المطور يعمل الآن...")
+    print("🛰️ رادار RSI + ATR يعمل الآن بالسرعة القصوى...")
     while True:
         for sym in app.state.symbols:
-            print(f"🔎 Scanning 15m: {sym.split('/')[0]}...")
             res = await get_signal(sym)
             if res:
                 side, entry, sl, tp1, tp2 = res
@@ -136,22 +111,22 @@ async def start_scanning(app):
                     app.state.stats["total"] += 1
                     lev = get_recommended_leverage(sym); name = sym.split('/')[0]
                     
-                    msg = (f"⚡ <b>إشارة 15m مؤكدة</b>\n\n"
+                    msg = (f"💎 <b>اقتناص الزخم (RSI + ATR)</b>\n\n"
                            f"🪙 <b>العملة:</b> {name}\n"
                            f"📈 <b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
                            f"⚡ <b>الرافعة:</b> <code>{lev}</code>\n"
                            f"📥 <b>الدخول:</b> <code>{format_price(entry)}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
-                           f"🎯 <b>هدف 1:</b> <code>{format_price(tp1)}</code>\n"
-                           f"🎯 <b>هدف 2:</b> <code>{format_price(tp2)}</code>\n"
-                           f"🚫 <b>استوب:</b> <code>{format_price(sl)}</code>\n"
+                           f"🎯 <b>هدف 1 (1.5x ATR):</b> <code>{format_price(tp1)}</code>\n"
+                           f"🎯 <b>هدف 2 (3.0x ATR):</b> <code>{format_price(tp2)}</code>\n"
+                           f"🚫 <b>استوب (1.5x ATR):</b> <code>{format_price(sl)}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
-                           f"📊 <i>Filter: EMA 200 + RSI Confirm</i>")
+                           f"📊 <i>نظام ديناميكي يراعي تقلبات العملة</i>")
                     
                     mid = await send_telegram_msg(msg)
                     if mid: app.state.active_trades[sym] = {"side":side,"tp1":tp1,"tp2":tp2,"sl":sl,"msg_id":mid,"hit":[]}
-            await asyncio.sleep(0.15)
-        await asyncio.sleep(10)
+            await asyncio.sleep(0.12)
+        await asyncio.sleep(5)
 
 async def monitor_trades(app):
     while True:
@@ -162,29 +137,29 @@ async def monitor_trades(app):
                 for target in ["tp1", "tp2"]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            await reply_telegram_msg(f"✅ <b>تم إصابة الهدف {target.upper()}!</b>", trade["msg_id"])
+                            await reply_telegram_msg(f"✅ <b>تم إصابة هدف الزخم {target.upper()}!</b>", trade["msg_id"])
                             trade["hit"].append(target)
                             if target == "tp1": app.state.stats["wins"] += 1
                 
                 if (s == "LONG" and p <= trade["sl"]) or (s == "SHORT" and p >= trade["sl"]):
                     app.state.stats["losses"] += 1
-                    await reply_telegram_msg(f"❌ <b>ضرب الاستوب (SL)</b>", trade["msg_id"])
+                    await reply_telegram_msg(f"❌ <b>ضرب الاستوب (ATR SL)</b>", trade["msg_id"])
                     del app.state.active_trades[sym]
                 elif "tp2" in trade["hit"]: del app.state.active_trades[sym]
             except: pass
-        await asyncio.sleep(8)
+        await asyncio.sleep(5)
 
 async def daily_report_task(app):
     while True:
         now = datetime.now()
         if now.hour == 23 and now.minute == 59:
             stats = app.state.stats; wr = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
-            await send_telegram_msg(f"📊 <b>تقرير أداء الـ 15 دقيقة</b>\n━━━━━━━━━━━━━━\n✅ رابحة: {stats['wins']}\n❌ خاسرة: {stats['losses']}\n🎯 الدقة: {wr:.1f}%")
+            await send_telegram_msg(f"📊 <b>تقرير RSI + ATR اليومي</b>\n━━━━━━━━━━━━━━\n✅ رابحة: {stats['wins']}\n❌ خاسرة: {stats['losses']}\n🎯 الدقة: {wr:.1f}%")
             app.state.stats = {"total": 0, "wins": 0, "losses": 0}; await asyncio.sleep(70)
         await asyncio.sleep(30)
 
 @app.get("/")
-async def home(): return {"status": "15m Pro-Sniper Active"}
+async def home(): return {"status": "RSI-ATR Sniper Active"}
 
 if __name__ == "__main__":
     import uvicorn
