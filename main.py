@@ -22,7 +22,7 @@ def format_price(price):
 def get_recommended_leverage(symbol):
     name = symbol.split('/')[0].upper()
     if name in ['BTC', 'ETH']: return "Cross 20x - 50x"
-    elif name in ['PEPE', 'SHIB', 'BONK', 'WIF', 'DOGE']: return "Cross 5x - 10x"
+    elif name in ['PEPE', 'SHIB', 'BONK', 'WIF', 'DOGE']: return "Cross 10x - 15x"
     else: return "Cross 10x - 20x"
 
 async def send_telegram_msg(message):
@@ -34,13 +34,6 @@ async def send_telegram_msg(message):
             if response.status_code == 200: return response.json()['result']['message_id']
         except: pass
     return None
-
-async def reply_telegram_msg(message, reply_to_id):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML", "reply_to_message_id": reply_to_id}
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try: await client.post(url, json=payload)
-        except: pass
 
 # ==========================================
 # قائمة الـ 100 عملة
@@ -60,98 +53,97 @@ async def lifespan(app: FastAPI):
     app.state.stats = {"total": 0, "wins": 0, "losses": 0}
     task1 = asyncio.create_task(start_scanning(app))
     task2 = asyncio.create_task(monitor_trades(app))
-    task3 = asyncio.create_task(daily_report_task(app))
     yield
     await exchange.close()
-    for t in [task1, task2, task3]: t.cancel()
+    task1.cancel()
+    task2.cancel()
 
 app = FastAPI(lifespan=lifespan)
 exchange = ccxt.kucoin({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 # ==========================================
-# استراتيجية EMA Ribbon + PAC + Fractals
+# استراتيجية القنبلة السعرية (Momentum Scalper)
 # ==========================================
 async def get_signal(symbol):
     try:
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. EMA Ribbon
-        df['ema5'] = ta.ema(df['close'], length=5)
-        df['ema10'] = ta.ema(df['close'], length=10)
-        df['ema15'] = ta.ema(df['close'], length=15)
-        df['ema20'] = ta.ema(df['close'], length=20)
+        # TEMA: المتوسط السريع جداً
+        df['tema'] = ta.tema(df['close'], length=9)
+        # EMA 200 لضمان الاتجاه
+        df['ema200'] = ta.ema(df['close'], length=200)
+        # RSI Momentum
+        df['rsi'] = ta.rsi(df['close'], length=14)
+        # سيولة
+        df['vol_sma'] = ta.sma(df['vol'], length=20)
         
-        # 2. PAC (Price Action Channel)
-        df['pac_high'] = ta.ema(df['high'], length=12)
-        df['pac_low'] = ta.ema(df['low'], length=12)
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
         
-        # 3. Bill Williams Fractals
-        fractals = ta.log_return(df['close']).tail(5) # تبسيط لاكتشاف القمم والقيعان
-        df['fractal_up'] = (df['high'] > df['high'].shift(1)) & (df['high'] > df['high'].shift(2)) & \
-                           (df['high'] > df['high'].shift(-1)) & (df['high'] > df['high'].shift(-2))
-        df['fractal_low'] = (df['low'] < df['low'].shift(1)) & (df['low'] < df['low'].shift(2)) & \
-                            (df['low'] < df['low'].shift(-1)) & (df['low'] < df['low'].shift(-2))
+        # فلتر الانفجار: سيولة أعلى بـ 50% من المتوسط
+        explosion = last['vol'] > (last['vol_sma'] * 1.5)
+        
+        # 🟢 إشارة LONG انفجارية:
+        if last['close'] > last['ema200'] and explosion:
+            if last['close'] > last['tema'] and last['rsi'] > 60:
+                sl = last['low'] - (last['close'] * 0.005) # ستوب ضيق 0.5%
+                tp = last['close'] + (last['close'] * 0.01)  # هدف سريع 1%
+                return "LONG", last['close'], sl, tp
 
-        last = df.iloc[-3] # نأخذ الفراكتل المؤكد (يتطلب شمعتين بعده)
-        current = df.iloc[-1]
-        
-        # شرط الشراء (LONG)
-        ribbon_up = current['ema5'] > current['ema10'] > current['ema15'] > current['ema20']
-        above_pac = current['close'] > current['pac_high']
-        if ribbon_up and above_pac and df.iloc[-5:-1]['fractal_low'].any():
-            sl = current['pac_low']
-            tp1 = current['close'] + (current['close'] - sl) * 1.5
-            return "LONG", current['close'], sl, tp1
-
-        # شرط البيع (SHORT)
-        ribbon_down = current['ema5'] < current['ema10'] < current['ema15'] < current['ema20']
-        below_pac = current['close'] < current['pac_low']
-        if ribbon_down and below_pac and df.iloc[-5:-1]['fractal_up'].any():
-            sl = current['pac_high']
-            tp1 = current['close'] - (sl - current['close']) * 1.5
-            return "SHORT", current['close'], sl, tp1
+        # 🔴 إشارة SHORT انفجارية:
+        if last['close'] < last['ema200'] and explosion:
+            if last['close'] < last['tema'] and last['rsi'] < 40:
+                sl = last['high'] + (last['close'] * 0.005)
+                tp = last['close'] - (last['close'] * 0.01)
+                return "SHORT", last['close'], sl, tp
 
         return None
     except: return None
 
 async def start_scanning(app):
-    print("🚀 نظام الهجين (Ribbon+PAC+Fractals) يعمل الآن...")
+    print("🚀 وضع السكالبينج الانفجاري (5m) يعمل الآن...")
     while True:
         for sym in app.state.symbols:
             res = await get_signal(sym)
             if res:
-                side, entry, sl, tp1 = res
+                side, entry, sl, tp = res
                 key = f"{sym}_{side}"
-                if key not in app.state.sent_signals or (time.time() - app.state.sent_signals[key]) > 3600:
+                if key not in app.state.sent_signals or (time.time() - app.state.sent_signals[key]) > 1800:
                     app.state.sent_signals[key] = time.time()
                     app.state.stats["total"] += 1
                     lev = get_recommended_leverage(sym); name = sym.split('/')[0]
                     
-                    msg = (f"💎 <b>إشارة الهجين الاحترافية</b>\n\n"
+                    msg = (f"🔥 <b>انفجار سعري (سكالبينج 5m)</b>\n\n"
                            f"🪙 <b>العملة:</b> {name}\n"
                            f"📈 <b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
                            f"⚡ <b>الرافعة:</b> <code>{lev}</code>\n"
                            f"📥 <b>الدخول:</b> <code>{format_price(entry)}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
-                           f"🎯 <b>الهدف:</b> <code>{format_price(tp1)}</code>\n"
+                           f"🎯 <b>الهدف:</b> <code>{format_price(tp)}</code>\n"
                            f"🚫 <b>استوب:</b> <code>{format_price(sl)}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
-                           f"🛠️ <i>Ribbon + PAC + Fractal Confirm</i>")
+                           f"⚡ <i>Entry based on Volume + TEMA Momentum</i>")
                     
-                    await send_telegram_msg(msg)
-            await asyncio.sleep(0.12)
-        await asyncio.sleep(10)
+                    mid = await send_telegram_msg(msg)
+                    if mid: app.state.active_trades[sym] = {"side":side,"tp":tp,"sl":sl,"msg_id":mid}
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(5)
 
 async def monitor_trades(app):
-    # (نفس نظام المراقبة السابق لضمان الدقة)
     while True:
-        await asyncio.sleep(10)
-
-async def daily_report_task(app):
-    # (نفس نظام التقرير اليومي)
-    while True:
-        await asyncio.sleep(30)
+        for sym in list(app.state.active_trades.keys()):
+            trade = app.state.active_trades[sym]
+            try:
+                t = await exchange.fetch_ticker(sym); p = t['last']
+                if (trade['side'] == "LONG" and p >= trade['tp']) or (trade['side'] == "SHORT" and p <= trade['tp']):
+                    await send_telegram_msg(f"✅ <b>تم قنص الهدف بنجاح!</b>")
+                    del app.state.active_trades[sym]
+                elif (trade['side'] == "LONG" and p <= trade['sl']) or (trade['side'] == "SHORT" and p >= trade['sl']):
+                    await send_telegram_msg(f"❌ <b>خرجنا من الانفجار (SL)</b>")
+                    del app.state.active_trades[sym]
+            except: pass
+        await asyncio.sleep(5)
 
 if __name__ == "__main__":
     import uvicorn
