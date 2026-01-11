@@ -35,7 +35,7 @@ async def reply_telegram_msg(message, reply_to_id):
         except: pass
 
 # ==========================================
-# قائمة الـ 100 عملة
+# نظام جلب الـ 100 عملة
 # ==========================================
 async def find_correct_symbols(exchange):
     await exchange.load_markets()
@@ -58,48 +58,48 @@ app = FastAPI(lifespan=lifespan)
 exchange = ccxt.kucoin({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 # ==========================================
-# محرك الاستراتيجية (SMC - FVG Logic)
+# استراتيجية SMC المفلترة (ADX + Volume + FVG)
 # ==========================================
 async def get_signal(symbol):
     try:
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=50)
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # فلتر الاتجاه
-        df['ema50'] = ta.ema(df['close'], length=50)
+        df['ema200'] = ta.ema(df['close'], length=200)
+        df['rsi'] = ta.rsi(df['close'], length=14)
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        df['vol_sma'] = ta.sma(df['vol'], length=20)
+        adx = ta.adx(df['high'], df['low'], df['close'], length=14)
+        df = pd.concat([df, adx], axis=1)
         
-        # اكتشاف الفجوات (FVG)
-        # نحتاج لبيانات 3 شموع: c1 (البداية), c2 (الفجوة), c3 (الحالية)
-        c1_high = df['high'].iloc[-3]
-        c1_low = df['low'].iloc[-3]
-        c3_high = df['high'].iloc[-1]
-        c3_low = df['low'].iloc[-1]
+        last = df.iloc[-1]
+        prev_1 = df.iloc[-2]
+        prev_2 = df.iloc[-3]
         
-        entry = df['close'].iloc[-1]
-        trend_up = entry > df['ema50'].iloc[-1]
+        entry = last['close']
+        # الفلاتر الذكية
+        trend_ok = last['ADX_14'] > 20
+        vol_ok = last['vol'] > (last['vol_sma'] * 1.3)
         
-        # 🟢 شرط LONG (SMC): وجود فجوة صاعدة + السعر فوق EMA 50
-        if c3_low > c1_high and trend_up:
-            sl = c1_low  # الاستوب عند قاع الشمعة التي بدأت الانفجار
-            risk = entry - sl
-            if risk > 0:
-                tp = entry + (risk * 2.0) # هدف ضعف المخاطرة (RR 1:2)
+        # LONG FVG
+        if last['low'] > prev_2['high'] and entry > last['ema200'] and trend_ok and vol_ok:
+            if last['rsi'] > 50:
+                sl = prev_1['low'] - (last['atr'] * 0.5)
+                tp = entry + (entry - sl) * 2.0
                 return "LONG", entry, sl, tp
 
-        # 🔴 شرط SHORT (SMC): وجود فجوة هابطة + السعر تحت EMA 50
-        if c3_high < c1_low and not trend_up:
-            sl = c1_high # الاستوب عند قمة الشمعة التي بدأت الانهيار
-            risk = sl - entry
-            if risk > 0:
-                tp = entry - (risk * 2.0) # هدف ضعف المخاطرة (RR 1:2)
+        # SHORT FVG
+        if last['high'] < prev_2['low'] and entry < last['ema200'] and trend_ok and vol_ok:
+            if last['rsi'] < 50:
+                sl = prev_1['high'] + (last['atr'] * 0.5)
+                tp = entry - (sl - entry) * 2.0
                 return "SHORT", entry, sl, tp
-
         return None
     except: return None
 
 async def start_scanning(app):
     while True:
-        print(f"--- 🛰️ SMC Scanner Active: {datetime.now().strftime('%H:%M:%S')} ---")
+        print(f"--- 🛰️ جاري البحث عن الجودة {datetime.now().strftime('%H:%M:%S')} ---")
         for sym in app.state.symbols:
             print(f"🔎 Checking {sym.split('/')[0]}...", end='\r')
             res = await get_signal(sym)
@@ -107,22 +107,16 @@ async def start_scanning(app):
                 side, entry, sl, tp = res
                 key = f"{sym}_{side}"
                 if key not in app.state.sent_signals or (time.time() - app.state.sent_signals[key]) > 3600:
+                    print(f"\n🎯 [TOP QUALITY SIGNAL] {side} on {sym}")
                     app.state.sent_signals[key] = time.time()
-                    name = sym.split('/')[0]
-                    rr_ratio = "1:2"
-                    msg = (f"🏦 <b>SMC | قناص السيولة (FVG)</b>\n\n"
-                           f"🪙 <b>العملة:</b> {name}\n"
-                           f"📈 <b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
-                           f"📥 <b>الدخول:</b> {format_price(entry)}\n"
-                           f"━━━━━━━━━━━━━━\n"
-                           f"🎯 <b>الهدف (RR {rr_ratio}):</b> {format_price(tp)}\n"
-                           f"🚫 <b>الستوب (هيكلي):</b> {format_price(sl)}\n"
-                           f"━━━━━━━━━━━━━━\n"
-                           f"🐳 <i>Targeting Imbalance Fill</i>")
+                    msg = (f"💎 <b>إشارة SMC عالية الجودة (5m)</b>\n\n"
+                           f"🪙 <b>العملة:</b> {sym.split('/')[0]}\n📈 <b>النوع:</b> {side}\n"
+                           f"📥 <b>الدخول:</b> {format_price(entry)}\n🎯 <b>الهدف (RR 1:2):</b> {format_price(tp)}\n🚫 <b>الستوب:</b> {format_price(sl)}\n"
+                           f"━━━━━━━━━━━━━━\n✅ <i>Verified: Trend + Volume + Imbalance</i>")
                     mid = await send_telegram_msg(msg)
-                    if mid: app.state.active_trades[sym] = {"side":side,"tp":tp,"sl":sl,"msg_id":mid}
+                    if mid: app.state.active_trades[sym] = {"side":side,"tp":tp,"sl":sl,"msg_id":mid,"start_time":time.time()}
             await asyncio.sleep(0.12)
-        await asyncio.sleep(5)
+        await asyncio.sleep(10)
 
 async def monitor_trades(app):
     while True:
@@ -130,11 +124,17 @@ async def monitor_trades(app):
             trade = app.state.active_trades[sym]
             try:
                 t = await exchange.fetch_ticker(sym); p = t['last']
+                # نظام الخروج الزمني (بعد 45 دقيقة من الركود)
+                if (time.time() - trade['start_time']) > 2700:
+                    await reply_telegram_msg("⏱️ <b>إغلاق زمني: الصفقة لم تتحرك لمدة 45 دقيقة.</b>", trade["msg_id"])
+                    del app.state.active_trades[sym]
+                    continue
+
                 if (trade['side'] == "LONG" and p >= trade['tp']) or (trade['side'] == "SHORT" and p <= trade['tp']):
-                    await reply_telegram_msg(f"✅ <b>تم سد الفجوة وتحقيق الربح! (RR 1:2) 💰</b>", trade["msg_id"])
+                    await reply_telegram_msg("✅ <b>تم قنص الهدف بنجاح! 💰</b>", trade["msg_id"])
                     del app.state.active_trades[sym]
                 elif (trade['side'] == "LONG" and p <= trade['sl']) or (trade['side'] == "SHORT" and p >= trade['sl']):
-                    await reply_telegram_msg(f"❌ <b>ضرب الاستوب الهيكلي</b>", trade["msg_id"])
+                    await reply_telegram_msg("❌ <b>ضرب الستوب المفلتر</b>", trade["msg_id"])
                     del app.state.active_trades[sym]
             except: pass
         await asyncio.sleep(5)
