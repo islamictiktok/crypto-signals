@@ -48,47 +48,50 @@ def is_signal_sent(key):
 
 app = FastAPI()
 
-# الواجهة التي تمنع الخطأ 404
+# واجهة الموقع لمنع 404
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
 async def root(): 
-    return "<html><body style='background:#000;color:#0f0;text-align:center;'><h1>Order Flow Pro Active</h1></body></html>"
+    return "<html><body style='background:#000;color:#0f0;text-align:center;'><h1>SMC Displacement Sniper Active</h1></body></html>"
 
 # ==========================================
-# 3. محرك الاستراتيجية (Order Flow Analysis)
+# 3. محرك الاستراتيجية (Displacement Model)
 # ==========================================
 async def get_signal(symbol):
     try:
+        # فحص الاتجاه العام 1H
         bars_1h = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=50)
         df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         trend_up = df_1h['close'].iloc[-1] > ta.ema(df_1h['close'], length=50).iloc[-1]
 
+        # فحص فريم الدخول 5m
         bars_5m = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
         df = pd.DataFrame(bars_5m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        df['delta'] = df.apply(lambda r: r['vol'] if r['close'] > r['open'] else -r['vol'], axis=1)
-        df['delta_avg'] = df['delta'].rolling(20).mean().abs()
-        df['bsl'] = df['high'].rolling(40).max()
-        df['ssl'] = df['low'].rolling(40).min()
+        # رصد الاندفاع والفجوات
+        df['hh'] = df['high'].rolling(40).max()
+        df['ll'] = df['low'].rolling(40).min()
         
-        last = df.iloc[-1]; prev = df.iloc[-2]
+        last = df.iloc[-1]; prev = df.iloc[-2]; p2 = df.iloc[-3]
         entry = last['close']
 
-        if trend_up and prev['low'] < df['ssl'].iloc[-15] and entry > df['ssl'].iloc[-15]:
-            if last['delta'] > 0 and abs(last['delta']) > (df['delta_avg'].iloc[-1] * 1.5):
+        # 🟢 LONG (MSS + Displacement): كسر قاع + اندفاع صاعد يترك FVG
+        if trend_up and prev['low'] < df['ll'].iloc[-15] and entry > df['ll'].iloc[-15]:
+            if last['low'] > p2['high']: # فجوة شرائية (FVG)
                 sl = prev['low'] * 0.999
-                target_bsl = df['high'].rolling(80).max().iloc[-1]
-                dist = target_bsl - entry
-                if dist > (entry - sl) * 1.5:
-                    return "LONG", entry, sl, entry+(dist*0.4), entry+(dist*0.7), target_bsl
+                target = df['high'].rolling(80).max().iloc[-1]
+                dist = target - entry
+                if dist > (entry - sl) * 2:
+                    return "LONG", entry, sl, entry+(dist*0.4), entry+(dist*0.7), target
 
-        if not trend_up and prev['high'] > df['bsl'].iloc[-15] and entry < df['bsl'].iloc[-15]:
-            if last['delta'] < 0 and abs(last['delta']) > (df['delta_avg'].iloc[-1] * 1.5):
+        # 🔴 SHORT (MSS + Displacement): كسر قمة + اندفاع هابط يترك FVG
+        if not trend_up and prev['high'] > df['hh'].iloc[-15] and entry < df['hh'].iloc[-15]:
+            if last['high'] < p2['low']: # فجوة بيعية (FVG)
                 sl = prev['high'] * 1.001
-                target_ssl = df['low'].rolling(80).min().iloc[-1]
-                dist = entry - target_ssl
-                if dist > (sl - entry) * 1.5:
-                    return "SHORT", entry, sl, entry-(dist*0.4), entry-(dist*0.7), target_ssl
+                target = df['low'].rolling(80).min().iloc[-1]
+                dist = entry - target
+                if dist > (sl - entry) * 2:
+                    return "SHORT", entry, sl, entry-(dist*0.4), entry-(dist*0.7), target
         return None
     except: return None
 
@@ -96,10 +99,11 @@ async def get_signal(symbol):
 # 4. المعالجة والإرسال (سهولة النسخ)
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 [نظام Order Flow] بدأ الفحص لـ {len(app_state.symbols)} عملة.")
+    print(f"🚀 [نظام SMC] بدأ الفحص لـ {len(app_state.symbols)} عملة.")
     while True:
         for sym in app_state.symbols:
             name = sym.split('/')[0]
+            print(f"🔎 فحص الاندفاع: {name}...   ", end='\r')
             res = await get_signal(sym)
             if res:
                 side, entry, sl, tp1, tp2, tp3 = res
