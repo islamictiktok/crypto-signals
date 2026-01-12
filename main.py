@@ -32,97 +32,135 @@ MY_TARGETS = [
 ]
 
 # ==========================================
-# 2. الواجهة ومنع الخطأ 404
+# 2. الواجهة ومنع 404
 # ==========================================
 app = FastAPI()
 
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
 async def root():
-    return "<html><body style='background:#000;color:#0f0;text-align:center;padding-top:100px;'><h1>Order Flow Pro Active</h1><p>Monitoring 120+ pairs...</p></body></html>"
+    return """
+    <html>
+        <body style='background:#111;color:#0f0;text-align:center;font-family:monospace;padding-top:50px;'>
+            <h1>🧠 Adaptive Hybrid Sniper Active</h1>
+            <p>Mode: Auto-Switching (Range/Trend)</p>
+            <p>Status: Monitoring 120+ Assets...</p>
+        </body>
+    </html>
+    """
 
 # ==========================================
-# 3. محرك الاستراتيجية (تدفق الأوامر + SMC)
+# 3. المحرك الهجين (The Hybrid Engine)
 # ==========================================
 async def get_signal(symbol):
     try:
-        # فلتر الاتجاه العام 1H
-        bars_1h = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=50)
-        df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        trend_up = df_1h['close'].iloc[-1] > ta.ema(df_1h['close'], length=50).iloc[-1]
-
-        # تحليل السيولة والدلتا 5m
-        bars_5m = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
-        df = pd.DataFrame(bars_5m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        df['delta'] = df.apply(lambda r: r['vol'] if r['close'] > r['open'] else -r['vol'], axis=1)
-        df['bsl'] = df['high'].rolling(40).max()
-        df['ssl'] = df['low'].rolling(40).min()
+        # جلب البيانات (100 شمعة لفريم 5 دقائق)
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
+        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        last = df.iloc[-1]; prev = df.iloc[-2]; entry = last['close']
+        # --- المؤشرات التقنية ---
+        # 1. ADX لتحديد نوع السوق (عرضي أم ترند)
+        adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
+        adx = adx_df['ADX_14'].iloc[-1]
+        
+        # 2. Bollinger Bands للسوق العرضي
+        bb = ta.bbands(df['close'], length=20, std=2)
+        lower_band = bb['BBL_20_2.0'].iloc[-1]
+        upper_band = bb['BBU_20_2.0'].iloc[-1]
+        mid_band = bb['BBM_20_2.0'].iloc[-1]
+        
+        # 3. EMA للترند
+        ema_200 = ta.ema(df['close'], length=200).iloc[-1]
+        ema_50 = ta.ema(df['close'], length=50).iloc[-1]
+        
+        # 4. ATR لحساب الستوب والأهداف بدقة
+        atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
+        
+        last = df.iloc[-1]; prev = df.iloc[-2]
+        entry = last['close']
 
-        # 🟢 LONG (Order Flow Confirmation)
-        if trend_up and prev['low'] < df['ssl'].iloc[-15] and entry > df['ssl'].iloc[-15]:
-            if last['delta'] > 0:
-                sl = prev['low'] * 0.999
-                target = df['high'].rolling(80).max().iloc[-1]
-                dist = target - entry
-                if dist > (entry - sl) * 1.5:
-                    return "LONG", entry, sl, entry+(dist*0.4), entry+(dist*0.7), target
+        # ============================================
+        # الحالة الأولى: السوق العرضي (ADX < 25)
+        # الاستراتيجية: ارتداد من أطراف البولنجر
+        # ============================================
+        if adx < 25:
+            strategy_type = "Range Reversion ↔️"
+            
+            # شراء: السعر لمس الحد السفلي ثم أغلق فوقه
+            if prev['close'] < lower_band or prev['low'] < lower_band:
+                if entry > lower_band: # تأكيد العودة للنطاق
+                    sl = entry - (atr * 1.5) # ستوب تحت النطاق
+                    tp1 = mid_band # الهدف الأول خط المنتصف
+                    tp2 = upper_band # الهدف الثاني الحد العلوي
+                    tp3 = upper_band + atr # اختراق محتمل
+                    return "LONG", entry, sl, tp1, tp2, tp3, strategy_type
 
-        # 🔴 SHORT (Order Flow Confirmation)
-        if not trend_up and prev['high'] > df['bsl'].iloc[-15] and entry < df['bsl'].iloc[-15]:
-            if last['delta'] < 0:
-                sl = prev['high'] * 1.001
-                target = df['low'].rolling(80).min().iloc[-1]
-                dist = entry - target
-                if dist > (sl - entry) * 1.5:
-                    return "SHORT", entry, sl, entry-(dist*0.4), entry-(dist*0.7), target
+            # بيع: السعر لمس الحد العلوي ثم أغلق تحته
+            if prev['close'] > upper_band or prev['high'] > upper_band:
+                if entry < upper_band:
+                    sl = entry + (atr * 1.5)
+                    tp1 = mid_band
+                    tp2 = lower_band
+                    tp3 = lower_band - atr
+                    return "SHORT", entry, sl, tp1, tp2, tp3, strategy_type
+
+        # ============================================
+        # الحالة الثانية: السوق ترند (ADX > 25)
+        # الاستراتيجية: الدخول مع الاتجاه (Pullback)
+        # ============================================
+        elif adx >= 25:
+            strategy_type = "Trend Follow 🚀"
+            
+            # شراء: الاتجاه صاعد (فوق EMA 200) + تصحيح
+            if entry > ema_200 and entry > ema_50:
+                # ننتظر تراجع بسيط (Pullback) دون كسر الهيكل
+                if prev['close'] < prev['open']: # شمعة حمراء سابقة
+                    if entry > prev['high']: # كسر قمة الشمعة الحمراء (Entry Trigger)
+                        sl = prev['low'] - atr
+                        risk = entry - sl
+                        return "LONG", entry, sl, entry+(risk*1.5), entry+(risk*3), entry+(risk*5), strategy_type
+
+            # بيع: الاتجاه هابط (تحت EMA 200) + تصحيح
+            if entry < ema_200 and entry < ema_50:
+                if prev['close'] > prev['open']: # شمعة خضراء سابقة
+                    if entry < prev['low']: # كسر قاع الشمعة الخضراء
+                        sl = prev['high'] + atr
+                        risk = sl - entry
+                        return "SHORT", entry, sl, entry-(risk*1.5), entry-(risk*3), entry-(risk*5), strategy_type
+
         return None
     except: return None
 
 # ==========================================
-# 4. التقرير اليومي ومعالجة الإحصائيات
+# 4. إدارة التليجرام والتقارير
 # ==========================================
-async def daily_report_task(app_state):
-    while True:
-        now = datetime.now()
-        # إرسال التقرير قبل نهاية اليوم بدقيقة واحدة
-        if now.hour == 23 and now.minute == 59:
-            s = app_state.stats
-            total = s["total"]
-            wr = (s["wins"] / total * 100) if total > 0 else 0
-            
-            report_msg = (f"📊 <b>التقرير اليومي للأداء</b>\n"
-                          f"━━━━━━━━━━━━━━\n"
-                          f"✅ صفقات ناجحة: {s['wins']}\n"
-                          f"❌ صفقات خاسرة: {s['losses']}\n"
-                          f"🎯 إجمالي الإشارات: {total}\n"
-                          f"📈 دقة النظام: <code>{wr:.1f}%</code>")
-            
-            await send_telegram_msg(report_msg)
-            # تصفير البيانات لليوم الجديد
-            app_state.stats = {"total": 0, "wins": 0, "losses": 0}
-            await asyncio.sleep(70) # تجنب إرسال التقرير أكثر من مرة في نفس الدقيقة
-        await asyncio.sleep(30)
+async def send_telegram_msg(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            res = await client.post(url, json=payload)
+            if res.status_code == 200: return res.json()['result']['message_id']
+        except: pass
+    return None
 
-# ==========================================
-# 5. المراقبة والنبض والنسخ المباشر
-# ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 بدأ الفحص لـ {len(app_state.symbols)} عملة...")
+    print(f"🚀 بدأ الفحص الهجين...")
     while True:
         for sym in app_state.symbols:
             res = await get_signal(sym)
             if res:
-                side, entry, sl, tp1, tp2, tp3 = res
-                key = f"{sym}_{side}"
-                # عدم تكرار الإشارة لنفس العملة خلال 4 ساعات
-                if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 14400:
+                side, entry, sl, tp1, tp2, tp3, strat = res
+                key = f"{sym}_{side}_{strat}" # مفتاح فريد لتجنب التكرار
+                
+                # عدم تكرار الإشارة لنفس العملة والوضع خلال ساعتين
+                if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 7200:
                     app_state.sent_signals[key] = time.time()
                     app_state.stats["total"] += 1
                     name = sym.split('/')[0]
                     
                     msg = (f"🪙 <b>العملة:</b> <code>{name}</code>\n"
+                           f"🧠 <b>الوضع:</b> {strat}\n"
                            f"📈 <b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
                            f"⚡ <b>الرافعة:</b> <code>Cross 20x</code>\n\n"
                            f"📥 <b>الدخول:</b> <code>{entry:.8f}</code>\n"
@@ -135,8 +173,8 @@ async def start_scanning(app_state):
                     
                     mid = await send_telegram_msg(msg)
                     if mid: app_state.active_trades[sym] = {"side":side,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl":sl,"msg_id":mid,"hit":[]}
-            await asyncio.sleep(0.3)
-        await asyncio.sleep(10)
+            await asyncio.sleep(0.2)
+        await asyncio.sleep(5)
 
 async def monitor_trades(app_state):
     while True:
@@ -144,27 +182,36 @@ async def monitor_trades(app_state):
             trade = app_state.active_trades[sym]
             try:
                 t = await exchange.fetch_ticker(sym); p, s = t['last'], trade['side']
-                for target in ["tp1", "tp2", "tp3"]:
+                
+                # متابعة الأهداف
+                for target, label in [("tp1", "هدف 1"), ("tp2", "هدف 2"), ("tp3", "هدف 3")]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            # نستخدم اسم العملة القابل للنسخ في تنبيهات الأهداف أيضاً
-                            await send_telegram_msg(f"✅ <b>إصابة {target.upper()} لعملة</b> <code>{sym.split('/')[0]}</code>")
+                            await send_telegram_msg(f"✅ <b>تحقق {label} لعملة</b> <code>{sym.split('/')[0]}</code>")
                             trade["hit"].append(target)
                             if target == "tp1": app_state.stats["wins"] += 1
+
+                # متابعة الستوب
                 if (s == "LONG" and p <= trade["sl"]) or (s == "SHORT" and p >= trade["sl"]):
                     app_state.stats["losses"] += 1
                     await send_telegram_msg(f"❌ <b>ضرب الستوب لعملة</b> <code>{sym.split('/')[0]}</code>")
                     del app_state.active_trades[sym]
                 elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
+
             except: pass
         await asyncio.sleep(5)
 
-async def send_telegram_msg(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        try: await client.post(url, json=payload)
-        except: pass
+async def daily_report_task(app_state):
+    while True:
+        now = datetime.now()
+        if now.hour == 23 and now.minute == 59:
+            s = app_state.stats; total = s["total"]
+            wr = (s["wins"] / total * 100) if total > 0 else 0
+            msg = (f"📊 <b>التقرير اليومي</b>\n✅ رابحة: {s['wins']}\n❌ خاسرة: {s['losses']}\n📈 الدقة: {wr:.1f}%")
+            await send_telegram_msg(msg)
+            app_state.stats = {"total":0, "wins":0, "losses":0}
+            await asyncio.sleep(70)
+        await asyncio.sleep(30)
 
 async def keep_alive_task():
     async with httpx.AsyncClient() as client:
@@ -178,10 +225,8 @@ async def lifespan(app: FastAPI):
     await exchange.load_markets()
     app.state.symbols = [s for t in MY_TARGETS for s in [f"{t}/USDT:USDT", f"{t}/USDT"] if s in exchange.symbols]
     app.state.sent_signals = {}; app.state.active_trades = {}; app.state.stats = {"total":0, "wins":0, "losses":0}
-    t1 = asyncio.create_task(start_scanning(app.state))
-    t2 = asyncio.create_task(monitor_trades(app.state))
-    t3 = asyncio.create_task(daily_report_task(app.state))
-    t4 = asyncio.create_task(keep_alive_task())
+    t1 = asyncio.create_task(start_scanning(app.state)); t2 = asyncio.create_task(monitor_trades(app.state))
+    t3 = asyncio.create_task(daily_report_task(app.state)); t4 = asyncio.create_task(keep_alive_task())
     yield
     await exchange.close(); t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel()
 
