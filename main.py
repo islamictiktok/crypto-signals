@@ -4,19 +4,19 @@ import pandas as pd
 import pandas_ta as ta
 import ccxt.async_support as ccxt
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 import time
 from datetime import datetime
 import httpx
 
 # ==========================================
-# 1. الإعدادات وقائمة الـ 15 عملة الأقوى
+# 1. الإعدادات والعملات (15 عملة قوية)
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
-# قائمة الـ 15 عملة المختارة (الأقوى سيولة)
 MY_TARGETS = [
     'BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', 
     'ADA', 'NEAR', 'XRP', 'MATIC', 'LINK', 
@@ -24,12 +24,46 @@ MY_TARGETS = [
 ]
 
 # ==========================================
-# 2. وظائف التليجرام والرافعة
+# 2. واجهة السيرفر (حل مشكلة 405 و 404)
 # ==========================================
+app = FastAPI()
+
+@app.get("/", response_class=HTMLResponse)
+@app.head("/") # السماح بطلبات HEAD لضمان قبول UptimeRobot
+async def root():
+    """واجهة بسيطة لضمان استجابة 200 OK"""
+    return """
+    <html>
+        <head><title>SMC Sniper Bot</title></head>
+        <body style="font-family: Arial; text-align: center; padding-top: 50px;">
+            <h1>🚀 Crypto Sniper Bot is Active</h1>
+            <p>Status: <span style="color: green;">Online</span></p>
+            <p>Monitoring: 15 Premium Coins</p>
+            <hr>
+            <p>System Time: """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + """</p>
+        </body>
+    </html>
+    """
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+# ==========================================
+# 3. وظائف البقاء حياً والتلجرام
+# ==========================================
+async def keep_alive_task():
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                await client.get(RENDER_URL)
+                print(f"💓 [HEARTBEAT] Ping sent.")
+            except: pass
+            await asyncio.sleep(600)
+
 def get_recommended_leverage(symbol):
     name = symbol.split('/')[0].upper()
-    if name in ['BTC', 'ETH']: return "Cross 20x - 50x"
-    else: return "Cross 10x - 20x"
+    return "Cross 20x - 50x" if name in ['BTC', 'ETH'] else "Cross 10x - 20x"
 
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -38,8 +72,7 @@ async def send_telegram_msg(message):
         try:
             res = await client.post(url, json=payload)
             if res.status_code == 200: return res.json()['result']['message_id']
-        except: pass
-    return None
+        except: return None
 
 async def reply_telegram_msg(message, reply_to_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -48,17 +81,8 @@ async def reply_telegram_msg(message, reply_to_id):
         try: await client.post(url, json=payload)
         except: pass
 
-async def keep_alive_task():
-    async with httpx.AsyncClient() as client:
-        while True:
-            try:
-                await client.get(RENDER_URL)
-                print(f"💓 [HEARTBEAT] Pinged {RENDER_URL}")
-            except: pass
-            await asyncio.sleep(600)
-
 # ==========================================
-# 3. محرك الاستراتيجية (SMC)
+# 4. محرك مدرسة SMC والتداول
 # ==========================================
 async def get_signal(symbol):
     try:
@@ -81,7 +105,7 @@ async def get_signal(symbol):
 
 async def start_scanning(app_state):
     while True:
-        print(f"--- 🛰️ جاري فحص الـ 15 عملة الكبرى {datetime.now().strftime('%H:%M:%S')} ---")
+        print(f"--- 🛰️ جاري الفحص {datetime.now().strftime('%H:%M:%S')} ---")
         for sym in app_state.symbols:
             res = await get_signal(sym)
             if res:
@@ -105,7 +129,7 @@ async def start_scanning(app_state):
                     )
                     mid = await send_telegram_msg(msg)
                     if mid: app_state.active_trades[sym] = {"side":side,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl":sl,"msg_id":mid,"hit":[]}
-            await asyncio.sleep(0.5) # وقت انتظار أطول قليلاً لتقليل ضغط الـ API
+            await asyncio.sleep(0.5)
         await asyncio.sleep(5)
 
 async def monitor_trades(app_state):
@@ -142,13 +166,8 @@ async def daily_report_task(app_state):
         await asyncio.sleep(30)
 
 # ==========================================
-# 4. السيرفر وإدارة الحياة
+# 5. إدارة التشغيل
 # ==========================================
-app = FastAPI()
-
-@app.get("/")
-async def root(): return {"status": "online", "monitored_coins": 15}
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await exchange.load_markets()
