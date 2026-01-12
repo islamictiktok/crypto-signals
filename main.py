@@ -38,63 +38,50 @@ app = FastAPI()
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
 async def root():
-    return f"<html><body style='background:#111;color:#0f0;text-align:center;'><h1>SMC Pro Sniper</h1><p>Monitoring {len(MY_TARGETS)} Coins</p></body></html>"
+    return "<html><body style='background:#000;color:#0f0;text-align:center;'><h1>Bot Active</h1></body></html>"
 
 async def keep_alive_task():
     async with httpx.AsyncClient() as client:
         while True:
-            try: 
-                await client.get(RENDER_URL)
-                print(f"\n💓 [نبض] {datetime.now().strftime('%H:%M:%S')}")
+            try: await client.get(RENDER_URL)
             except: pass
             await asyncio.sleep(600)
 
 # ==========================================
-# 3. محرك الاستراتيجية المطور (SMC Pro)
+# 3. محرك الاستراتيجية (SMC Pro)
 # ==========================================
 async def get_signal(symbol):
     try:
-        # جلب بيانات كافية للـ EMA 200
         bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=250)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        
-        # الفلاتر الجديدة
         df['ema200'] = ta.ema(df['close'], length=200)
-        df['rsi'] = ta.rsi(df['close'], length=14)
         df['hh'] = df['high'].rolling(30).max()
         df['ll'] = df['low'].rolling(30).min()
         
-        last = df.iloc[-1]; prev = df.iloc[-2]
-        entry = last['close']; rsi_val = last['rsi']
-        ema_val = last['ema200']
-        
-        # حساب الأهداف بناءً على ATR
+        last = df.iloc[-1]; prev = df.iloc[-2]; entry = last['close']
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         atr = df['atr'].iloc[-1]
 
-        # 🟢 LONG (Liquidity Grab + Trend Filter + RSI)
-        # السعر فوق EMA 200 + كسر قاع سابق + RSI كان تحت 30 (تشبع بيعي)
-        if entry > ema_val and prev['low'] < df['ll'].iloc[-15] and entry > df['ll'].iloc[-15]:
-            if rsi_val > 35: # تأكيد بداية ارتداد من التشبع
-                sl = df['ll'].iloc[-1] - (atr * 0.5)
-                return "LONG", entry, sl, entry+(atr*2), entry+(atr*4), entry+(atr*7)
-
-        # 🔴 SHORT (Liquidity Grab + Trend Filter + RSI)
-        # السعر تحت EMA 200 + كسر قمة سابقة + RSI كان فوق 70 (تشبع شرائي)
-        if entry < ema_val and prev['high'] > df['hh'].iloc[-15] and entry < df['hh'].iloc[-15]:
-            if rsi_val < 65: # تأكيد بداية ارتداد من التشبع
-                sl = df['hh'].iloc[-1] + (atr * 0.5)
-                return "SHORT", entry, sl, entry-(atr*2), entry-(atr*4), entry-(atr*7)
-            
+        # LONG
+        if entry > last['ema200'] and prev['low'] < df['ll'].iloc[-15] and entry > df['ll'].iloc[-15]:
+            sl = df['ll'].iloc[-1] - (atr * 0.5)
+            return "LONG", entry, sl, entry+(atr*2), entry+(atr*4), entry+(atr*7)
+        # SHORT
+        if entry < last['ema200'] and prev['high'] > df['hh'].iloc[-15] and entry < df['hh'].iloc[-15]:
+            sl = df['hh'].iloc[-1] + (atr * 0.5)
+            return "SHORT", entry, sl, entry-(atr*2), entry-(atr*4), entry-(atr*7)
         return None
     except: return None
 
+# ==========================================
+# 4. معالجة الإشارات والإرسال (التنسيق الجديد)
+# ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 [نظام SMC Pro] تم تفعيل الفحص لـ {len(app_state.symbols)} عملة.")
+    print(f"🚀 [نظام SMC Pro] فحص {len(app_state.symbols)} عملة.")
     while True:
         for sym in app_state.symbols:
             name = sym.split('/')[0]
-            print(f"🔎 فحص: {name} | العملات المراقبة: {len(app_state.active_trades)}   ", end='\r')
+            print(f"🔎 فحص: {name} | المراقبة: {len(app_state.active_trades)}   ", end='\r')
             
             res = await get_signal(sym)
             if res:
@@ -103,20 +90,26 @@ async def start_scanning(app_state):
                 if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 3600:
                     app_state.sent_signals[key] = time.time()
                     app_state.stats["total"] += 1
-                    msg = (f"🏦 <b>{name} / USDT (SMC Pro)</b>\n\n"
-                           f"📈 <b>النوع:</b> {side}\n⚡ <b>الرافعة:</b> <code>Cross 20x</code>\n"
-                           f"📥 <b>الدخول:</b> <code>{entry:.8f}</code>\n"
-                           f"━━━━━━━━━━━━━━\n"
-                           f"🎯 <b>أهداف:</b> <code>{tp1:.4f} | {tp2:.4f} | {tp3:.4f}</code>\n"
-                           f"🚫 <b>استوب:</b> <code>{sl:.4f}</code>")
+                    
+                    side_icon = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
+                    
+                    # الرسالة المنظمة والمختصرة جداً
+                    msg = (f"🪙 <b>العملة: {name} / USDT</b>\n"
+                           f"📈 <b>النوع: {side_icon}</b>\n"
+                           f"⚡ <b>الرافعة: Cross 20x</b>\n\n"
+                           f"🎯 <b>هدف 1:</b> <code>{tp1:.8f}</code>\n"
+                           f"🎯 <b>هدف 2:</b> <code>{tp2:.8f}</code>\n"
+                           f"🎯 <b>هدف 3:</b> <code>{tp3:.8f}</code>\n\n"
+                           f"🚫 <b>الستوب:</b> <code>{sl:.8f}</code>")
+                    
                     mid = await send_telegram_msg(msg)
                     if mid: app_state.active_trades[sym] = {"side":side,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl":sl,"msg_id":mid,"hit":[]}
-                    print(f"\n🎯 [فرصة] تم إرسال إشارة {side} لعملة {name}")
             await asyncio.sleep(0.2)
         await asyncio.sleep(5)
 
-# (دوال monitor_trades و daily_report و lifespan تبقى كما هي في النسخة السابقة)
-# ... [أكواد المراقبة والتشغيل السابقة] ...
+# ==========================================
+# 5. المراقبة والتقارير
+# ==========================================
 async def monitor_trades(app_state):
     while True:
         for sym in list(app_state.active_trades.keys()):
@@ -126,12 +119,12 @@ async def monitor_trades(app_state):
                 for target in ["tp1", "tp2", "tp3"]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            await reply_telegram_msg(f"✅ تم إصابة {target.upper()}! 💰", trade["msg_id"])
+                            await reply_telegram_msg(f"✅ تم إصابة {target.upper()}!", trade["msg_id"])
                             trade["hit"].append(target)
                             if target == "tp1": app_state.stats["wins"] += 1
                 if (s == "LONG" and p <= trade["sl"]) or (s == "SHORT" and p >= trade["sl"]):
                     app_state.stats["losses"] += 1
-                    await reply_telegram_msg(f"❌ ضرب الاستوب لوز", trade["msg_id"])
+                    await reply_telegram_msg(f"❌ ضرب الستوب", trade["msg_id"])
                     del app_state.active_trades[sym]
                 elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
             except: pass
@@ -159,7 +152,7 @@ async def daily_report_task(app_state):
         if now.hour == 23 and now.minute == 59:
             s = app_state.stats; total = s["total"]
             wr = (s["wins"]/total*100) if total > 0 else 0
-            msg = f"📊 تقرير SMC Pro اليومي\n✅ رابحة: {s['wins']}\n❌ خاسرة: {s['losses']}\n🎯 الإجمالي: {total}\n📈 الدقة: {wr:.1f}%"
+            msg = f"📊 تقرير اليوم\n✅ رابحة: {s['wins']}\n❌ خاسرة: {s['losses']}\n🎯 الإجمالي: {total}\n📈 الدقة: {wr:.1f}%"
             await send_telegram_msg(msg); app_state.stats = {"total":0, "wins":0, "losses":0}; await asyncio.sleep(70)
         await asyncio.sleep(30)
 
