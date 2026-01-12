@@ -11,16 +11,17 @@ from datetime import datetime
 import httpx
 
 # ==========================================
-# 1. الإعدادات والعملات (15 عملة قوية)
+# 1. الإعدادات والقائمة المختارة (40 عملة ذهبية)
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 MY_TARGETS = [
-    'BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', 
-    'ADA', 'NEAR', 'XRP', 'MATIC', 'LINK', 
-    'DOT', 'LTC', 'ATOM', 'UNI', 'TRX'
+    'BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', 'ADA', 'NEAR', 'XRP', 'MATIC', 'LINK',
+    'DOT', 'LTC', 'BCH', 'ATOM', 'UNI', 'FIL', 'ETC', 'APT', 'SUI', 'OP',
+    'ARB', 'INJ', 'TIA', 'RNDR', 'PEPE', 'SHIB', 'BONK', 'WIF', 'FET', 'JASMY',
+    'GALA', 'STX', 'LDO', 'ICP', 'HBAR', 'FTM', 'SEI', 'AGLD', 'FLOKI', 'KAS'
 ]
 
 # ==========================================
@@ -29,41 +30,37 @@ MY_TARGETS = [
 app = FastAPI()
 
 @app.get("/", response_class=HTMLResponse)
-@app.head("/") # السماح بطلبات HEAD لضمان قبول UptimeRobot
+@app.head("/")
 async def root():
-    """واجهة بسيطة لضمان استجابة 200 OK"""
     return """
     <html>
-        <head><title>SMC Sniper Bot</title></head>
-        <body style="font-family: Arial; text-align: center; padding-top: 50px;">
-            <h1>🚀 Crypto Sniper Bot is Active</h1>
-            <p>Status: <span style="color: green;">Online</span></p>
-            <p>Monitoring: 15 Premium Coins</p>
-            <hr>
-            <p>System Time: """ + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + """</p>
+        <head><title>SMC Global Sniper</title></head>
+        <body style="font-family: Arial; text-align: center; background: #121212; color: white; padding-top: 50px;">
+            <h1 style="color: #00ff88;">🚀 SMC Global Sniper is Active</h1>
+            <p>Scanning 40 High-Liquidity Pairs</p>
+            <div style="border: 1px solid #333; display: inline-block; padding: 20px; border-radius: 10px;">
+                <p>Status: <span style="color: #00ff88;">Running</span></p>
+                <p>Uptime Check: 200 OK</p>
+            </div>
         </body>
     </html>
     """
 
-@app.get("/health")
-async def health():
-    return {"status": "healthy"}
-
 # ==========================================
-# 3. وظائف البقاء حياً والتلجرام
+# 3. وظائف المساعدة والتلجرام
 # ==========================================
 async def keep_alive_task():
     async with httpx.AsyncClient() as client:
         while True:
-            try:
-                await client.get(RENDER_URL)
-                print(f"💓 [HEARTBEAT] Ping sent.")
+            try: await client.get(RENDER_URL); print("💓 Heartbeat OK")
             except: pass
             await asyncio.sleep(600)
 
 def get_recommended_leverage(symbol):
     name = symbol.split('/')[0].upper()
-    return "Cross 20x - 50x" if name in ['BTC', 'ETH'] else "Cross 10x - 20x"
+    if name in ['BTC', 'ETH']: return "Cross 25x - 50x"
+    if name in ['PEPE', 'SHIB', 'BONK', 'FLOKI']: return "Cross 5x - 10x"
+    return "Cross 10x - 20x"
 
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -82,30 +79,43 @@ async def reply_telegram_msg(message, reply_to_id):
         except: pass
 
 # ==========================================
-# 4. محرك مدرسة SMC والتداول
+# 4. محرك الاستراتيجية (SMC + Volume Climax)
 # ==========================================
 async def get_signal(symbol):
     try:
         bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        df['hh'] = df['high'].rolling(20).max()
-        df['ll'] = df['low'].rolling(20).min()
+        
+        # 1. تحديد مناطق السيولة
+        df['hh'] = df['high'].rolling(30).max()
+        df['ll'] = df['low'].rolling(30).min()
+        
+        # 2. متوسط الفوليوم لتأكيد الدخول
+        df['vol_sma'] = ta.sma(df['vol'], length=20)
+        
         last = df.iloc[-1]; prev = df.iloc[-2]; entry = last['close']
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         atr = df['atr'].iloc[-1]
 
-        if prev['low'] < df['ll'].iloc[-10] and entry > df['ll'].iloc[-10]:
-            sl = df['ll'].iloc[-1] - (atr * 0.5)
-            return "LONG", entry, sl, entry+(atr*1.5), entry+(atr*3), entry+(atr*5)
-        if prev['high'] > df['hh'].iloc[-10] and entry < df['hh'].iloc[-10]:
-            sl = df['hh'].iloc[-1] + (atr * 0.5)
-            return "SHORT", entry, sl, entry-(atr*1.5), entry-(atr*3), entry-(atr*5)
+        # شرط الفوليوم (يجب أن يكون أعلى من المتوسط بـ 20%)
+        volume_confirmed = last['vol'] > (last['vol_sma'] * 1.2)
+
+        # 🟢 LONG (Liquidity Sweep + High Volume)
+        if prev['low'] < df['ll'].iloc[-15] and entry > df['ll'].iloc[-15] and volume_confirmed:
+            sl = df['ll'].iloc[-1] - (atr * 0.4)
+            return "LONG", entry, sl, entry+(atr*1.8), entry+(atr*3.5), entry+(atr*6)
+
+        # 🔴 SHORT (Liquidity Sweep + High Volume)
+        if prev['high'] > df['hh'].iloc[-15] and entry < df['hh'].iloc[-15] and volume_confirmed:
+            sl = df['hh'].iloc[-1] + (atr * 0.4)
+            return "SHORT", entry, sl, entry-(atr*1.8), entry-(atr*3.5), entry-(atr*6)
+            
         return None
     except: return None
 
 async def start_scanning(app_state):
     while True:
-        print(f"--- 🛰️ جاري الفحص {datetime.now().strftime('%H:%M:%S')} ---")
+        print(f"--- 🛰️ جاري فحص 40 عملة SMC {datetime.now().strftime('%H:%M:%S')} ---")
         for sym in app_state.symbols:
             res = await get_signal(sym)
             if res:
@@ -129,7 +139,7 @@ async def start_scanning(app_state):
                     )
                     mid = await send_telegram_msg(msg)
                     if mid: app_state.active_trades[sym] = {"side":side,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl":sl,"msg_id":mid,"hit":[]}
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
         await asyncio.sleep(5)
 
 async def monitor_trades(app_state):
@@ -144,6 +154,7 @@ async def monitor_trades(app_state):
                             await reply_telegram_msg(f"✅ <b>تم إصابة الهدف {target.upper()}! 💰</b>", trade["msg_id"])
                             trade["hit"].append(target)
                             if target == "tp1": app_state.stats["wins"] += 1
+                
                 if (s == "LONG" and p <= trade["sl"]) or (s == "SHORT" and p >= trade["sl"]):
                     app_state.stats["losses"] += 1
                     await reply_telegram_msg(f"❌ <b>ضرب الاستوب لوز (SL)</b>", trade["msg_id"])
@@ -165,9 +176,6 @@ async def daily_report_task(app_state):
             await asyncio.sleep(70)
         await asyncio.sleep(30)
 
-# ==========================================
-# 5. إدارة التشغيل
-# ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await exchange.load_markets()
