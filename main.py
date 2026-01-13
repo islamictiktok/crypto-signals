@@ -41,10 +41,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#000;color:#00ffff;text-align:center;font-family:monospace;padding-top:50px;'>
+        <body style='background:#000;color:#00ff00;text-align:center;font-family:monospace;padding-top:50px;'>
             <h1>🔢 Digital Pivot Sniper Active</h1>
-            <p>Strategy: Math-Based Levels (P, R1, S1)</p>
-            <p>Feature: Threaded Replies Enabled</p>
+            <p>Logic: Entry +/- Dynamic Step</p>
+            <p>Status: Running 24/7...</p>
         </body>
     </html>
     """
@@ -75,55 +75,46 @@ async def reply_telegram_msg(message, reply_to_msg_id):
         except: pass
 
 # ==========================================
-# 4. محرك التحليل الرقمي (The Math Engine)
+# 4. محرك التحليل الرقمي المصحح (Corrected Logic)
 # ==========================================
 async def get_signal(symbol):
     try:
-        # نستخدم فريم 4 ساعات لحساب المستويات القوية، والدخول على السعر الحالي
-        # هذا يعطي مستويات رقمية صلبة جداً
+        # فريم 4 ساعات لتحديد المستويات القوية
         bars = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=50)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # البيانات السابقة (الشمعة المكتملة)
-        prev = df.iloc[-2] # الشمعة السابقة المغلقة
+        prev = df.iloc[-2] # الشمعة المكتملة
         last_close = df.iloc[-1]['close'] # السعر الحالي
         
-        # --- المعادلات الرقمية (Standard Pivot Points) ---
-        # P = (High + Low + Close) / 3
+        # --- حساب النقاط الرقمية ---
         pp = (prev['high'] + prev['low'] + prev['close']) / 3
-        
-        # المقاومات والدعوم
         r1 = (2 * pp) - prev['low']
         s1 = (2 * pp) - prev['high']
         
-        r2 = pp + (prev['high'] - prev['low'])
-        s2 = pp - (prev['high'] - prev['low'])
+        # --- حساب "الخطوة الرقمية" (Pivot Step) ---
+        # هذه هي المسافة الآمنة بناءً على تذبذب الشمعة السابقة
+        # نستخدمها لتحديد الأهداف والستوب نسبةً لسعر الدخول الحالي
+        step = abs(r1 - pp)
         
-        r3 = prev['high'] + 2 * (pp - prev['low'])
-        s3 = prev['low'] - 2 * (prev['high'] - pp)
-        
-        # --- منطق الدخول الرقمي ---
-        
-        # 🟢 LONG: السعر الحالي اخترق المقاومة الأولى (R1) واستقر فوقها
-        # هذا يعني أن الرقم انكسر للأعلى
+        # حماية من التذبذب الصفري
+        if step == 0: step = last_close * 0.01 
+
+        # 🟢 LONG: اختراق R1
         if last_close > r1 and prev['close'] < r1:
-             # الستوب الرقمي: العودة تحت نقطة الارتكاز (P)
-            sl = pp 
-            # الأهداف الرقمية
-            tp1 = r2
-            tp2 = r3
-            tp3 = r3 + (r3 - r2) # استنتاج الهدف الثالث رياضياً
+            # الأهداف تُضاف فوق سعر الدخول الحالي
+            tp1 = last_close + step
+            tp2 = last_close + (step * 2)
+            tp3 = last_close + (step * 4)
+            sl = last_close - step # الستوب تحت الدخول بخطوة
             return "LONG", last_close, sl, tp1, tp2, tp3, r1
 
-        # 🔴 SHORT: السعر الحالي كسر الدعم الأول (S1) واستقر تحته
-        # هذا يعني أن الرقم انكسر للأسفل
+        # 🔴 SHORT: كسر S1
         if last_close < s1 and prev['close'] > s1:
-            # الستوب الرقمي: العودة فوق نقطة الارتكاز (P)
-            sl = pp
-            # الأهداف الرقمية
-            tp1 = s2
-            tp2 = s3
-            tp3 = s3 - (s2 - s3)
+            # الأهداف تُطرح من سعر الدخول الحالي
+            tp1 = last_close - step
+            tp2 = last_close - (step * 2)
+            tp3 = last_close - (step * 4)
+            sl = last_close + step # الستوب فوق الدخول بخطوة
             return "SHORT", last_close, sl, tp1, tp2, tp3, s1
 
         return None
@@ -133,34 +124,35 @@ async def get_signal(symbol):
 # 5. التشغيل والمراقبة
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 بدأ نظام التحليل الرقمي (Pivots)...")
+    print(f"🚀 بدأ النظام الرقمي المصحح...")
     while True:
         for sym in app_state.symbols:
             name = sym.split('/')[0]
-            print(f"🔢 حساب: {name}...", end='\r')
+            print(f"🔢 فحص: {name}...", end='\r')
             
             res = await get_signal(sym)
             if res:
-                side, entry, sl, tp1, tp2, tp3, level_broken = res
+                side, entry, sl, tp1, tp2, tp3, level = res
                 key = f"{sym}_{side}"
                 
-                # تكرار كل 4 ساعات (لأننا نعتمد على شمعة 4 ساعات)
+                # تكرار كل 4 ساعات
                 if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 14400:
                     app_state.sent_signals[key] = time.time()
                     app_state.stats["total"] += 1
                     
+                    # --- رسالة نظيفة جداً ---
                     msg = (f"🪙 <b>العملة:</b> <code>{name}</code>\n"
                            f"📈 <b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
                            f"⚡ <b>الرافعة:</b> <code>Cross 20x</code>\n\n"
-                           f"📥 <b>الدخول (كسر {level_broken:.4f}):</b> <code>{entry:.8f}</code>\n"
+                           f"📥 <b>الدخول:</b> <code>{entry:.8f}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
-                           f"🎯 <b>هدف 1 (R2/S2):</b> <code>{tp1:.8f}</code>\n"
-                           f"🎯 <b>هدف 2 (R3/S3):</b> <code>{tp2:.8f}</code>\n"
-                           f"🎯 <b>هدف 3 (Open):</b> <code>{tp3:.8f}</code>\n"
+                           f"🎯 <b>هدف 1:</b> <code>{tp1:.8f}</code>\n"
+                           f"🎯 <b>هدف 2:</b> <code>{tp2:.8f}</code>\n"
+                           f"🎯 <b>هدف 3:</b> <code>{tp3:.8f}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
-                           f"🚫 <b>الستوب (Pivot):</b> <code>{sl:.8f}</code>")
+                           f"🚫 <b>الستوب:</b> <code>{sl:.8f}</code>")
                     
-                    print(f"\n🔢 إشارة رقمية: {name} {side}")
+                    print(f"\n✨ إشارة جديدة: {name} {side}")
                     mid = await send_telegram_msg(msg)
                     if mid: 
                         app_state.active_trades[sym] = {
@@ -178,18 +170,19 @@ async def monitor_trades(app_state):
                 t = await exchange.fetch_ticker(sym); p, s = t['last'], trade['side']
                 msg_id = trade["msg_id"]
                 
-                # التحقق من الأهداف (مع الرد على الرسالة)
+                # متابعة الأهداف
                 for target, label in [("tp1", "هدف 1"), ("tp2", "هدف 2"), ("tp3", "هدف 3")]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            await reply_telegram_msg(f"✅ <b>تم قنص {label} رقمياً! 🎯</b>", msg_id)
+                            # الرد على الرسالة
+                            await reply_telegram_msg(f"✅ <b>تحقق {label} لعملة</b> <code>{sym.split('/')[0]}</code>", msg_id)
                             trade["hit"].append(target)
                             if target == "tp1": app_state.stats["wins"] += 1
 
-                # التحقق من الستوب
+                # متابعة الستوب
                 if (s == "LONG" and p <= trade["sl"]) or (s == "SHORT" and p >= trade["sl"]):
                     app_state.stats["losses"] += 1
-                    await reply_telegram_msg(f"❌ <b>ضرب الستوب (عودة للارتكاز)</b>", msg_id)
+                    await reply_telegram_msg(f"❌ <b>ضرب الستوب لعملة</b> <code>{sym.split('/')[0]}</code>", msg_id)
                     del app_state.active_trades[sym]
                 elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
 
@@ -202,7 +195,7 @@ async def daily_report_task(app_state):
         if now.hour == 23 and now.minute == 59:
             s = app_state.stats; total = s["total"]
             wr = (s["wins"] / total * 100) if total > 0 else 0
-            msg = (f"📊 <b>تقرير التحليل الرقمي</b>\n✅ رابحة: {s['wins']}\n❌ خاسرة: {s['losses']}\n📈 الدقة: {wr:.1f}%")
+            msg = (f"📊 <b>التقرير اليومي</b>\n✅ رابحة: {s['wins']}\n❌ خاسرة: {s['losses']}\n📈 الدقة: {wr:.1f}%")
             await send_telegram_msg(msg)
             app_state.stats = {"total":0, "wins":0, "losses":0}
             await asyncio.sleep(70)
