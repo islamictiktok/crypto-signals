@@ -11,13 +11,14 @@ from datetime import datetime
 import httpx
 
 # ==========================================
-# 1. الإعدادات والعملات (120+ عملة)
+# 1. الإعدادات والعملات (القائمة الكاملة)
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 SIGNALS_FILE = "sent_signals.txt"
 
+# نستهدف العملات ذات السيولة العالية لضمان احترام الـ FVG
 MY_TARGETS = [
     'BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', 'ADA', 'NEAR', 'XRP', 'MATIC', 'LINK', 
     'DOT', 'LTC', 'ATOM', 'UNI', 'ALGO', 'VET', 'ICP', 'FIL', 'HBAR', 'FTM', 
@@ -41,68 +42,92 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#1e1e1e;color:#ffd700;text-align:center;font-family:sans-serif;padding-top:50px;'>
-            <h1>📐 Fibonacci Golden Zone Sniper</h1>
-            <p>Strategy: Retracement (0.5 - 0.618)</p>
-            <p>Status: Calculating Levels...</p>
+        <body style='background:#111;color:#c0c0c0;text-align:center;font-family:sans-serif;padding-top:50px;'>
+            <h1>🥈 SMC Silver Bullet Sniper</h1>
+            <p>Model: Liquidity Sweep + MSS + FVG Entry</p>
+            <p>Status: Active 24/7</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 3. محرك الفيبوناتشي (The Fibonacci Engine)
+# 3. محرك الرصاصة الفضية (The Silver Bullet Engine)
 # ==========================================
 async def get_signal(symbol):
     try:
-        # نستخدم فريم 15 دقيقة لدقة الموجات
+        # فريم 15 دقيقة هو الأفضل لرؤية الـ MSS والـ FVG بوضوح
         bars = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. تحديد قمة وقاع الموجة الحالية (Swing High/Low)
-        swing_high = df['high'].rolling(50).max().iloc[-1]
-        swing_low = df['low'].rolling(50).min().iloc[-1]
+        # 1. تحديد السيولة (Swing Points)
+        df['swing_high'] = df['high'].rolling(10).max().shift(1)
+        df['swing_low'] = df['low'].rolling(10).min().shift(1)
         
-        diff = swing_high - swing_low
-        if diff == 0: return None
+        # 2. تحديد الـ Fair Value Gaps (FVG)
+        # FVG الصاعد: قاع الشمعة الحالية > قمة الشمعة قبل الماضية
+        df['fvg_up'] = (df['low'] > df['high'].shift(2)) 
+        # FVG الهابط: قمة الشمعة الحالية < قاع الشمعة قبل الماضية
+        df['fvg_down'] = (df['high'] < df['low'].shift(2))
         
-        ema_200 = ta.ema(df['close'], length=200).iloc[-1]
-        entry = df['close'].iloc[-1]
-        last_low = df['low'].iloc[-1]
-        last_high = df['high'].iloc[-1]
+        # ATR للستوب والأهداف
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        atr = df['atr'].iloc[-1]
+        
+        # المتغيرات الحالية والسابقة
+        curr = df.iloc[-1]   # الشمعة الحالية (التي ننتظر الدخول فيها)
+        prev = df.iloc[-2]   # شمعة الاندفاع (Displacement)
+        p2 = df.iloc[-3]     # الشمعة قبل الاندفاع
+        
+        entry = curr['close']
 
-        # 🟢 سيناريو الشراء
-        if entry > ema_200:
-            fib_05 = swing_high - (diff * 0.5)
-            fib_618 = swing_high - (diff * 0.618)
-            fib_786 = swing_high - (diff * 0.786)
-            
-            if last_low <= fib_05 and last_low >= fib_618: 
-                if entry > fib_618:
-                    sl = fib_786
-                    tp1 = swing_high
-                    tp2 = swing_high + (diff * 0.27)
-                    tp3 = swing_high + (diff * 0.618)
-                    return "LONG", entry, sl, tp1, tp2, tp3
+        # 🟢 LONG SILVER BULLET:
+        # الشروط:
+        # 1. سحب سيولة سابق (السعر كان تحت القاع)
+        # 2. اندفاع قوي (Displacement) للأعلى ترك FVG
+        # 3. كسر هيكل (إغلاق فوق شمعة الهبوط السابقة)
+        
+        # نتحقق من وجود FVG صاعد في الشمعة السابقة (prev)
+        is_bullish_fvg = (prev['low'] > df.iloc[-4]['high']) # فجوة بين (prev) و (p3)
+        
+        if is_bullish_fvg and prev['close'] > prev['open']: # شمعة خضراء قوية
+            # التحقق من سحب السيولة: هل كنا عند قاع قريباً؟
+            if df['low'].iloc[-5:].min() <= df['swing_low'].iloc[-5]:
+                # الدخول: عند إعادة اختبار منطقة الـ FVG
+                fvg_zone = prev['low'] 
+                if curr['low'] <= fvg_zone * 1.002: # لمس المنطقة أو قريب منها
+                    sl = df['low'].iloc[-5:].min() # الستوب تحت قاع السحب
+                    risk = entry - sl
+                    if risk > 0:
+                         # الأهداف بناءً على السيولة المقابلة
+                        tp1 = entry + (risk * 2) # R:R 1:2
+                        tp2 = entry + (risk * 3) # R:R 1:3
+                        tp3 = entry + (risk * 5)
+                        return "LONG", entry, sl, tp1, tp2, tp3
 
-        # 🔴 سيناريو البيع
-        if entry < ema_200:
-            fib_05 = swing_low + (diff * 0.5)
-            fib_618 = swing_low + (diff * 0.618)
-            fib_786 = swing_low + (diff * 0.786)
-            
-            if last_high >= fib_05 and last_high <= fib_618:
-                if entry < fib_618:
-                    sl = fib_786
-                    tp1 = swing_low
-                    tp2 = swing_low - (diff * 0.27)
-                    tp3 = swing_low - (diff * 0.618)
-                    return "SHORT", entry, sl, tp1, tp2, tp3
+        # 🔴 SHORT SILVER BULLET:
+        # الشروط: سحب قمة + اندفاع هابط ترك FVG
+        
+        is_bearish_fvg = (prev['high'] < df.iloc[-4]['low']) # فجوة هابطة
+        
+        if is_bearish_fvg and prev['close'] < prev['open']: # شمعة حمراء قوية
+            # التحقق من سحب السيولة: هل كنا عند قمة قريباً؟
+            if df['high'].iloc[-5:].max() >= df['swing_high'].iloc[-5]:
+                # الدخول: عند إعادة اختبار الـ FVG
+                fvg_zone = prev['high']
+                if curr['high'] >= fvg_zone * 0.998:
+                    sl = df['high'].iloc[-5:].max() # الستوب فوق قمة السحب
+                    risk = sl - entry
+                    if risk > 0:
+                        tp1 = entry - (risk * 2)
+                        tp2 = entry - (risk * 3)
+                        tp3 = entry - (risk * 5)
+                        return "SHORT", entry, sl, tp1, tp2, tp3
 
         return None
     except: return None
 
 # ==========================================
-# 4. التليجرام والتشغيل (تم تنظيف الرسالة)
+# 4. التليجرام والتشغيل (Clean Format)
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -115,27 +140,27 @@ async def send_telegram_msg(message):
     return None
 
 async def start_scanning(app_state):
-    print(f"🚀 بدأ نظام الفيبوناتشي الذهبي...")
+    print(f"🚀 بدأ نظام الرصاصة الفضية (SMC Silver Bullet)...")
     while True:
         for sym in app_state.symbols:
             name = sym.split('/')[0]
-            print(f"📐 فحص: {name}...", end='\r')
+            print(f"🥈 فحص FVG: {name}...", end='\r')
             
             res = await get_signal(sym)
             if res:
                 side, entry, sl, tp1, tp2, tp3 = res
                 key = f"{sym}_{side}"
                 
-                # تكرار الإشارة كل 3 ساعات
-                if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 10800:
+                # منع التكرار لمدة 4 ساعات
+                if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 14400:
                     app_state.sent_signals[key] = time.time()
                     app_state.stats["total"] += 1
                     
-                    # الرسالة النظيفة المختصرة
+                    # رسالة نظيفة وقابلة للنسخ
                     msg = (f"🪙 <b>العملة:</b> <code>{name}</code>\n"
                            f"📈 <b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
                            f"⚡ <b>الرافعة:</b> <code>Cross 20x</code>\n\n"
-                           f"📥 <b>الدخول:</b> <code>{entry:.8f}</code>\n"
+                           f"📥 <b>الدخول (FVG):</b> <code>{entry:.8f}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
                            f"🎯 <b>هدف 1:</b> <code>{tp1:.8f}</code>\n"
                            f"🎯 <b>هدف 2:</b> <code>{tp2:.8f}</code>\n"
@@ -143,7 +168,7 @@ async def start_scanning(app_state):
                            f"━━━━━━━━━━━━━━\n"
                            f"🚫 <b>الستوب:</b> <code>{sl:.8f}</code>")
                     
-                    print(f"\n✨ إشارة ذهبية: {name} {side}")
+                    print(f"\n🥈 إشارة جديدة: {name} {side}")
                     mid = await send_telegram_msg(msg)
                     if mid: app_state.active_trades[sym] = {"side":side,"tp1":tp1,"tp2":tp2,"tp3":tp3,"sl":sl,"msg_id":mid,"hit":[]}
             await asyncio.sleep(0.2)
@@ -158,7 +183,6 @@ async def monitor_trades(app_state):
                 for target, label in [("tp1", "هدف 1"), ("tp2", "هدف 2"), ("tp3", "هدف 3")]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            # رسالة تحقيق الهدف مختصرة أيضاً
                             await send_telegram_msg(f"✅ <b>تحقق {label} لعملة</b> <code>{sym.split('/')[0]}</code>")
                             trade["hit"].append(target)
                             if target == "tp1": app_state.stats["wins"] += 1
