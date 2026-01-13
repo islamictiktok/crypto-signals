@@ -11,7 +11,7 @@ from datetime import datetime
 import httpx
 
 # ==========================================
-# 1. الإعدادات والعملات (120+ عملة)
+# 1. الإعدادات والعملات
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
@@ -32,7 +32,7 @@ MY_TARGETS = [
 ]
 
 # ==========================================
-# 2. الواجهة ومنع 404
+# 2. الواجهة
 # ==========================================
 app = FastAPI()
 
@@ -41,16 +41,16 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#000;color:#00ff00;text-align:center;font-family:monospace;padding-top:50px;'>
-            <h1>🔢 Digital Pivot Sniper Active</h1>
-            <p>Logic: Entry +/- Dynamic Step</p>
-            <p>Status: Running 24/7...</p>
+        <body style='background:#121212;color:#d4af37;text-align:center;font-family:sans-serif;padding-top:50px;'>
+            <h1>🏆 Golden FVG Breaker Strategy</h1>
+            <p>Logic: Breakout + S/R Flip + FVG + Fib (0.618)</p>
+            <p>Status: Hunting Confluence...</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 3. دوال التليجرام (إرسال ورد)
+# 3. دوال التليجرام
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -75,47 +75,89 @@ async def reply_telegram_msg(message, reply_to_msg_id):
         except: pass
 
 # ==========================================
-# 4. محرك التحليل الرقمي المصحح (Corrected Logic)
+# 4. محرك الاستراتيجية (The Confluence Engine)
 # ==========================================
 async def get_signal(symbol):
     try:
-        # فريم 4 ساعات لتحديد المستويات القوية
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=50)
+        # نستخدم فريم 1H أو 15m للوضوح
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        prev = df.iloc[-2] # الشمعة المكتملة
-        last_close = df.iloc[-1]['close'] # السعر الحالي
+        # 1. تحديد الهيكل (Swing Highs/Lows) - آخر 20 شمعة
+        swing_high = df['high'].rolling(20).max().shift(1)
+        swing_low = df['low'].rolling(20).min().shift(1)
         
-        # --- حساب النقاط الرقمية ---
-        pp = (prev['high'] + prev['low'] + prev['close']) / 3
-        r1 = (2 * pp) - prev['low']
-        s1 = (2 * pp) - prev['high']
+        # ATR للأهداف
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        atr = df['atr'].iloc[-1]
         
-        # --- حساب "الخطوة الرقمية" (Pivot Step) ---
-        # هذه هي المسافة الآمنة بناءً على تذبذب الشمعة السابقة
-        # نستخدمها لتحديد الأهداف والستوب نسبةً لسعر الدخول الحالي
-        step = abs(r1 - pp)
-        
-        # حماية من التذبذب الصفري
-        if step == 0: step = last_close * 0.01 
+        curr = df.iloc[-1]
+        entry = curr['close']
 
-        # 🟢 LONG: اختراق R1
-        if last_close > r1 and prev['close'] < r1:
-            # الأهداف تُضاف فوق سعر الدخول الحالي
-            tp1 = last_close + step
-            tp2 = last_close + (step * 2)
-            tp3 = last_close + (step * 4)
-            sl = last_close - step # الستوب تحت الدخول بخطوة
-            return "LONG", last_close, sl, tp1, tp2, tp3, r1
+        # ----------------------------------------------------
+        # 🔴 سيناريو البيع (BEARISH SETUP) - كما في الصور
+        # ----------------------------------------------------
+        # 1. السعر الحالي تحت آخر قاع (Break of Structure)
+        # 2. نبحث عن "الموجة الدافعة" التي كسرت القاع
+        
+        # نحدد أعلى قمة في الموجة الحالية (بداية الهبوط)
+        recent_high = df['high'].iloc[-15:].max()
+        recent_low = df['low'].iloc[-5:].min() # أدنى قاع وصلنا له
+        
+        # هل حدث كسر لقاع سابق مهم؟
+        # نفترض أن swing_low هو القاع المكسور (الدعم الذي أصبح مقاومة)
+        broken_support = df['low'].rolling(30).min().iloc[-10] 
+        
+        # شرط 1: السعر كسر الدعم ونزل تحته
+        if recent_low < broken_support:
+            
+            # حساب فيبوناتشي للموجة الهابطة (من القمة للقاع الحالي)
+            fib_range = recent_high - recent_low
+            fib_05 = recent_low + (fib_range * 0.5)
+            fib_618 = recent_low + (fib_range * 0.618)
+            fib_stop = recent_low + (fib_range * 0.786)
+            
+            # شرط 2: السعر الحالي يصحح ووصل للمنطقة الذهبية (0.5 - 0.618)
+            # وشرط 3: هذه المنطقة تتطابق مع الدعم المكسور (S/R Flip)
+            in_golden_zone = (entry >= fib_05) and (entry <= fib_618)
+            near_broken_support = abs(entry - broken_support) < (atr * 0.5) # قريب من الدعم المكسور
+            
+            if in_golden_zone: # أو near_broken_support (لزيادة الفرص)
+                # شرط 4: وجود FVG في هذه المنطقة (شمعة هبوط قوية سابقة)
+                # (نبسطها بالتحقق أن الإغلاق الحالي أقل من القمة)
+                 
+                sl = fib_stop
+                risk = sl - entry
+                tp1 = recent_low # العودة للقاع
+                tp2 = recent_low - (risk * 2) # امتداد
+                tp3 = recent_low - (risk * 4) 
+                
+                return "SHORT", entry, sl, tp1, tp2, tp3, "Golden FVG"
 
-        # 🔴 SHORT: كسر S1
-        if last_close < s1 and prev['close'] > s1:
-            # الأهداف تُطرح من سعر الدخول الحالي
-            tp1 = last_close - step
-            tp2 = last_close - (step * 2)
-            tp3 = last_close - (step * 4)
-            sl = last_close + step # الستوب فوق الدخول بخطوة
-            return "SHORT", last_close, sl, tp1, tp2, tp3, s1
+        # ----------------------------------------------------
+        # 🟢 سيناريو الشراء (BULLISH SETUP) - العكس
+        # ----------------------------------------------------
+        recent_low_bull = df['low'].iloc[-15:].min()
+        recent_high_bull = df['high'].iloc[-5:].max()
+        broken_resistance = df['high'].rolling(30).max().iloc[-10]
+        
+        if recent_high_bull > broken_resistance:
+            
+            fib_range = recent_high_bull - recent_low_bull
+            fib_05 = recent_high_bull - (fib_range * 0.5)
+            fib_618 = recent_high_bull - (fib_range * 0.618)
+            fib_stop = recent_high_bull - (fib_range * 0.786)
+            
+            in_golden_zone = (entry <= fib_05) and (entry >= fib_618)
+            
+            if in_golden_zone:
+                sl = fib_stop
+                risk = entry - sl
+                tp1 = recent_high_bull
+                tp2 = recent_high_bull + (risk * 2)
+                tp3 = recent_high_bull + (risk * 4)
+                
+                return "LONG", entry, sl, tp1, tp2, tp3, "Golden FVG"
 
         return None
     except: return None
@@ -124,15 +166,15 @@ async def get_signal(symbol):
 # 5. التشغيل والمراقبة
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 بدأ النظام الرقمي المصحح...")
+    print(f"🚀 بدأ نظام القناص الذهبي (Golden FVG)...")
     while True:
         for sym in app_state.symbols:
             name = sym.split('/')[0]
-            print(f"🔢 فحص: {name}...", end='\r')
+            print(f"🔎 فحص: {name}...", end='\r')
             
             res = await get_signal(sym)
             if res:
-                side, entry, sl, tp1, tp2, tp3, level = res
+                side, entry, sl, tp1, tp2, tp3, setup = res
                 key = f"{sym}_{side}"
                 
                 # تكرار كل 4 ساعات
@@ -140,19 +182,18 @@ async def start_scanning(app_state):
                     app_state.sent_signals[key] = time.time()
                     app_state.stats["total"] += 1
                     
-                    # --- رسالة نظيفة جداً ---
                     msg = (f"🪙 <b>العملة:</b> <code>{name}</code>\n"
                            f"📈 <b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
                            f"⚡ <b>الرافعة:</b> <code>Cross 20x</code>\n\n"
-                           f"📥 <b>الدخول:</b> <code>{entry:.8f}</code>\n"
+                           f"📥 <b>الدخول (Golden Zone):</b> <code>{entry:.8f}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
                            f"🎯 <b>هدف 1:</b> <code>{tp1:.8f}</code>\n"
                            f"🎯 <b>هدف 2:</b> <code>{tp2:.8f}</code>\n"
                            f"🎯 <b>هدف 3:</b> <code>{tp3:.8f}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
-                           f"🚫 <b>الستوب:</b> <code>{sl:.8f}</code>")
+                           f"🚫 <b>الستوب (0.786):</b> <code>{sl:.8f}</code>")
                     
-                    print(f"\n✨ إشارة جديدة: {name} {side}")
+                    print(f"\n🏆 إشارة ذهبية: {name} {side}")
                     mid = await send_telegram_msg(msg)
                     if mid: 
                         app_state.active_trades[sym] = {
@@ -170,19 +211,16 @@ async def monitor_trades(app_state):
                 t = await exchange.fetch_ticker(sym); p, s = t['last'], trade['side']
                 msg_id = trade["msg_id"]
                 
-                # متابعة الأهداف
                 for target, label in [("tp1", "هدف 1"), ("tp2", "هدف 2"), ("tp3", "هدف 3")]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            # الرد على الرسالة
                             await reply_telegram_msg(f"✅ <b>تحقق {label} لعملة</b> <code>{sym.split('/')[0]}</code>", msg_id)
                             trade["hit"].append(target)
                             if target == "tp1": app_state.stats["wins"] += 1
 
-                # متابعة الستوب
                 if (s == "LONG" and p <= trade["sl"]) or (s == "SHORT" and p >= trade["sl"]):
                     app_state.stats["losses"] += 1
-                    await reply_telegram_msg(f"❌ <b>ضرب الستوب لعملة</b> <code>{sym.split('/')[0]}</code>", msg_id)
+                    await reply_telegram_msg(f"❌ <b>ضرب الستوب</b>", msg_id)
                     del app_state.active_trades[sym]
                 elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
 
