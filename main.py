@@ -11,31 +11,19 @@ from datetime import datetime
 import httpx
 
 # ==========================================
-# 1. الإعدادات والعملات
+# 1. الإعدادات
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-
-MY_TARGETS = [
-    'BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', 'ADA', 'NEAR', 'XRP', 'MATIC', 'LINK', 
-    'DOT', 'LTC', 'ATOM', 'UNI', 'ALGO', 'VET', 'ICP', 'FIL', 'HBAR', 'FTM', 
-    'INJ', 'OP', 'ARB', 'SEI', 'SUI', 'RNDR', 'TIA', 'ORDI', 'TRX', 'BCH', 
-    'AAVE', 'PEPE', 'SHIB', 'ETC', 'IMX', 'STX', 'GRT', 'MKR', 'LDO', 'GALA', 
-    'RUNE', 'DYDX', 'EGLD', 'FET', 'FLOW', 'CFX', 'SAND', 'MANA', 'AXS', 
-    'BEAM', 'BONK', 'WIF', 'JUP', 'PYTH', 'ARKM', 'ALT', 'MANTA', 'PENDLE', 'ONDO', 
-    'APT', 'KAS', 'KCS', 'BGB', 'MNT', 'LUNC', 'BTT', 'THETA', 'SNX', 'NEO', 
-    'EOS', 'IOTA', 'KAVA', 'CHZ', 'ZIL', 'ENJ', 'BAT', 'COMP', 'CRV', 'DASH', 
-    'ZEC', 'XTZ', 'QTUM', 'OMG', 'WOO', 'JASMY', 'STG', 'ID', 'GMX', 'LRC', 
-    'ANKR', 'MASK', 'ENS', 'GMT', 'ENA', 'CORE', 'TAO', 'RAY', 'JTO'
-]
+BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
 app = FastAPI()
 
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
 async def root():
-    return "<html><body style='background:#000;color:#gold;text-align:center;padding-top:50px;'><h1>🏆 Perfect Confluence Sniper</h1></body></html>"
+    return "<html><body style='background:#000;color:#00ff00;text-align:center;padding-top:50px;'><h1>💎 Smart Turbo Sniper Active</h1><p>Mode: 1H Scan + 4H Verification</p></body></html>"
 
 # ==========================================
 # 2. دوال التليجرام
@@ -58,29 +46,58 @@ async def reply_telegram_msg(message, reply_to_msg_id):
         except: pass
 
 # ==========================================
-# 3. محرك التحليل (The Core Engine)
+# 3. محرك الاستراتيجية (Smart Engine)
 # ==========================================
+async def check_4h_trend(symbol, signal_type):
+    """دالة ذكية تفحص فريم 4 ساعات فقط عند الحاجة"""
+    try:
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=50)
+        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        df['ema_50'] = ta.ema(df['close'], length=50)
+        
+        last_close = df['close'].iloc[-1]
+        ema_val = df['ema_50'].iloc[-1]
+        
+        # إذا كانت الإشارة شراء، يجب أن يكون السعر فوق متوسط 50 على 4 ساعات (أو قريب من الانعكاس)
+        if signal_type == "LONG":
+            return last_close > ema_val
+        # إذا كانت بيع، يجب أن يكون السعر تحت متوسط 50
+        elif signal_type == "SHORT":
+            return last_close < ema_val
+        return False
+    except: return False
+
 async def get_signal(symbol):
     try:
-        bars_4h = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=50)
-        df_4h = pd.DataFrame(bars_4h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        # 1. المرحلة الأولى: فحص فريم الساعة (1H)
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        bars_1h = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
-        df = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        
+        # فلتر الفوليوم: التأكد من وجود سيولة
+        vol_ma = df['vol'].rolling(20).mean()
+        volume_ok = df['vol'].iloc[-1] > (vol_ma.iloc[-1] * 1.2) # حجم أعلى بـ 20% من المتوسط
+
+        # المتوسطات
         df['ema_9'] = ta.ema(df['close'], length=9)
         df['ema_21'] = ta.ema(df['close'], length=21)
         
-        swing_high = df['high'].rolling(15).max().shift(1)
-        swing_low = df['low'].rolling(15).min().shift(1)
+        # الهيكل (Swing Points)
+        swing_high = df['high'].rolling(20).max().shift(1)
+        swing_low = df['low'].rolling(20).min().shift(1)
         
         curr = df.iloc[-1]
         entry = curr['close']
 
-        # 🔴 SHORT Setup
-        trend_reversal_down = (df['ema_9'].iloc[-1] < df['ema_21'].iloc[-1]) and (df['ema_9'].iloc[-2] > df['ema_21'].iloc[-2])
-        wave_high = df['high'].iloc[-30:].max()
-        wave_low = df['low'].iloc[-10:].min()
+        # ----------------------------------
+        # 🔴 سيناريو البيع (SHORT)
+        # ----------------------------------
+        ema_cross_down = (df['ema_9'].iloc[-1] < df['ema_21'].iloc[-1])
+        bos_down = entry < swing_low.iloc[-1]
+        
+        # تحديد الموجة
+        wave_high_idx = df['high'].iloc[-30:].idxmax()
+        wave_high = df['high'].loc[wave_high_idx]
+        wave_low = df['low'].iloc[-5:].min()
         
         fib_range = wave_high - wave_low
         if fib_range == 0: return None
@@ -88,31 +105,44 @@ async def get_signal(symbol):
         fib_05 = wave_low + (fib_range * 0.5)
         fib_618 = wave_low + (fib_range * 0.618)
         
-        in_golden_zone = (entry >= fib_05) and (entry <= fib_618)
+        in_gold_zone = (entry >= fib_05) and (entry <= fib_618)
         
-        has_fvg_down = False
-        for i in range(2, 10):
-            if df['low'].iloc[-i-2] > df['high'].iloc[-i]:
-                fvg_zone_high = df['low'].iloc[-i-2]
-                fvg_zone_low = df['high'].iloc[-i]
-                if fvg_zone_low <= fib_618 and fvg_zone_high >= fib_05:
-                    has_fvg_down = True
+        # فحص FVG
+        has_fvg = False
+        start_scan = max(0, int(wave_high_idx) - df.index[0])
+        for i in range(start_scan, len(df)-2):
+            if df['low'].iloc[i] > df['high'].iloc[i+2]:
+                fvg_high = df['low'].iloc[i]
+                fvg_low = df['high'].iloc[i+2]
+                if fvg_low <= fib_618 and fvg_high >= fib_05:
+                    has_fvg = True
                     break
         
-        structure_break_down = entry < swing_low.iloc[-1] or trend_reversal_down
+        # فحص OB
+        ob_candle = df.iloc[start_scan]
+        is_ob = ob_candle['close'] > ob_candle['open']
         
-        if in_golden_zone and has_fvg_down and structure_break_down:
-            sl = wave_high + (fib_range * 0.05)
-            risk = sl - entry
-            tp1 = wave_low
-            tp2 = wave_low - (fib_range * 0.618)
-            tp3 = wave_low - (fib_range * 4.0)
-            return "SHORT", entry, sl, tp1, tp2, tp3
+        # === التحقق الأولي على الساعة ===
+        if ema_cross_down and bos_down and in_gold_zone and has_fvg and is_ob and volume_ok:
+            # ✅ الفحص الذكي: الآن فقط نذهب لفريم 4 ساعات للتأكد
+            is_4h_bearish = await check_4h_trend(symbol, "SHORT")
+            
+            if is_4h_bearish:
+                sl = wave_high + (fib_range * 0.02)
+                tp1 = wave_low
+                tp2 = wave_low - (fib_range * 0.618)
+                tp3 = wave_low - (fib_range * 4.0) # هدف 400%
+                return "SHORT", entry, sl, tp1, tp2, tp3
 
-        # 🟢 LONG Setup
-        trend_reversal_up = (df['ema_9'].iloc[-1] > df['ema_21'].iloc[-1]) and (df['ema_9'].iloc[-2] < df['ema_21'].iloc[-2])
-        wave_low = df['low'].iloc[-30:].min()
-        wave_high = df['high'].iloc[-10:].max()
+        # ----------------------------------
+        # 🟢 سيناريو الشراء (LONG)
+        # ----------------------------------
+        ema_cross_up = (df['ema_9'].iloc[-1] > df['ema_21'].iloc[-1])
+        bos_up = entry > swing_high.iloc[-1]
+        
+        wave_low_idx = df['low'].iloc[-30:].idxmin()
+        wave_low = df['low'].loc[wave_low_idx]
+        wave_high = df['high'].iloc[-5:].max()
         
         fib_range = wave_high - wave_low
         if fib_range == 0: return None
@@ -120,70 +150,84 @@ async def get_signal(symbol):
         fib_05 = wave_high - (fib_range * 0.5)
         fib_618 = wave_high - (fib_range * 0.618)
         
-        in_golden_zone = (entry <= fib_05) and (entry >= fib_618)
+        in_gold_zone = (entry <= fib_05) and (entry >= fib_618)
         
-        has_fvg_up = False
-        for i in range(2, 10):
-            if df['high'].iloc[-i-2] < df['low'].iloc[-i]:
-                fvg_zone_low = df['high'].iloc[-i-2]
-                fvg_zone_high = df['low'].iloc[-i]
-                if fvg_zone_high >= fib_618 and fvg_zone_low <= fib_05:
-                    has_fvg_up = True
+        has_fvg = False
+        start_scan = max(0, int(wave_low_idx) - df.index[0])
+        for i in range(start_scan, len(df)-2):
+            if df['high'].iloc[i] < df['low'].iloc[i+2]:
+                fvg_low = df['high'].iloc[i]
+                fvg_high = df['low'].iloc[i+2]
+                if fvg_high >= fib_618 and fvg_low <= fib_05:
+                    has_fvg = True
                     break
+                    
+        ob_candle = df.iloc[start_scan]
+        is_ob = ob_candle['close'] < ob_candle['open']
         
-        structure_break_up = entry > swing_high.iloc[-1] or trend_reversal_up
-
-        if in_golden_zone and has_fvg_up and structure_break_up:
-            sl = wave_low - (fib_range * 0.05)
-            risk = entry - sl
-            tp1 = wave_high
-            tp2 = wave_high + (fib_range * 0.618)
-            tp3 = wave_high + (fib_range * 4.0)
-            return "LONG", entry, sl, tp1, tp2, tp3
+        if ema_cross_up and bos_up and in_gold_zone and has_fvg and is_ob and volume_ok:
+            # ✅ الفحص الذكي: التأكد من 4 ساعات
+            is_4h_bullish = await check_4h_trend(symbol, "LONG")
+            
+            if is_4h_bullish:
+                sl = wave_low - (fib_range * 0.02)
+                tp1 = wave_high
+                tp2 = wave_high + (fib_range * 0.618)
+                tp3 = wave_high + (fib_range * 4.0) # هدف 400%
+                return "LONG", entry, sl, tp1, tp2, tp3
 
         return None
     except: return None
 
 # ==========================================
-# 4. التشغيل والمراقبة
+# 4. المعالجة المتوازية (Turbo Scanner)
 # ==========================================
-async def start_scanning(app_state):
-    print(f"🚀 بدأ النظام...")
-    while True:
-        for sym in app_state.symbols:
-            name = sym.split('/')[0]
-            print(f"🛡️ فحص: {name}...", end='\r')
+sem = asyncio.Semaphore(5) 
+
+async def safe_check(symbol, app_state):
+    async with sem:
+        res = await get_signal(symbol)
+        if res:
+            side, entry, sl, tp1, tp2, tp3 = res
+            key = f"{symbol}_{side}"
             
-            res = await get_signal(sym)
-            if res:
-                side, entry, sl, tp1, tp2, tp3 = res
-                key = f"{sym}_{side}"
+            if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 14400:
+                app_state.sent_signals[key] = time.time()
+                app_state.stats["total"] += 1
+                name = symbol.split('/')[0]
                 
-                if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 14400:
-                    app_state.sent_signals[key] = time.time()
-                    app_state.stats["total"] += 1
-                    
-                    # --- الرسالة النظيفة (بدون كلمات زائدة) ---
-                    msg = (f"🪙 <b>العملة:</b> <code>{name}</code>\n"
-                           f"📈 <b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
-                           f"⚡ <b>الرافعة:</b> <code>Cross 20x</code>\n\n"
-                           f"📥 <b>الدخول:</b> <code>{entry:.8f}</code>\n"
-                           f"━━━━━━━━━━━━━━\n"
-                           f"🎯 <b>هدف 1:</b> <code>{tp1:.8f}</code>\n"
-                           f"🎯 <b>هدف 2:</b> <code>{tp2:.8f}</code>\n"
-                           f"🎯 <b>هدف 3:</b> <code>{tp3:.8f}</code>\n"
-                           f"━━━━━━━━━━━━━━\n"
-                           f"🚫 <b>الستوب:</b> <code>{sl:.8f}</code>")
-                    
-                    print(f"\n💎 إشارة جديدة: {name} {side}")
-                    mid = await send_telegram_msg(msg)
-                    if mid: 
-                        app_state.active_trades[sym] = {
-                            "side": side, "tp1": tp1, "tp2": tp2, "tp3": tp3, 
-                            "sl": sl, "msg_id": mid, "hit": []
-                        }
-            await asyncio.sleep(0.2)
-        await asyncio.sleep(5)
+                msg = (f"🪙 <b>العملة:</b> <code>{name}</code>\n"
+                       f"📈 <b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
+                       f"⚡ <b>الرافعة:</b> <code>Cross 20x</code>\n\n"
+                       f"📥 <b>الدخول:</b> <code>{entry:.8f}</code>\n"
+                       f"━━━━━━━━━━━━━━\n"
+                       f"🎯 <b>هدف 1:</b> <code>{tp1:.8f}</code>\n"
+                       f"🎯 <b>هدف 2:</b> <code>{tp2:.8f}</code>\n"
+                       f"🎯 <b>هدف 3 (400%):</b> <code>{tp3:.8f}</code>\n"
+                       f"━━━━━━━━━━━━━━\n"
+                       f"🚫 <b>الستوب:</b> <code>{sl:.8f}</code>")
+                
+                print(f"\n💎 إشارة مؤكدة (1H+4H): {name} {side}")
+                mid = await send_telegram_msg(msg)
+                if mid: 
+                    app_state.active_trades[symbol] = {
+                        "side": side, "tp1": tp1, "tp2": tp2, "tp3": tp3, 
+                        "sl": sl, "msg_id": mid, "hit": []
+                    }
+
+async def start_scanning(app_state):
+    print(f"🚀 جاري تحميل كل العملات المتاحة...")
+    markets = await exchange.load_markets()
+    all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
+    print(f"✅ تم تحميل {len(all_symbols)} عملة للفحص!")
+    
+    app_state.symbols = all_symbols
+
+    while True:
+        tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
+        await asyncio.gather(*tasks)
+        print(f"🔄 اكتملت الدورة..", end='\r')
+        await asyncio.sleep(10)
 
 async def monitor_trades(app_state):
     while True:
@@ -196,8 +240,7 @@ async def monitor_trades(app_state):
                 for target, label in [("tp1", "هدف 1"), ("tp2", "هدف 2"), ("tp3", "هدف 3")]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            # رسالة الرد نظيفة ومختصرة
-                            await reply_telegram_msg(f"✅ <b>تم تحقيق {label}</b>", msg_id)
+                            await reply_telegram_msg(f"✅ <b>تحقق {label}</b>", msg_id)
                             trade["hit"].append(target)
                             if target == "tp1": app_state.stats["wins"] += 1
 
@@ -231,8 +274,8 @@ async def keep_alive_task():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    exchange.rateLimit = True 
     await exchange.load_markets()
-    app.state.symbols = [s for t in MY_TARGETS for s in [f"{t}/USDT:USDT", f"{t}/USDT"] if s in exchange.symbols]
     app.state.sent_signals = {}; app.state.active_trades = {}; app.state.stats = {"total":0, "wins":0, "losses":0}
     t1 = asyncio.create_task(start_scanning(app.state)); t2 = asyncio.create_task(monitor_trades(app.state))
     t3 = asyncio.create_task(daily_report_task(app.state)); t4 = asyncio.create_task(keep_alive_task())
