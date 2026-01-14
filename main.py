@@ -16,7 +16,6 @@ import httpx
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-SIGNALS_FILE = "sent_signals.txt"
 
 MY_TARGETS = [
     'BTC', 'ETH', 'SOL', 'AVAX', 'DOGE', 'ADA', 'NEAR', 'XRP', 'MATIC', 'LINK', 
@@ -31,26 +30,15 @@ MY_TARGETS = [
     'ANKR', 'MASK', 'ENS', 'GMT', 'ENA', 'CORE', 'TAO', 'RAY', 'JTO'
 ]
 
-# ==========================================
-# 2. الواجهة
-# ==========================================
 app = FastAPI()
 
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
 async def root():
-    return """
-    <html>
-        <body style='background:#121212;color:#d4af37;text-align:center;font-family:sans-serif;padding-top:50px;'>
-            <h1>🏆 Golden FVG Breaker Strategy</h1>
-            <p>Logic: Breakout + S/R Flip + FVG + Fib (0.618)</p>
-            <p>Status: Hunting Confluence...</p>
-        </body>
-    </html>
-    """
+    return "<html><body style='background:#000;color:#gold;text-align:center;padding-top:50px;'><h1>🏆 Perfect Confluence Sniper</h1></body></html>"
 
 # ==========================================
-# 3. دوال التليجرام
+# 2. دوال التليجرام
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -64,136 +52,130 @@ async def send_telegram_msg(message):
 
 async def reply_telegram_msg(message, reply_to_msg_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID, 
-        "text": message, 
-        "parse_mode": "HTML", 
-        "reply_to_message_id": reply_to_msg_id
-    }
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML", "reply_to_message_id": reply_to_msg_id}
     async with httpx.AsyncClient(timeout=15.0) as client:
         try: await client.post(url, json=payload)
         except: pass
 
 # ==========================================
-# 4. محرك الاستراتيجية (The Confluence Engine)
+# 3. محرك التحليل (The Core Engine)
 # ==========================================
 async def get_signal(symbol):
     try:
-        # نستخدم فريم 1H أو 15m للوضوح
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
-        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        bars_4h = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=50)
+        df_4h = pd.DataFrame(bars_4h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. تحديد الهيكل (Swing Highs/Lows) - آخر 20 شمعة
-        swing_high = df['high'].rolling(20).max().shift(1)
-        swing_low = df['low'].rolling(20).min().shift(1)
+        bars_1h = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+        df = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # ATR للأهداف
-        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-        atr = df['atr'].iloc[-1]
+        df['ema_9'] = ta.ema(df['close'], length=9)
+        df['ema_21'] = ta.ema(df['close'], length=21)
+        
+        swing_high = df['high'].rolling(15).max().shift(1)
+        swing_low = df['low'].rolling(15).min().shift(1)
         
         curr = df.iloc[-1]
         entry = curr['close']
 
-        # ----------------------------------------------------
-        # 🔴 سيناريو البيع (BEARISH SETUP) - كما في الصور
-        # ----------------------------------------------------
-        # 1. السعر الحالي تحت آخر قاع (Break of Structure)
-        # 2. نبحث عن "الموجة الدافعة" التي كسرت القاع
+        # 🔴 SHORT Setup
+        trend_reversal_down = (df['ema_9'].iloc[-1] < df['ema_21'].iloc[-1]) and (df['ema_9'].iloc[-2] > df['ema_21'].iloc[-2])
+        wave_high = df['high'].iloc[-30:].max()
+        wave_low = df['low'].iloc[-10:].min()
         
-        # نحدد أعلى قمة في الموجة الحالية (بداية الهبوط)
-        recent_high = df['high'].iloc[-15:].max()
-        recent_low = df['low'].iloc[-5:].min() # أدنى قاع وصلنا له
+        fib_range = wave_high - wave_low
+        if fib_range == 0: return None
         
-        # هل حدث كسر لقاع سابق مهم؟
-        # نفترض أن swing_low هو القاع المكسور (الدعم الذي أصبح مقاومة)
-        broken_support = df['low'].rolling(30).min().iloc[-10] 
+        fib_05 = wave_low + (fib_range * 0.5)
+        fib_618 = wave_low + (fib_range * 0.618)
         
-        # شرط 1: السعر كسر الدعم ونزل تحته
-        if recent_low < broken_support:
-            
-            # حساب فيبوناتشي للموجة الهابطة (من القمة للقاع الحالي)
-            fib_range = recent_high - recent_low
-            fib_05 = recent_low + (fib_range * 0.5)
-            fib_618 = recent_low + (fib_range * 0.618)
-            fib_stop = recent_low + (fib_range * 0.786)
-            
-            # شرط 2: السعر الحالي يصحح ووصل للمنطقة الذهبية (0.5 - 0.618)
-            # وشرط 3: هذه المنطقة تتطابق مع الدعم المكسور (S/R Flip)
-            in_golden_zone = (entry >= fib_05) and (entry <= fib_618)
-            near_broken_support = abs(entry - broken_support) < (atr * 0.5) # قريب من الدعم المكسور
-            
-            if in_golden_zone: # أو near_broken_support (لزيادة الفرص)
-                # شرط 4: وجود FVG في هذه المنطقة (شمعة هبوط قوية سابقة)
-                # (نبسطها بالتحقق أن الإغلاق الحالي أقل من القمة)
-                 
-                sl = fib_stop
-                risk = sl - entry
-                tp1 = recent_low # العودة للقاع
-                tp2 = recent_low - (risk * 2) # امتداد
-                tp3 = recent_low - (risk * 4) 
-                
-                return "SHORT", entry, sl, tp1, tp2, tp3, "Golden FVG"
+        in_golden_zone = (entry >= fib_05) and (entry <= fib_618)
+        
+        has_fvg_down = False
+        for i in range(2, 10):
+            if df['low'].iloc[-i-2] > df['high'].iloc[-i]:
+                fvg_zone_high = df['low'].iloc[-i-2]
+                fvg_zone_low = df['high'].iloc[-i]
+                if fvg_zone_low <= fib_618 and fvg_zone_high >= fib_05:
+                    has_fvg_down = True
+                    break
+        
+        structure_break_down = entry < swing_low.iloc[-1] or trend_reversal_down
+        
+        if in_golden_zone and has_fvg_down and structure_break_down:
+            sl = wave_high + (fib_range * 0.05)
+            risk = sl - entry
+            tp1 = wave_low
+            tp2 = wave_low - (fib_range * 0.618)
+            tp3 = wave_low - (fib_range * 4.0)
+            return "SHORT", entry, sl, tp1, tp2, tp3
 
-        # ----------------------------------------------------
-        # 🟢 سيناريو الشراء (BULLISH SETUP) - العكس
-        # ----------------------------------------------------
-        recent_low_bull = df['low'].iloc[-15:].min()
-        recent_high_bull = df['high'].iloc[-5:].max()
-        broken_resistance = df['high'].rolling(30).max().iloc[-10]
+        # 🟢 LONG Setup
+        trend_reversal_up = (df['ema_9'].iloc[-1] > df['ema_21'].iloc[-1]) and (df['ema_9'].iloc[-2] < df['ema_21'].iloc[-2])
+        wave_low = df['low'].iloc[-30:].min()
+        wave_high = df['high'].iloc[-10:].max()
         
-        if recent_high_bull > broken_resistance:
-            
-            fib_range = recent_high_bull - recent_low_bull
-            fib_05 = recent_high_bull - (fib_range * 0.5)
-            fib_618 = recent_high_bull - (fib_range * 0.618)
-            fib_stop = recent_high_bull - (fib_range * 0.786)
-            
-            in_golden_zone = (entry <= fib_05) and (entry >= fib_618)
-            
-            if in_golden_zone:
-                sl = fib_stop
-                risk = entry - sl
-                tp1 = recent_high_bull
-                tp2 = recent_high_bull + (risk * 2)
-                tp3 = recent_high_bull + (risk * 4)
-                
-                return "LONG", entry, sl, tp1, tp2, tp3, "Golden FVG"
+        fib_range = wave_high - wave_low
+        if fib_range == 0: return None
+        
+        fib_05 = wave_high - (fib_range * 0.5)
+        fib_618 = wave_high - (fib_range * 0.618)
+        
+        in_golden_zone = (entry <= fib_05) and (entry >= fib_618)
+        
+        has_fvg_up = False
+        for i in range(2, 10):
+            if df['high'].iloc[-i-2] < df['low'].iloc[-i]:
+                fvg_zone_low = df['high'].iloc[-i-2]
+                fvg_zone_high = df['low'].iloc[-i]
+                if fvg_zone_high >= fib_618 and fvg_zone_low <= fib_05:
+                    has_fvg_up = True
+                    break
+        
+        structure_break_up = entry > swing_high.iloc[-1] or trend_reversal_up
+
+        if in_golden_zone and has_fvg_up and structure_break_up:
+            sl = wave_low - (fib_range * 0.05)
+            risk = entry - sl
+            tp1 = wave_high
+            tp2 = wave_high + (fib_range * 0.618)
+            tp3 = wave_high + (fib_range * 4.0)
+            return "LONG", entry, sl, tp1, tp2, tp3
 
         return None
     except: return None
 
 # ==========================================
-# 5. التشغيل والمراقبة
+# 4. التشغيل والمراقبة
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 بدأ نظام القناص الذهبي (Golden FVG)...")
+    print(f"🚀 بدأ النظام...")
     while True:
         for sym in app_state.symbols:
             name = sym.split('/')[0]
-            print(f"🔎 فحص: {name}...", end='\r')
+            print(f"🛡️ فحص: {name}...", end='\r')
             
             res = await get_signal(sym)
             if res:
-                side, entry, sl, tp1, tp2, tp3, setup = res
+                side, entry, sl, tp1, tp2, tp3 = res
                 key = f"{sym}_{side}"
                 
-                # تكرار كل 4 ساعات
                 if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 14400:
                     app_state.sent_signals[key] = time.time()
                     app_state.stats["total"] += 1
                     
+                    # --- الرسالة النظيفة (بدون كلمات زائدة) ---
                     msg = (f"🪙 <b>العملة:</b> <code>{name}</code>\n"
                            f"📈 <b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
                            f"⚡ <b>الرافعة:</b> <code>Cross 20x</code>\n\n"
-                           f"📥 <b>الدخول (Golden Zone):</b> <code>{entry:.8f}</code>\n"
+                           f"📥 <b>الدخول:</b> <code>{entry:.8f}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
                            f"🎯 <b>هدف 1:</b> <code>{tp1:.8f}</code>\n"
                            f"🎯 <b>هدف 2:</b> <code>{tp2:.8f}</code>\n"
                            f"🎯 <b>هدف 3:</b> <code>{tp3:.8f}</code>\n"
                            f"━━━━━━━━━━━━━━\n"
-                           f"🚫 <b>الستوب (0.786):</b> <code>{sl:.8f}</code>")
+                           f"🚫 <b>الستوب:</b> <code>{sl:.8f}</code>")
                     
-                    print(f"\n🏆 إشارة ذهبية: {name} {side}")
+                    print(f"\n💎 إشارة جديدة: {name} {side}")
                     mid = await send_telegram_msg(msg)
                     if mid: 
                         app_state.active_trades[sym] = {
@@ -214,7 +196,8 @@ async def monitor_trades(app_state):
                 for target, label in [("tp1", "هدف 1"), ("tp2", "هدف 2"), ("tp3", "هدف 3")]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            await reply_telegram_msg(f"✅ <b>تحقق {label} لعملة</b> <code>{sym.split('/')[0]}</code>", msg_id)
+                            # رسالة الرد نظيفة ومختصرة
+                            await reply_telegram_msg(f"✅ <b>تم تحقيق {label}</b>", msg_id)
                             trade["hit"].append(target)
                             if target == "tp1": app_state.stats["wins"] += 1
 
