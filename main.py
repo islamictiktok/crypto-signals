@@ -9,7 +9,6 @@ from contextlib import asynccontextmanager
 import time
 from datetime import datetime
 import httpx
-import math
 
 # ==========================================
 # 1. الإعدادات
@@ -26,16 +25,15 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#000;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>⚡ Futures Sniper (Live Price Fix)</h1>
-            <p>Exchange: KuCoin Futures</p>
-            <p>Status: Fetching Real-Time Tickers...</p>
+        <body style='background:#000;color:#fff;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🐋 Whale Sniper (Clean Mode)</h1>
+            <p>Strategy: 4H Volume Breakout</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 2. دوال مساعدة
+# 2. دوال الاتصال
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -55,56 +53,49 @@ async def reply_telegram_msg(message, reply_to_msg_id):
         except: pass
 
 def format_price(price):
-    """تنسيق السعر بذكاء حسب قيمته"""
     if price is None: return "0.00"
-    if price < 0.001: return f"{price:.8f}" # للعملات الصغيرة جداً مثل PEPE
-    if price < 1.0: return f"{price:.6f}"   # للعملات الصغيرة
-    if price < 100: return f"{price:.4f}"   # للعملات المتوسطة
-    return f"{price:.2f}"                   # للعملات الكبيرة مثل BTC
+    if price < 0.001: return f"{price:.8f}"
+    if price < 1.0: return f"{price:.6f}"
+    if price < 100: return f"{price:.4f}"
+    return f"{price:.2f}"
 
 # ==========================================
-# 3. محرك التحليل
+# 3. محرك الاستراتيجية (4H Whale)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # تحليل الشارت
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=300)
+        # فريم 4 ساعات
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # المؤشرات
-        df['ema_200'] = ta.ema(df['close'], length=200)
-        stoch = ta.stochrsi(df['close'], length=14, rsi_length=14, k=3, d=3)
-        df['stoch_k'] = stoch[stoch.columns[0]]
-        df['stoch_d'] = stoch[stoch.columns[1]]
+        df['ema_50'] = ta.ema(df['close'], length=50)
+        df['rsi'] = ta.rsi(df['close'], length=14)
         
         adx = ta.adx(df['high'], df['low'], df['close'], length=14)
         df['adx'] = adx['ADX_14']
+        
+        df['vol_ma'] = df['vol'].rolling(20).mean()
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         
         curr = df.iloc[-1]
-        prev = df.iloc[-2]
-        # ملاحظة: هنا نستخدم سعر الإغلاق فقط للمقارنة مع المؤشرات
-        # السعر الحقيقي سنجلبه في دالة safe_check
-        chart_price = curr['close'] 
         
-        if curr['adx'] < 20: return None
+        # الشروط: ADX قوي + فوليوم عالي
+        if curr['adx'] < 30: return None
+        if curr['vol'] < (curr['vol_ma'] * 1.5): return None
 
-        # 🟢 LONG Logic
-        if chart_price > curr['ema_200']:
-            if (prev['stoch_k'] < 20) and (curr['stoch_k'] > curr['stoch_d']):
-                # نرجع القيم الأساسية للحساب لاحقاً
-                return "LONG", curr['atr']
+        # 🟢 LONG
+        if (curr['close'] > curr['ema_50']) and (50 < curr['rsi'] < 75):
+            return "LONG", curr['atr']
 
-        # 🔴 SHORT Logic
-        if chart_price < curr['ema_200']:
-            if (prev['stoch_k'] > 80) and (curr['stoch_k'] < curr['stoch_d']):
-                return "SHORT", curr['atr']
+        # 🔴 SHORT
+        if (curr['close'] < curr['ema_50']) and (25 < curr['rsi'] < 50):
+            return "SHORT", curr['atr']
 
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة وجلب السعر اللحظي
+# 4. المعالجة والارسال (Clean Message)
 # ==========================================
 sem = asyncio.Semaphore(5)
 
@@ -116,34 +107,29 @@ def get_leverage(symbol):
 
 async def safe_check(symbol, app_state):
     async with sem:
-        # 1. أولاً: التحقق من شروط الاستراتيجية
         logic_res = await get_signal_logic(symbol)
         
         if logic_res:
             side, atr_value = logic_res
             key = f"{symbol}_{side}"
             
-            # منع التكرار (4 ساعات)
-            if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 14400:
+            if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 28800:
                 
-                # 2. ثانياً: جلب السعر الحقيقي الآن (Live Ticker)
-                # هذا هو التعديل الجوهري لحل مشكلة الأسعار الخطأ
                 ticker = await exchange.fetch_ticker(symbol)
                 live_price = ticker['last']
                 
-                # حساب الأهداف بناءً على السعر الحي
                 if side == "LONG":
                     sl = live_price - (atr_value * 2.0)
                     risk = live_price - sl
-                    tp1 = live_price + (risk * 1.5)
-                    tp2 = live_price + (risk * 3.0)
-                    tp3 = live_price + (risk * 5.0)
-                else: # SHORT
+                    tp1 = live_price + (risk * 2.0)
+                    tp2 = live_price + (risk * 4.0)
+                    tp3 = live_price + (risk * 6.0)
+                else:
                     sl = live_price + (atr_value * 2.0)
                     risk = sl - live_price
-                    tp1 = live_price - (risk * 1.5)
-                    tp2 = live_price - (risk * 3.0)
-                    tp3 = live_price - (risk * 5.0)
+                    tp1 = live_price - (risk * 2.0)
+                    tp2 = live_price - (risk * 4.0)
+                    tp3 = live_price - (risk * 6.0)
                 
                 app_state.sent_signals[key] = time.time()
                 app_state.stats["total"] += 1
@@ -151,16 +137,17 @@ async def safe_check(symbol, app_state):
                 clean_name = symbol.split(':')[0]
                 leverage = get_leverage(clean_name)
                 
-                # الرسالة مع التنسيق الجديد
-                msg = (f"🪙 <b>{clean_name}</b>\n"
-                       f"🔥 <b>{side}</b> | {leverage}\n\n"
-                       f"📥 <b>Entry:</b> <code>{format_price(live_price)}</code>\n"
-                       f"🎯 <b>TP 1:</b> <code>{format_price(tp1)}</code>\n"
-                       f"🎯 <b>TP 2:</b> <code>{format_price(tp2)}</code>\n"
-                       f"🎯 <b>TP 3:</b> <code>{format_price(tp3)}</code>\n"
-                       f"🛑 <b>Stop:</b> <code>{format_price(sl)}</code>")
+                # --- الرسالة النظيفة ---
+                # <code> يجعل النص قابلاً للنسخ بالضغط
+                msg = (f"<code>{clean_name}</code>\n\n"
+                       f"<b>{side}</b> ({leverage})\n"
+                       f"Entry: {format_price(live_price)}\n\n"
+                       f"TP 1: {format_price(tp1)}\n"
+                       f"TP 2: {format_price(tp2)}\n"
+                       f"TP 3: {format_price(tp3)}\n\n"
+                       f"SL: {format_price(sl)}")
                 
-                print(f"\n⚡ LIVE SIGNAL: {clean_name} {side} @ {format_price(live_price)}")
+                print(f"\n🐋 SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 if mid: 
                     app_state.active_trades[symbol] = {
@@ -169,7 +156,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (Real-Time Pricing)...")
+    print(f"🚀 Connecting to KuCoin Futures...")
     try:
         await exchange.load_markets()
         futures_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -183,7 +170,7 @@ async def start_scanning(app_state):
             tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
             await asyncio.gather(*tasks)
             print(f"🔄 Scanning...", end='\r')
-            await asyncio.sleep(15)
+            await asyncio.sleep(20)
     except Exception as e:
         print(f"❌ Error: {str(e)}")
         await asyncio.sleep(10)
@@ -200,13 +187,13 @@ async def monitor_trades(app_state):
                 for target, label in [("tp1", "TP 1"), ("tp2", "TP 2"), ("tp3", "TP 3")]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            await reply_telegram_msg(f"✅ <b>{clean_name} hit {label}</b>", msg_id)
+                            await reply_telegram_msg(f"✅ <b>{label} Hit</b>", msg_id)
                             trade["hit"].append(target)
                             if target == "tp1": app_state.stats["wins"] += 1
 
                 if (s == "LONG" and p <= trade["sl"]) or (s == "SHORT" and p >= trade["sl"]):
                     app_state.stats["losses"] += 1
-                    await reply_telegram_msg(f"❌ <b>Stop Loss Hit</b>", msg_id)
+                    await reply_telegram_msg(f"❌ <b>SL Hit</b>", msg_id)
                     del app_state.active_trades[sym]
                 elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
 
@@ -219,7 +206,7 @@ async def daily_report_task(app_state):
         if now.hour == 23 and now.minute == 59:
             s = app_state.stats; total = s["total"]
             wr = (s["wins"] / total * 100) if total > 0 else 0
-            msg = (f"📊 <b>Daily Report</b>\n✅ Wins: {s['wins']}\n❌ Losses: {s['losses']}\n📈 Winrate: {wr:.1f}%")
+            msg = (f"📊 <b>Report</b>\nWin: {s['wins']} | Loss: {s['losses']} | {wr:.1f}%")
             await send_telegram_msg(msg)
             app_state.stats = {"total":0, "wins":0, "losses":0}
             await asyncio.sleep(70)
