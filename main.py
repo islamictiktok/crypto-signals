@@ -25,9 +25,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#000;color:#fff;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🐋 Whale Sniper (Clean Mode)</h1>
-            <p>Strategy: 4H Volume Breakout</p>
+        <body style='background:#111;color:#00e5ff;text-align:center;padding-top:50px;font-family:sans-serif;'>
+            <h1>💎 SMC Liquidity Sweep</h1>
+            <p>Strategy: SFP (Swing Failure Pattern) + OB</p>
+            <p>Timeframe: 1H</p>
         </body>
     </html>
     """
@@ -60,42 +61,65 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. محرك الاستراتيجية (4H Whale)
+# 3. محرك SMC (Liquidity Sweep)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # فريم 4 ساعات
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=100)
+        # نستخدم فريم الساعة للكشف عن السحوبات الواضحة
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        df['ema_50'] = ta.ema(df['close'], length=50)
-        df['rsi'] = ta.rsi(df['close'], length=14)
+        # تحديد القمم والقيعان (Fractals / Swing Points)
+        # القمة: شمعة أعلاها أعلى من 5 شمعات يمين ويسار
+        # هنا سنستخدم نافذة انزلاقية بسيطة لتحديد القمم السابقة
         
-        adx = ta.adx(df['high'], df['low'], df['close'], length=14)
-        df['adx'] = adx['ADX_14']
+        # نحدد أعلى قمة وأقل قاع في النطاق السابق (باستثناء آخر 3 شمعات)
+        window_start = len(df) - 50
+        window_end = len(df) - 3
         
-        df['vol_ma'] = df['vol'].rolling(20).mean()
-        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        recent_highs = df['high'].iloc[window_start:window_end]
+        recent_lows = df['low'].iloc[window_start:window_end]
         
-        curr = df.iloc[-1]
+        key_resistance = recent_highs.max() # قمة سابقة (Liquidity Pool)
+        key_support = recent_lows.min()     # قاع سابق (Liquidity Pool)
         
-        # الشروط: ADX قوي + فوليوم عالي
-        if curr['adx'] < 30: return None
-        if curr['vol'] < (curr['vol_ma'] * 1.5): return None
+        # الشمعة الحالية (التي أغلقت للتو) وشمعة التداول الحية
+        last_closed = df.iloc[-2] # الشمعة المكتملة
+        curr = df.iloc[-1]        # الشمعة الحية
+        
+        entry_price = curr['close'] # ندخل ماركت
+        atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
 
-        # 🟢 LONG
-        if (curr['close'] > curr['ema_50']) and (50 < curr['rsi'] < 75):
-            return "LONG", curr['atr']
+        # 💎 سيناريو سحب سيولة شرائي (Bullish SFP)
+        # 1. ذيل الشمعة نزل تحت الدعم (أخذ الستوبات)
+        # 2. جسم الشمعة أغلق فوق الدعم (رفض الهبوط)
+        if (last_closed['low'] < key_support) and (last_closed['close'] > key_support):
+            
+            # التأكد من أن الهبوط كان خاطفاً (الذيل طويل بالنسبة للجسم)
+            wick_len = last_closed['close'] - last_closed['low']
+            body_len = abs(last_closed['close'] - last_closed['open'])
+            
+            if wick_len > body_len * 0.5: # الذيل حجمه محترم
+                sl = last_closed['low'] - (atr * 0.5) # ستوب تحت ذيل السحب
+                return "LONG", sl, entry_price
 
-        # 🔴 SHORT
-        if (curr['close'] < curr['ema_50']) and (25 < curr['rsi'] < 50):
-            return "SHORT", curr['atr']
+        # 💎 سيناريو سحب سيولة بيعي (Bearish SFP)
+        # 1. ذيل الشمعة صعد فوق المقاومة (أخذ ستوبات الشورت)
+        # 2. جسم الشمعة أغلق تحت المقاومة (رفض الصعود)
+        if (last_closed['high'] > key_resistance) and (last_closed['close'] < key_resistance):
+            
+            wick_len = last_closed['high'] - last_closed['close']
+            body_len = abs(last_closed['close'] - last_closed['open'])
+            
+            if wick_len > body_len * 0.5:
+                sl = last_closed['high'] + (atr * 0.5) # ستوب فوق ذيل السحب
+                return "SHORT", sl, entry_price
 
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة والارسال (Clean Message)
+# 4. المعالجة والرسائل
 # ==========================================
 sem = asyncio.Semaphore(5)
 
@@ -110,26 +134,29 @@ async def safe_check(symbol, app_state):
         logic_res = await get_signal_logic(symbol)
         
         if logic_res:
-            side, atr_value = logic_res
+            side, sl, entry = logic_res
             key = f"{symbol}_{side}"
             
-            if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 28800:
+            # منع التكرار (6 ساعات)
+            if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 21600:
                 
+                # جلب السعر الحي للتأكيد
                 ticker = await exchange.fetch_ticker(symbol)
                 live_price = ticker['last']
                 
+                # تحديث الدخول ليكون السعر الحالي
+                entry = live_price 
+                
+                # حساب الأهداف (R:R 1:2 minimum)
+                risk = abs(entry - sl)
                 if side == "LONG":
-                    sl = live_price - (atr_value * 2.0)
-                    risk = live_price - sl
-                    tp1 = live_price + (risk * 2.0)
-                    tp2 = live_price + (risk * 4.0)
-                    tp3 = live_price + (risk * 6.0)
+                    tp1 = entry + (risk * 1.5)
+                    tp2 = entry + (risk * 3.0)
+                    tp3 = entry + (risk * 5.0)
                 else:
-                    sl = live_price + (atr_value * 2.0)
-                    risk = sl - live_price
-                    tp1 = live_price - (risk * 2.0)
-                    tp2 = live_price - (risk * 4.0)
-                    tp3 = live_price - (risk * 6.0)
+                    tp1 = entry - (risk * 1.5)
+                    tp2 = entry - (risk * 3.0)
+                    tp3 = entry - (risk * 5.0)
                 
                 app_state.sent_signals[key] = time.time()
                 app_state.stats["total"] += 1
@@ -137,17 +164,19 @@ async def safe_check(symbol, app_state):
                 clean_name = symbol.split(':')[0]
                 leverage = get_leverage(clean_name)
                 
-                # --- الرسالة النظيفة ---
-                # <code> يجعل النص قابلاً للنسخ بالضغط
-                msg = (f"<code>{clean_name}</code>\n\n"
-                       f"<b>{side}</b> ({leverage})\n"
-                       f"Entry: {format_price(live_price)}\n\n"
-                       f"TP 1: {format_price(tp1)}\n"
-                       f"TP 2: {format_price(tp2)}\n"
-                       f"TP 3: {format_price(tp3)}\n\n"
-                       f"SL: {format_price(sl)}")
+                # --- تصميم الرسالة الاحترافي ---
+                emoji_side = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
                 
-                print(f"\n🐋 SIGNAL: {clean_name} {side}")
+                msg = (f"💎 <b>LIQUIDITY SWEEP</b>\n\n"
+                       f"🪙 <code>{clean_name}</code>\n"
+                       f"{emoji_side} ({leverage})\n\n"
+                       f"💰 <b>Entry:</b> {format_price(entry)}\n\n"
+                       f"🎯 <b>TP 1:</b> {format_price(tp1)}\n"
+                       f"🎯 <b>TP 2:</b> {format_price(tp2)}\n"
+                       f"🎯 <b>TP 3:</b> {format_price(tp3)}\n\n"
+                       f"🛑 <b>Stop:</b> {format_price(sl)}")
+                
+                print(f"\n💎 SMC SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 if mid: 
                     app_state.active_trades[symbol] = {
@@ -156,7 +185,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures...")
+    print(f"🚀 Connecting to KuCoin Futures (SMC Sweep)...")
     try:
         await exchange.load_markets()
         futures_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -187,13 +216,13 @@ async def monitor_trades(app_state):
                 for target, label in [("tp1", "TP 1"), ("tp2", "TP 2"), ("tp3", "TP 3")]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            await reply_telegram_msg(f"✅ <b>{label} Hit</b>", msg_id)
+                            await reply_telegram_msg(f"✅ <b>{clean_name} hit {label}</b>", msg_id)
                             trade["hit"].append(target)
                             if target == "tp1": app_state.stats["wins"] += 1
 
                 if (s == "LONG" and p <= trade["sl"]) or (s == "SHORT" and p >= trade["sl"]):
                     app_state.stats["losses"] += 1
-                    await reply_telegram_msg(f"❌ <b>SL Hit</b>", msg_id)
+                    await reply_telegram_msg(f"❌ <b>Stop Loss Hit</b>", msg_id)
                     del app_state.active_trades[sym]
                 elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
 
@@ -206,7 +235,7 @@ async def daily_report_task(app_state):
         if now.hour == 23 and now.minute == 59:
             s = app_state.stats; total = s["total"]
             wr = (s["wins"] / total * 100) if total > 0 else 0
-            msg = (f"📊 <b>Report</b>\nWin: {s['wins']} | Loss: {s['losses']} | {wr:.1f}%")
+            msg = (f"📊 <b>Daily Report</b>\n✅ Wins: {s['wins']}\n❌ Losses: {s['losses']}\n📈 Winrate: {wr:.1f}%")
             await send_telegram_msg(msg)
             app_state.stats = {"total":0, "wins":0, "losses":0}
             await asyncio.sleep(70)
