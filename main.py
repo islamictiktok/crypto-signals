@@ -11,23 +11,29 @@ from datetime import datetime
 import httpx
 
 # ==========================================
-# 1. إعدادات البوت
+# 1. الإعدادات
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# إعدادات الفريمات (حسب طلبك)
-HTF = '4h'  # لتحديد الاتجاه والـ Premium/Discount
-LTF = '15m' # للدخول والـ Order Block
+# قائمة الحظر (عملات مستقرة أو غير مرغوبة)
+BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
 app = FastAPI()
 
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
 async def root():
-    return "<html><body style='background:#101010;color:#00ff88;text-align:center;padding-top:50px;'><h1>💎 SMC Multi-Timeframe Sniper</h1><p>Logic: 4H Structure + 15m Entry (OB+FVG)</p></body></html>"
+    return """
+    <html>
+        <body style='background:#0f0f0f;color:#00e5ff;text-align:center;padding-top:50px;font-family:sans-serif;'>
+            <h1>⚡ Futures Sniper Active</h1>
+            <p>Market: USDT Perpetual Swaps</p>
+            <p>Strategy: Trend Pullback (EMA200 + StochRSI)</p>
+        </body>
+    </html>
+    """
 
 # ==========================================
 # 2. دوال الاتصال
@@ -50,138 +56,71 @@ async def reply_telegram_msg(message, reply_to_msg_id):
         except: pass
 
 # ==========================================
-# 3. محرك SMC الاحترافي (The Brain)
+# 3. محرك الاستراتيجية (Trend Pullback)
 # ==========================================
 async def get_signal(symbol):
     try:
-        # -----------------------------------------------------------
-        # الخطوة 1: تحليل الفريم الكبير (4H) - الاتجاه و Premium/Discount
-        # -----------------------------------------------------------
-        htf_bars = await exchange.fetch_ohlcv(symbol, timeframe=HTF, limit=50)
-        df_htf = pd.DataFrame(htf_bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        # 1H Timeframe for reduced noise
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=300)
+        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # تحديد هيكل السوق (Market Structure)
-        # نستخدم أعلى قمة وأقل قاع في آخر 50 شمعة لتحديد الـ Dealing Range
-        range_high = df_htf['high'].max()
-        range_low = df_htf['low'].min()
-        equilibrium = (range_high + range_low) / 2
+        # Indicators
+        df['ema_200'] = ta.ema(df['close'], length=200)
+        stoch = ta.stochrsi(df['close'], length=14, rsi_length=14, k=3, d=3)
+        df['stoch_k'] = stoch[stoch.columns[0]]
+        df['stoch_d'] = stoch[stoch.columns[1]]
         
-        # تحديد الاتجاه العام (بسيط: هل نحن فوق أم تحت الـ EMA 50)
-        df_htf['ema_50'] = ta.ema(df_htf['close'], length=50)
-        trend_is_bullish = df_htf['close'].iloc[-1] > df_htf['ema_50'].iloc[-1]
+        adx = ta.adx(df['high'], df['low'], df['close'], length=14)
+        df['adx'] = adx['ADX_14']
         
-        # -----------------------------------------------------------
-        # الخطوة 2: تحليل الفريم الصغير (15m) - البحث عن OB و BOS
-        # -----------------------------------------------------------
-        ltf_bars = await exchange.fetch_ohlcv(symbol, timeframe=LTF, limit=100)
-        df_ltf = pd.DataFrame(ltf_bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         
-        curr = df_ltf.iloc[-1]
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
         entry = curr['close']
         
-        # دالة البحث عن BOS وتأكيد الـ OB
-        def find_setup(direction):
-            # نبحث في الشموع السابقة (نتجاهل آخر شمعتين للتأكيد)
-            for i in range(len(df_ltf)-5, len(df_ltf)-40, -1):
-                candle = df_ltf.iloc[i]     # شمعة الـ OB المحتملة
-                next_c = df_ltf.iloc[i+1]   # شمعة الحركة (Impulse)
-                future_c = df_ltf.iloc[i+2] # لتأكيد الفجوة
-                
-                # === سيناريو الشراء (LONG) ===
-                if direction == "LONG":
-                    # 1. الـ OB: شمعة حمراء
-                    if candle['close'] < candle['open']:
-                        # 2. كسر الهيكل (BOS): شمعة خضراء قوية ابتلعت الحمراء وكسرت قمتها
-                        impulse = next_c['close'] > next_c['open'] and next_c['close'] > candle['high']
-                        
-                        # 3. الفجوة السعرية (FVG): وجود فراغ بين قمة 1 وقاع 3
-                        has_fvg = future_c['low'] > candle['high']
-                        
-                        # 4. فلتر Premium/Discount (من الـ 4H):
-                        # يجب أن يكون الـ OB في مناطق Discount (تحت الـ Equilibrium)
-                        in_discount = candle['high'] < equilibrium
-                        
-                        if impulse and has_fvg and in_discount:
-                            # 5. هل السعر عاد الآن للمنطقة؟ (Mitigation)
-                            # السعر الحالي يلمس منطقة الـ OB
-                            if entry <= candle['high'] and entry >= candle['low']:
-                                # 6. تأكيد استجابة السعر (Lower Timeframe Reaction):
-                                # السعر الحالي يجب أن يكون بدأ بالارتداد (شمعة خضراء حالية أو ذيل سفلي طويل)
-                                reaction_ok = curr['close'] > curr['open'] or (curr['close'] - curr['low']) > (curr['high'] - curr['close'])
-                                if reaction_ok:
-                                    return candle
+        # Filter: Ignore dead markets
+        if curr['adx'] < 20: return None
 
-                # === سيناريو البيع (SHORT) ===
-                elif direction == "SHORT":
-                    # 1. الـ OB: شمعة خضراء
-                    if candle['close'] > candle['open']:
-                        # 2. كسر الهيكل (BOS)
-                        impulse = next_c['close'] < next_c['open'] and next_c['close'] < candle['low']
-                        
-                        # 3. الفجوة (FVG)
-                        has_fvg = future_c['high'] < candle['low']
-                        
-                        # 4. فلتر Premium/Discount:
-                        # يجب أن يكون الـ OB في مناطق Premium (فوق الـ Equilibrium)
-                        in_premium = candle['low'] > equilibrium
-                        
-                        if impulse and has_fvg and in_premium:
-                            # 5. هل السعر عاد للمنطقة؟
-                            if entry >= candle['low'] and entry <= candle['high']:
-                                # 6. تأكيد الاستجابة (شمعة حمراء أو ذيل علوي)
-                                reaction_ok = curr['close'] < curr['open'] or (curr['high'] - curr['close']) > (curr['close'] - curr['low'])
-                                if reaction_ok:
-                                    return candle
-            return None
-
-        # --- التنفيذ ---
-        
-        # نبحث عن شراء فقط إذا كان الترند العام (4H) صاعد
-        if trend_is_bullish:
-            ob = find_setup("LONG")
-            if ob is not None:
-                # 7. وقف الخسارة: تحت الـ OB + هامش بسيط
-                # تحسين: إذا كان هناك قاع قريب جداً، نضع الستوب تحته
-                swing_low = df_ltf['low'].iloc[ob.name-5:ob.name+5].min()
-                sl = min(ob['low'], swing_low) - (ob['high'] - ob['low']) * 0.2
-                
-                # الهدف النهائي: قمة نطاق الـ 4H
-                tp3 = range_high
-                
+        # 🟢 LONG
+        if entry > curr['ema_200']:
+            # StochRSI cross up from oversold
+            if (prev['stoch_k'] < 20) and (curr['stoch_k'] > curr['stoch_d']):
+                sl = entry - (curr['atr'] * 2.0)
                 risk = entry - sl
-                reward = tp3 - entry
-                
-                # 8. إدارة المخاطر R:R >= 2
-                if risk > 0 and (reward / risk) >= 2.0:
-                    tp1 = entry + (risk * 2.0)
-                    tp2 = entry + (risk * 4.0)
-                    return "LONG", entry, sl, tp1, tp2, tp3
+                tp1 = entry + (risk * 1.5)
+                tp2 = entry + (risk * 3.0)
+                tp3 = entry + (risk * 5.0)
+                return "LONG", entry, sl, tp1, tp2, tp3
 
-        # نبحث عن بيع فقط إذا كان الترند العام (4H) هابط
-        else:
-            ob = find_setup("SHORT")
-            if ob is not None:
-                # وقف الخسارة: فوق الـ OB
-                swing_high = df_ltf['high'].iloc[ob.name-5:ob.name+5].max()
-                sl = max(ob['high'], swing_high) + (ob['high'] - ob['low']) * 0.2
-                
-                tp3 = range_low
-                
+        # 🔴 SHORT
+        if entry < curr['ema_200']:
+            # StochRSI cross down from overbought
+            if (prev['stoch_k'] > 80) and (curr['stoch_k'] < curr['stoch_d']):
+                sl = entry + (curr['atr'] * 2.0)
                 risk = sl - entry
-                reward = entry - tp3
-                
-                if risk > 0 and (reward / risk) >= 2.0:
-                    tp1 = entry - (risk * 2.0)
-                    tp2 = entry - (risk * 4.0)
-                    return "SHORT", entry, sl, tp1, tp2, tp3
+                tp1 = entry - (risk * 1.5)
+                tp2 = entry - (risk * 3.0)
+                tp3 = entry - (risk * 5.0)
+                return "SHORT", entry, sl, tp1, tp2, tp3
 
         return None
     except: return None
 
 # ==========================================
-# 4. التشغيل المتوازي (Turbo Scanner)
+# 4. المعالجة والفلترة (Futures Specific)
 # ==========================================
 sem = asyncio.Semaphore(5)
+
+def get_leverage(symbol):
+    """تحديد الرافعة المناسبة حسب العملة"""
+    base = symbol.split('/')[0]
+    if base in ['BTC', 'ETH']:
+        return "Cross 50x"
+    elif base in ['SOL', 'BNB', 'XRP']:
+        return "Cross 25x"
+    else:
+        return "Cross 20x" # للألتكوينز
 
 async def safe_check(symbol, app_state):
     async with sem:
@@ -190,29 +129,25 @@ async def safe_check(symbol, app_state):
             side, entry, sl, tp1, tp2, tp3 = res
             key = f"{symbol}_{side}"
             
-            if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 21600:
+            # منع التكرار لمدة 4 ساعات
+            if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 14400:
                 app_state.sent_signals[key] = time.time()
                 app_state.stats["total"] += 1
-                name = symbol.split('/')[0]
                 
-                # حساب المخاطرة للعرض
-                risk = abs(entry - sl)
-                reward = abs(tp3 - entry)
-                rr = reward / risk if risk > 0 else 0
+                # تنظيف اسم العملة (إزالة :USDT)
+                clean_name = symbol.split(':')[0] 
+                leverage = get_leverage(clean_name)
                 
-                msg = (f"💎 <b>SMC Pro Setup</b>\n"
-                       f"🪙 <b>العملة:</b> <code>{name}</code>\n"
-                       f"📈 <b>النوع:</b> {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'}\n"
-                       f"⚖️ <b>R:R Ratio:</b> <code>1:{rr:.1f}</code>\n\n"
-                       f"📥 <b>الدخول (15m Confirmed):</b> <code>{entry:.8f}</code>\n"
-                       f"━━━━━━━━━━━━━━\n"
-                       f"🎯 <b>هدف 1 (1:2):</b> <code>{tp1:.8f}</code>\n"
-                       f"🎯 <b>هدف 2 (1:4):</b> <code>{tp2:.8f}</code>\n"
-                       f"🎯 <b>هدف 3 (4H Liq):</b> <code>{tp3:.8f}</code>\n"
-                       f"━━━━━━━━━━━━━━\n"
-                       f"🚫 <b>الستوب:</b> <code>{sl:.8f}</code>")
+                # --- رسالة نظيفة جداً ---
+                msg = (f"🪙 <b>{clean_name}</b>\n"
+                       f"🔥 <b>{side}</b> | {leverage}\n\n"
+                       f"📥 <b>Entry:</b> <code>{entry:.6f}</code>\n"
+                       f"🎯 <b>TP 1:</b> <code>{tp1:.6f}</code>\n"
+                       f"🎯 <b>TP 2:</b> <code>{tp2:.6f}</code>\n"
+                       f"🎯 <b>TP 3:</b> <code>{tp3:.6f}</code>\n"
+                       f"🛑 <b>Stop:</b> <code>{sl:.6f}</code>")
                 
-                print(f"\n💎 إشارة احترافية: {name} {side}")
+                print(f"\n⚡ FUTURES SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 if mid: 
                     app_state.active_trades[symbol] = {
@@ -221,16 +156,23 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 SMC Pro Engine Started (4H Direction + 15m Entry)...")
+    print(f"🚀 Loading Futures Markets (Swap)...")
     await exchange.load_markets()
-    all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
-    print(f"✅ Loaded {len(all_symbols)} Pairs.")
-    app_state.symbols = all_symbols
+    
+    # فلترة دقيقة: نقبل فقط الأزواج التي تحتوي على :USDT (علامة الفيوتشرز في CCXT)
+    # ونستبعد العملات المحظورة
+    futures_symbols = [
+        s for s in exchange.symbols 
+        if ':' in s and 'USDT' in s and s.split('/')[0] not in BLACKLIST
+    ]
+    
+    print(f"✅ Active Futures Pairs: {len(futures_symbols)}")
+    app_state.symbols = futures_symbols
 
     while True:
         tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
         await asyncio.gather(*tasks)
-        print(f"🔄 Scan Complete...", end='\r')
+        print(f"🔄 Scan cycle complete...", end='\r')
         await asyncio.sleep(15)
 
 async def monitor_trades(app_state):
@@ -240,17 +182,18 @@ async def monitor_trades(app_state):
             try:
                 t = await exchange.fetch_ticker(sym); p, s = t['last'], trade['side']
                 msg_id = trade["msg_id"]
+                clean_name = sym.split(':')[0]
                 
-                for target, label in [("tp1", "هدف 1"), ("tp2", "هدف 2"), ("tp3", "الهدف النهائي")]:
+                for target, label in [("tp1", "TP 1"), ("tp2", "TP 2"), ("tp3", "TP 3")]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            await reply_telegram_msg(f"✅ <b>تم ضرب {label}</b>", msg_id)
+                            await reply_telegram_msg(f"✅ <b>{clean_name} hit {label}</b>", msg_id)
                             trade["hit"].append(target)
                             if target == "tp1": app_state.stats["wins"] += 1
 
                 if (s == "LONG" and p <= trade["sl"]) or (s == "SHORT" and p >= trade["sl"]):
                     app_state.stats["losses"] += 1
-                    await reply_telegram_msg(f"❌ <b>ضرب الستوب</b>", msg_id)
+                    await reply_telegram_msg(f"❌ <b>Stop Loss Hit</b>", msg_id)
                     del app_state.active_trades[sym]
                 elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
 
@@ -263,7 +206,7 @@ async def daily_report_task(app_state):
         if now.hour == 23 and now.minute == 59:
             s = app_state.stats; total = s["total"]
             wr = (s["wins"] / total * 100) if total > 0 else 0
-            msg = (f"📊 <b>التقرير اليومي</b>\n✅ رابحة: {s['wins']}\n❌ خاسرة: {s['losses']}\n📈 الدقة: {wr:.1f}%")
+            msg = (f"📊 <b>Daily Report</b>\n✅ Wins: {s['wins']}\n❌ Losses: {s['losses']}\n📈 Winrate: {wr:.1f}%")
             await send_telegram_msg(msg)
             app_state.stats = {"total":0, "wins":0, "losses":0}
             await asyncio.sleep(70)
@@ -278,8 +221,10 @@ async def keep_alive_task():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    exchange.rateLimit = True 
+    # إعداد المنصة للفيوتشرز (Swap)
+    exchange.options['defaultType'] = 'swap' 
     await exchange.load_markets()
+    
     app.state.sent_signals = {}; app.state.active_trades = {}; app.state.stats = {"total":0, "wins":0, "losses":0}
     t1 = asyncio.create_task(start_scanning(app.state)); t2 = asyncio.create_task(monitor_trades(app.state))
     t3 = asyncio.create_task(daily_report_task(app.state)); t4 = asyncio.create_task(keep_alive_task())
@@ -287,6 +232,7 @@ async def lifespan(app: FastAPI):
     await exchange.close(); t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel()
 
 app.router.lifespan_context = lifespan
+# تحديد نوع التداول كـ Swap (عقود آجلة)
 exchange = ccxt.kucoin({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 
 if __name__ == "__main__":
