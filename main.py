@@ -18,8 +18,8 @@ CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# فلتر السيولة (15 مليون دولار)
-MIN_VOLUME_USDT = 15_000_000 
+# 📉 تم التخفيض لزيادة عدد الفرص مع الحفاظ على حد أدنى للأمان
+MIN_VOLUME_USDT = 5_000_000  # 5 مليون دولار
 
 app = FastAPI()
 
@@ -28,10 +28,9 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#111;color:#00ff88;text-align:center;padding-top:50px;font-family:sans-serif;'>
-            <h1>💎 SMC Copy-Paste Sniper</h1>
-            <p>Strategy: SFP + High Volume</p>
-            <p>Message: Tap-to-Copy Enabled</p>
+        <body style='background:#111;color:#ff9900;text-align:center;padding-top:50px;font-family:sans-serif;'>
+            <h1>💎 SMC Sniper (Medium Vol)</h1>
+            <p>Strategy: SFP + Min Vol $5M</p>
         </body>
     </html>
     """
@@ -68,7 +67,7 @@ def format_price(price):
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # 1. فلتر السيولة
+        # 1. فلتر السيولة (المخفف)
         ticker = await exchange.fetch_ticker(symbol)
         quote_vol = ticker['quoteVolume']
         if quote_vol < MIN_VOLUME_USDT: return None
@@ -77,9 +76,9 @@ async def get_signal_logic(symbol):
         bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
+        # تحديد القمم والقيعان السابقة
         window_start = len(df) - 50
         window_end = len(df) - 3
-        
         recent_highs = df['high'].iloc[window_start:window_end]
         recent_lows = df['low'].iloc[window_start:window_end]
         
@@ -96,7 +95,8 @@ async def get_signal_logic(symbol):
         if (last_closed['low'] < key_support) and (last_closed['close'] > key_support):
             wick_len = last_closed['close'] - last_closed['low']
             body_len = abs(last_closed['close'] - last_closed['open'])
-            if wick_len > body_len * 0.5:
+            # شرط إضافي: الذيل يجب أن يكون واضحاً (ثلث الجسم على الأقل)
+            if wick_len > body_len * 0.3:
                 sl = last_closed['low'] - (atr * 0.5)
                 return "LONG", sl, entry_price
 
@@ -104,7 +104,7 @@ async def get_signal_logic(symbol):
         if (last_closed['high'] > key_resistance) and (last_closed['close'] < key_resistance):
             wick_len = last_closed['high'] - last_closed['close']
             body_len = abs(last_closed['close'] - last_closed['open'])
-            if wick_len > body_len * 0.5:
+            if wick_len > body_len * 0.3:
                 sl = last_closed['high'] + (atr * 0.5)
                 return "SHORT", sl, entry_price
 
@@ -153,9 +153,8 @@ async def safe_check(symbol, app_state):
                 leverage = get_leverage(clean_name)
                 emoji_side = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
                 
-                # --- تنسيق الرسالة القابل للنسخ ---
-                # استخدام <code> حول الأرقام يجعلها قابلة للنسخ بضغطة واحدة
-                msg = (f"💎 <b>LIQUIDITY SWEEP</b>\n\n"
+                # --- الرسالة القابلة للنسخ ---
+                msg = (f"💎 <b>SMC SIGNAL</b>\n\n"
                        f"🪙 <code>{clean_name}</code>\n"
                        f"{emoji_side} | {leverage}\n\n"
                        f"💰 Entry: <code>{format_price(entry)}</code>\n\n"
