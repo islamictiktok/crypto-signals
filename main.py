@@ -18,6 +18,9 @@ CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
+# فلتر السيولة (15 مليون دولار)
+MIN_VOLUME_USDT = 15_000_000 
+
 app = FastAPI()
 
 @app.get("/", response_class=HTMLResponse)
@@ -25,10 +28,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#111;color:#00e5ff;text-align:center;padding-top:50px;font-family:sans-serif;'>
-            <h1>💎 SMC Liquidity Sweep</h1>
-            <p>Strategy: SFP (Swing Failure Pattern) + OB</p>
-            <p>Timeframe: 1H</p>
+        <body style='background:#111;color:#00ff88;text-align:center;padding-top:50px;font-family:sans-serif;'>
+            <h1>💎 SMC Copy-Paste Sniper</h1>
+            <p>Strategy: SFP + High Volume</p>
+            <p>Message: Tap-to-Copy Enabled</p>
         </body>
     </html>
     """
@@ -61,58 +64,48 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. محرك SMC (Liquidity Sweep)
+# 3. محرك التحليل (SFP Logic)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # نستخدم فريم الساعة للكشف عن السحوبات الواضحة
+        # 1. فلتر السيولة
+        ticker = await exchange.fetch_ticker(symbol)
+        quote_vol = ticker['quoteVolume']
+        if quote_vol < MIN_VOLUME_USDT: return None
+
+        # 2. استراتيجية السحب
         bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # تحديد القمم والقيعان (Fractals / Swing Points)
-        # القمة: شمعة أعلاها أعلى من 5 شمعات يمين ويسار
-        # هنا سنستخدم نافذة انزلاقية بسيطة لتحديد القمم السابقة
-        
-        # نحدد أعلى قمة وأقل قاع في النطاق السابق (باستثناء آخر 3 شمعات)
         window_start = len(df) - 50
         window_end = len(df) - 3
         
         recent_highs = df['high'].iloc[window_start:window_end]
         recent_lows = df['low'].iloc[window_start:window_end]
         
-        key_resistance = recent_highs.max() # قمة سابقة (Liquidity Pool)
-        key_support = recent_lows.min()     # قاع سابق (Liquidity Pool)
+        key_resistance = recent_highs.max()
+        key_support = recent_lows.min()
         
-        # الشمعة الحالية (التي أغلقت للتو) وشمعة التداول الحية
-        last_closed = df.iloc[-2] # الشمعة المكتملة
-        curr = df.iloc[-1]        # الشمعة الحية
+        last_closed = df.iloc[-2]
+        curr = df.iloc[-1]
         
-        entry_price = curr['close'] # ندخل ماركت
+        entry_price = curr['close']
         atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
 
-        # 💎 سيناريو سحب سيولة شرائي (Bullish SFP)
-        # 1. ذيل الشمعة نزل تحت الدعم (أخذ الستوبات)
-        # 2. جسم الشمعة أغلق فوق الدعم (رفض الهبوط)
+        # 🟢 LONG SFP
         if (last_closed['low'] < key_support) and (last_closed['close'] > key_support):
-            
-            # التأكد من أن الهبوط كان خاطفاً (الذيل طويل بالنسبة للجسم)
             wick_len = last_closed['close'] - last_closed['low']
             body_len = abs(last_closed['close'] - last_closed['open'])
-            
-            if wick_len > body_len * 0.5: # الذيل حجمه محترم
-                sl = last_closed['low'] - (atr * 0.5) # ستوب تحت ذيل السحب
+            if wick_len > body_len * 0.5:
+                sl = last_closed['low'] - (atr * 0.5)
                 return "LONG", sl, entry_price
 
-        # 💎 سيناريو سحب سيولة بيعي (Bearish SFP)
-        # 1. ذيل الشمعة صعد فوق المقاومة (أخذ ستوبات الشورت)
-        # 2. جسم الشمعة أغلق تحت المقاومة (رفض الصعود)
+        # 🔴 SHORT SFP
         if (last_closed['high'] > key_resistance) and (last_closed['close'] < key_resistance):
-            
             wick_len = last_closed['high'] - last_closed['close']
             body_len = abs(last_closed['close'] - last_closed['open'])
-            
             if wick_len > body_len * 0.5:
-                sl = last_closed['high'] + (atr * 0.5) # ستوب فوق ذيل السحب
+                sl = last_closed['high'] + (atr * 0.5)
                 return "SHORT", sl, entry_price
 
         return None
@@ -126,7 +119,7 @@ sem = asyncio.Semaphore(5)
 def get_leverage(symbol):
     base = symbol.split('/')[0]
     if base in ['BTC', 'ETH']: return "Cross 50x"
-    elif base in ['SOL', 'BNB', 'XRP', 'ADA', 'DOGE']: return "Cross 25x"
+    elif base in ['SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'AVAX', 'LINK']: return "Cross 25x"
     else: return "Cross 20x"
 
 async def safe_check(symbol, app_state):
@@ -137,17 +130,12 @@ async def safe_check(symbol, app_state):
             side, sl, entry = logic_res
             key = f"{symbol}_{side}"
             
-            # منع التكرار (6 ساعات)
             if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 21600:
                 
-                # جلب السعر الحي للتأكيد
                 ticker = await exchange.fetch_ticker(symbol)
                 live_price = ticker['last']
-                
-                # تحديث الدخول ليكون السعر الحالي
                 entry = live_price 
                 
-                # حساب الأهداف (R:R 1:2 minimum)
                 risk = abs(entry - sl)
                 if side == "LONG":
                     tp1 = entry + (risk * 1.5)
@@ -163,20 +151,20 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = get_leverage(clean_name)
-                
-                # --- تصميم الرسالة الاحترافي ---
                 emoji_side = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
                 
+                # --- تنسيق الرسالة القابل للنسخ ---
+                # استخدام <code> حول الأرقام يجعلها قابلة للنسخ بضغطة واحدة
                 msg = (f"💎 <b>LIQUIDITY SWEEP</b>\n\n"
                        f"🪙 <code>{clean_name}</code>\n"
-                       f"{emoji_side} ({leverage})\n\n"
-                       f"💰 <b>Entry:</b> {format_price(entry)}\n\n"
-                       f"🎯 <b>TP 1:</b> {format_price(tp1)}\n"
-                       f"🎯 <b>TP 2:</b> {format_price(tp2)}\n"
-                       f"🎯 <b>TP 3:</b> {format_price(tp3)}\n\n"
-                       f"🛑 <b>Stop:</b> {format_price(sl)}")
+                       f"{emoji_side} | {leverage}\n\n"
+                       f"💰 Entry: <code>{format_price(entry)}</code>\n\n"
+                       f"🎯 TP 1: <code>{format_price(tp1)}</code>\n"
+                       f"🎯 TP 2: <code>{format_price(tp2)}</code>\n"
+                       f"🎯 TP 3: <code>{format_price(tp3)}</code>\n\n"
+                       f"🛑 Stop: <code>{format_price(sl)}</code>")
                 
-                print(f"\n💎 SMC SIGNAL: {clean_name} {side}")
+                print(f"\n💎 SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 if mid: 
                     app_state.active_trades[symbol] = {
@@ -185,7 +173,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (SMC Sweep)...")
+    print(f"🚀 Connecting to KuCoin Futures...")
     try:
         await exchange.load_markets()
         futures_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
