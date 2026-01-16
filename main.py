@@ -18,7 +18,7 @@ CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# فلتر السيولة (5 مليون)
+# السيولة 5 مليون
 MIN_VOLUME_USDT = 5_000_000
 
 app = FastAPI()
@@ -30,9 +30,9 @@ async def root():
     <html>
         <body style='background:#111;color:#00ff88;text-align:center;padding-top:50px;font-family:sans-serif;'>
             <h1>💎 SMC Elite Sniper</h1>
-            <p>Strategy: SFP + OB</p>
-            <p>Timeframe: 15m (Scalping)</p>
-            <p>Filter: Dynamic Vol >= $5M (15m Refresh)</p>
+            <p>Strategy: SFP + Pinbar Filter</p>
+            <p>Timeframe: 15m</p>
+            <p>Filter: Vol >= $5M</p>
         </body>
     </html>
     """
@@ -65,7 +65,7 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. محرك SMC (Liquidity Sweep)
+# 3. محرك SMC (SFP + Wick Filter)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -85,27 +85,40 @@ async def get_signal_logic(symbol):
         last_closed = df.iloc[-2]
         curr = df.iloc[-1]
         
-        # بصمة الشمعة (Time ID)
         signal_timestamp = int(last_closed['time'])
-        
         entry_price = curr['close']
         atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
 
-        # 💎 Bullish SFP
-        if (last_closed['low'] < key_support) and (last_closed['close'] > key_support):
-            wick_len = last_closed['close'] - last_closed['low']
-            body_len = abs(last_closed['close'] - last_closed['open'])
-            if wick_len > body_len * 0.5:
-                sl = last_closed['low'] - (atr * 0.5)
-                return "LONG", sl, entry_price, signal_timestamp
+        # ✅ حساب تفاصيل الشمعة بدقة (الجسم والذيول)
+        open_p = last_closed['open']
+        close_p = last_closed['close']
+        high_p = last_closed['high']
+        low_p = last_closed['low']
+        
+        body_len = abs(close_p - open_p)
+        upper_wick = high_p - max(open_p, close_p) # الذيل العلوي
+        lower_wick = min(open_p, close_p) - low_p  # الذيل السفلي
 
-        # 💎 Bearish SFP
-        if (last_closed['high'] > key_resistance) and (last_closed['close'] < key_resistance):
-            wick_len = last_closed['high'] - last_closed['close']
-            body_len = abs(last_closed['close'] - last_closed['open'])
-            if wick_len > body_len * 0.5:
-                sl = last_closed['high'] + (atr * 0.5)
-                return "SHORT", sl, entry_price, signal_timestamp
+        # 💎 Bullish SFP (Long)
+        if (low_p < key_support) and (close_p > key_support):
+            
+            # الشرط القديم: الذيل أكبر من نصف الجسم
+            if lower_wick > body_len * 0.5:
+                # 🔥 الشرط الجديد: الذيل السفلي (السحب) لازم يكون أكبر بمرتين من الذيل العلوي
+                # هذا يمنع شموع الحيرة (Doji)
+                if lower_wick > (upper_wick * 2):
+                    sl = low_p - (atr * 0.5)
+                    return "LONG", sl, entry_price, signal_timestamp
+
+        # 💎 Bearish SFP (Short)
+        if (high_p > key_resistance) and (close_p < key_resistance):
+            
+            # الشرط القديم
+            if upper_wick > body_len * 0.5:
+                # 🔥 الشرط الجديد: الذيل العلوي (السحب) لازم يكون أكبر بمرتين من الذيل السفلي
+                if upper_wick > (lower_wick * 2):
+                    sl = high_p + (atr * 0.5)
+                    return "SHORT", sl, entry_price, signal_timestamp
 
         return None
     except: return None
@@ -129,7 +142,6 @@ async def safe_check(symbol, app_state):
             side, sl, entry, ts = logic_res
             key = f"{symbol}_{side}_{ts}"
             
-            # منع التكرار
             if key not in app_state.sent_signals:
                 
                 risk = abs(entry - sl)
@@ -174,7 +186,7 @@ async def start_scanning(app_state):
         last_refresh_time = 0
         
         while True:
-            # ✅ التعديل هنا: التحديث كل 900 ثانية (15 دقيقة)
+            # تحديث القائمة كل 15 دقيقة (900 ثانية)
             if time.time() - last_refresh_time > 900:
                 print(f"🔄 Updating Active Pairs List (Vol >= $5M)...", end='\r')
                 try:
