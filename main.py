@@ -18,6 +18,9 @@ CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
+# ✅ التعديل 1: فلتر السيولة 10 مليون دولار
+MIN_VOLUME_USDT = 10_000_000
+
 app = FastAPI()
 
 @app.get("/", response_class=HTMLResponse)
@@ -28,7 +31,7 @@ async def root():
         <body style='background:#111;color:#00e5ff;text-align:center;padding-top:50px;font-family:sans-serif;'>
             <h1>💎 SMC Liquidity Sweep</h1>
             <p>Strategy: SFP (Swing Failure Pattern) + OB</p>
-            <p>Timeframe: 1H</p>
+            <p>Filter: Vol > $10M | Copy-Paste Enabled</p>
         </body>
     </html>
     """
@@ -65,15 +68,15 @@ def format_price(price):
 # ==========================================
 async def get_signal_logic(symbol):
     try:
+        # ✅ التعديل 2 (جزء 1): التحقق من السيولة داخل المنطق
+        ticker = await exchange.fetch_ticker(symbol)
+        if ticker['quoteVolume'] < MIN_VOLUME_USDT: return None
+
         # نستخدم فريم الساعة للكشف عن السحوبات الواضحة
         bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
         # تحديد القمم والقيعان (Fractals / Swing Points)
-        # القمة: شمعة أعلاها أعلى من 5 شمعات يمين ويسار
-        # هنا سنستخدم نافذة انزلاقية بسيطة لتحديد القمم السابقة
-        
-        # نحدد أعلى قمة وأقل قاع في النطاق السابق (باستثناء آخر 3 شمعات)
         window_start = len(df) - 50
         window_end = len(df) - 3
         
@@ -91,8 +94,6 @@ async def get_signal_logic(symbol):
         atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
 
         # 💎 سيناريو سحب سيولة شرائي (Bullish SFP)
-        # 1. ذيل الشمعة نزل تحت الدعم (أخذ الستوبات)
-        # 2. جسم الشمعة أغلق فوق الدعم (رفض الهبوط)
         if (last_closed['low'] < key_support) and (last_closed['close'] > key_support):
             
             # التأكد من أن الهبوط كان خاطفاً (الذيل طويل بالنسبة للجسم)
@@ -104,8 +105,6 @@ async def get_signal_logic(symbol):
                 return "LONG", sl, entry_price
 
         # 💎 سيناريو سحب سيولة بيعي (Bearish SFP)
-        # 1. ذيل الشمعة صعد فوق المقاومة (أخذ ستوبات الشورت)
-        # 2. جسم الشمعة أغلق تحت المقاومة (رفض الصعود)
         if (last_closed['high'] > key_resistance) and (last_closed['close'] < key_resistance):
             
             wick_len = last_closed['high'] - last_closed['close']
@@ -140,7 +139,7 @@ async def safe_check(symbol, app_state):
             # منع التكرار (6 ساعات)
             if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 21600:
                 
-                # جلب السعر الحي للتأكيد
+                # جلب السعر الحي للتأكيد (تحديث السعر)
                 ticker = await exchange.fetch_ticker(symbol)
                 live_price = ticker['last']
                 
@@ -164,17 +163,17 @@ async def safe_check(symbol, app_state):
                 clean_name = symbol.split(':')[0]
                 leverage = get_leverage(clean_name)
                 
-                # --- تصميم الرسالة الاحترافي ---
+                # ✅ التعديل 3: تصميم الرسالة النظيفة والقابلة للنسخ
                 emoji_side = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
                 
                 msg = (f"💎 <b>LIQUIDITY SWEEP</b>\n\n"
                        f"🪙 <code>{clean_name}</code>\n"
-                       f"{emoji_side} ({leverage})\n\n"
-                       f"💰 <b>Entry:</b> {format_price(entry)}\n\n"
-                       f"🎯 <b>TP 1:</b> {format_price(tp1)}\n"
-                       f"🎯 <b>TP 2:</b> {format_price(tp2)}\n"
-                       f"🎯 <b>TP 3:</b> {format_price(tp3)}\n\n"
-                       f"🛑 <b>Stop:</b> {format_price(sl)}")
+                       f"{emoji_side} | {leverage}\n\n"
+                       f"💰 Entry: <code>{format_price(entry)}</code>\n\n"
+                       f"🎯 TP 1: <code>{format_price(tp1)}</code>\n"
+                       f"🎯 TP 2: <code>{format_price(tp2)}</code>\n"
+                       f"🎯 TP 3: <code>{format_price(tp3)}</code>\n\n"
+                       f"🛑 Stop: <code>{format_price(sl)}</code>")
                 
                 print(f"\n💎 SMC SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
