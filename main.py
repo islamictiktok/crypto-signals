@@ -30,7 +30,7 @@ async def root():
     <html>
         <body style='background:#111;color:#00ff88;text-align:center;padding-top:50px;font-family:sans-serif;'>
             <h1>💎 SMC Elite Sniper</h1>
-            <p>Strategy: SFP + Pinbar Filter</p>
+            <p>Strategy: SFP + Pinbar + Volume Confirmation</p>
             <p>Timeframe: 15m</p>
             <p>Filter: Vol >= $5M</p>
         </body>
@@ -65,7 +65,7 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. محرك SMC (SFP + Wick Filter)
+# 3. محرك SMC (SFP + Wick + Volume)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -89,34 +89,36 @@ async def get_signal_logic(symbol):
         entry_price = curr['close']
         atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
 
-        # ✅ حساب تفاصيل الشمعة بدقة (الجسم والذيول)
+        # تفاصيل الشمعة
         open_p = last_closed['open']
         close_p = last_closed['close']
         high_p = last_closed['high']
         low_p = last_closed['low']
         
         body_len = abs(close_p - open_p)
-        upper_wick = high_p - max(open_p, close_p) # الذيل العلوي
-        lower_wick = min(open_p, close_p) - low_p  # الذيل السفلي
+        upper_wick = high_p - max(open_p, close_p)
+        lower_wick = min(open_p, close_p) - low_p
+
+        # ✅ حساب متوسط الفوليوم لآخر 20 شمعة
+        vol_ma = df['vol'].rolling(window=20).mean().iloc[-2]
+        current_vol = last_closed['vol']
+        
+        # ✅ شرط الفوليوم: هل فوليوم شمعة السحب أعلى من المتوسط؟
+        is_high_volume = current_vol > vol_ma
 
         # 💎 Bullish SFP (Long)
         if (low_p < key_support) and (close_p > key_support):
-            
-            # الشرط القديم: الذيل أكبر من نصف الجسم
             if lower_wick > body_len * 0.5:
-                # 🔥 الشرط الجديد: الذيل السفلي (السحب) لازم يكون أكبر بمرتين من الذيل العلوي
-                # هذا يمنع شموع الحيرة (Doji)
-                if lower_wick > (upper_wick * 2):
+                # شرط شكل الشمعة (Pinbar) + شرط الفوليوم
+                if (lower_wick > upper_wick * 2) and is_high_volume:
                     sl = low_p - (atr * 0.5)
                     return "LONG", sl, entry_price, signal_timestamp
 
         # 💎 Bearish SFP (Short)
         if (high_p > key_resistance) and (close_p < key_resistance):
-            
-            # الشرط القديم
             if upper_wick > body_len * 0.5:
-                # 🔥 الشرط الجديد: الذيل العلوي (السحب) لازم يكون أكبر بمرتين من الذيل السفلي
-                if upper_wick > (lower_wick * 2):
+                # شرط شكل الشمعة (Pinbar) + شرط الفوليوم
+                if (upper_wick > lower_wick * 2) and is_high_volume:
                     sl = high_p + (atr * 0.5)
                     return "SHORT", sl, entry_price, signal_timestamp
 
@@ -186,7 +188,7 @@ async def start_scanning(app_state):
         last_refresh_time = 0
         
         while True:
-            # تحديث القائمة كل 15 دقيقة (900 ثانية)
+            # تحديث القائمة كل 15 دقيقة
             if time.time() - last_refresh_time > 900:
                 print(f"🔄 Updating Active Pairs List (Vol >= $5M)...", end='\r')
                 try:
