@@ -18,7 +18,7 @@ CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# ✅ التعديل 1: فلتر السيولة 10 مليون دولار
+# ✅ فلتر السيولة (10 مليون دولار)
 MIN_VOLUME_USDT = 10_000_000
 
 app = FastAPI()
@@ -28,10 +28,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#111;color:#00e5ff;text-align:center;padding-top:50px;font-family:sans-serif;'>
-            <h1>💎 SMC Liquidity Sweep</h1>
-            <p>Strategy: SFP (Swing Failure Pattern) + OB</p>
-            <p>Filter: Vol > $10M | Copy-Paste Enabled</p>
+        <body style='background:#111;color:#00ff88;text-align:center;padding-top:50px;font-family:sans-serif;'>
+            <h1>💎 SMC Elite Sniper</h1>
+            <p>Strategy: SFP + OB</p>
+            <p>Filter: Vol > $10M (Visible)</p>
         </body>
     </html>
     """
@@ -64,54 +64,45 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. محرك SMC (Liquidity Sweep)
+# 3. محرك SMC (SFP Strategy)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # ✅ التعديل 2 (جزء 1): التحقق من السيولة داخل المنطق
-        ticker = await exchange.fetch_ticker(symbol)
-        if ticker['quoteVolume'] < MIN_VOLUME_USDT: return None
-
-        # نستخدم فريم الساعة للكشف عن السحوبات الواضحة
+        # ملاحظة: الفلتر تم تطبيقه مسبقاً في start_scanning
+        
+        # نستخدم فريم الساعة
         bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # تحديد القمم والقيعان (Fractals / Swing Points)
         window_start = len(df) - 50
         window_end = len(df) - 3
         
         recent_highs = df['high'].iloc[window_start:window_end]
         recent_lows = df['low'].iloc[window_start:window_end]
         
-        key_resistance = recent_highs.max() # قمة سابقة (Liquidity Pool)
-        key_support = recent_lows.min()     # قاع سابق (Liquidity Pool)
+        key_resistance = recent_highs.max()
+        key_support = recent_lows.min()
         
-        # الشمعة الحالية (التي أغلقت للتو) وشمعة التداول الحية
-        last_closed = df.iloc[-2] # الشمعة المكتملة
-        curr = df.iloc[-1]        # الشمعة الحية
+        last_closed = df.iloc[-2]
+        curr = df.iloc[-1]
         
-        entry_price = curr['close'] # ندخل ماركت
+        entry_price = curr['close']
         atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
 
-        # 💎 سيناريو سحب سيولة شرائي (Bullish SFP)
+        # 💎 Bullish SFP
         if (last_closed['low'] < key_support) and (last_closed['close'] > key_support):
-            
-            # التأكد من أن الهبوط كان خاطفاً (الذيل طويل بالنسبة للجسم)
             wick_len = last_closed['close'] - last_closed['low']
             body_len = abs(last_closed['close'] - last_closed['open'])
-            
-            if wick_len > body_len * 0.5: # الذيل حجمه محترم
-                sl = last_closed['low'] - (atr * 0.5) # ستوب تحت ذيل السحب
+            if wick_len > body_len * 0.5:
+                sl = last_closed['low'] - (atr * 0.5)
                 return "LONG", sl, entry_price
 
-        # 💎 سيناريو سحب سيولة بيعي (Bearish SFP)
+        # 💎 Bearish SFP
         if (last_closed['high'] > key_resistance) and (last_closed['close'] < key_resistance):
-            
             wick_len = last_closed['high'] - last_closed['close']
             body_len = abs(last_closed['close'] - last_closed['open'])
-            
             if wick_len > body_len * 0.5:
-                sl = last_closed['high'] + (atr * 0.5) # ستوب فوق ذيل السحب
+                sl = last_closed['high'] + (atr * 0.5)
                 return "SHORT", sl, entry_price
 
         return None
@@ -136,17 +127,12 @@ async def safe_check(symbol, app_state):
             side, sl, entry = logic_res
             key = f"{symbol}_{side}"
             
-            # منع التكرار (6 ساعات)
             if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 21600:
                 
-                # جلب السعر الحي للتأكيد (تحديث السعر)
                 ticker = await exchange.fetch_ticker(symbol)
                 live_price = ticker['last']
-                
-                # تحديث الدخول ليكون السعر الحالي
                 entry = live_price 
                 
-                # حساب الأهداف (R:R 1:2 minimum)
                 risk = abs(entry - sl)
                 if side == "LONG":
                     tp1 = entry + (risk * 1.5)
@@ -162,12 +148,10 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = get_leverage(clean_name)
-                
-                # ✅ التعديل 3: تصميم الرسالة النظيفة والقابلة للنسخ
                 emoji_side = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
                 
-                msg = (f"💎 <b>LIQUIDITY SWEEP</b>\n\n"
-                       f"🪙 <code>{clean_name}</code>\n"
+                # ✅ تم حذف العنوان نهائياً
+                msg = (f"<code>{clean_name}</code>\n"
                        f"{emoji_side} | {leverage}\n\n"
                        f"💰 Entry: <code>{format_price(entry)}</code>\n\n"
                        f"🎯 TP 1: <code>{format_price(tp1)}</code>\n"
@@ -175,7 +159,7 @@ async def safe_check(symbol, app_state):
                        f"🎯 TP 3: <code>{format_price(tp3)}</code>\n\n"
                        f"🛑 Stop: <code>{format_price(sl)}</code>")
                 
-                print(f"\n💎 SMC SIGNAL: {clean_name} {side}")
+                print(f"\n💎 SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 if mid: 
                     app_state.active_trades[symbol] = {
@@ -184,21 +168,34 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (SMC Sweep)...")
+    print(f"🚀 Connecting to KuCoin Futures...")
     try:
         await exchange.load_markets()
-        futures_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
-        print(f"✅ Active Pairs: {len(futures_symbols)}")
-        app_state.symbols = futures_symbols
+        all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
+        
+        # ✅ الفلترة الظاهرة (تظهر لك العدد الحقيقي)
+        print(f"🔎 Filtering {len(all_symbols)} pairs for Vol > $10M...", end='\r')
+        
+        tickers = await exchange.fetch_tickers(all_symbols)
+        
+        filtered_symbols = []
+        for symbol, ticker in tickers.items():
+            if ticker['quoteVolume'] is not None and ticker['quoteVolume'] >= MIN_VOLUME_USDT:
+                filtered_symbols.append(symbol)
+        
+        app_state.symbols = filtered_symbols
+        print(f"✅ Active Pairs (Vol > 10M): {len(filtered_symbols)} / {len(all_symbols)}")
 
         while True:
             if not app_state.symbols:
                 await asyncio.sleep(60)
                 continue
+            
             tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
             await asyncio.gather(*tasks)
-            print(f"🔄 Scanning...", end='\r')
+            print(f"🔄 Scanning {len(app_state.symbols)} pairs...", end='\r')
             await asyncio.sleep(20)
+
     except Exception as e:
         print(f"❌ Error: {str(e)}")
         await asyncio.sleep(10)
