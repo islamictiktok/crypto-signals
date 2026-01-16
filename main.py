@@ -18,7 +18,7 @@ CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# ✅ فلتر السيولة (5 مليون دولار)
+# فلتر السيولة
 MIN_VOLUME_USDT = 5_000_000
 
 app = FastAPI()
@@ -31,7 +31,7 @@ async def root():
         <body style='background:#111;color:#00ff88;text-align:center;padding-top:50px;font-family:sans-serif;'>
             <h1>💎 SMC Elite Sniper</h1>
             <p>Strategy: SFP + OB</p>
-            <p>Filter: Dynamic Vol >= $5M (Auto-Refresh)</p>
+            <p>Filter: Dynamic Vol >= $5M (Fixed Logic)</p>
         </body>
     </html>
     """
@@ -68,7 +68,6 @@ def format_price(price):
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # نستخدم فريم الساعة
         bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
@@ -84,6 +83,9 @@ async def get_signal_logic(symbol):
         last_closed = df.iloc[-2]
         curr = df.iloc[-1]
         
+        # ✅ التعديل الذكي 1: أخذنا وقت الشمعة كبصمة فريدة
+        signal_timestamp = int(last_closed['time'])
+        
         entry_price = curr['close']
         atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
 
@@ -93,7 +95,8 @@ async def get_signal_logic(symbol):
             body_len = abs(last_closed['close'] - last_closed['open'])
             if wick_len > body_len * 0.5:
                 sl = last_closed['low'] - (atr * 0.5)
-                return "LONG", sl, entry_price
+                # نرجع توقيت الشمعة أيضاً
+                return "LONG", sl, entry_price, signal_timestamp
 
         # 💎 Bearish SFP
         if (last_closed['high'] > key_resistance) and (last_closed['close'] < key_resistance):
@@ -101,7 +104,8 @@ async def get_signal_logic(symbol):
             body_len = abs(last_closed['close'] - last_closed['open'])
             if wick_len > body_len * 0.5:
                 sl = last_closed['high'] + (atr * 0.5)
-                return "SHORT", sl, entry_price
+                # نرجع توقيت الشمعة أيضاً
+                return "SHORT", sl, entry_price, signal_timestamp
 
         return None
     except: return None
@@ -122,14 +126,18 @@ async def safe_check(symbol, app_state):
         logic_res = await get_signal_logic(symbol)
         
         if logic_res:
-            side, sl, entry = logic_res
-            key = f"{symbol}_{side}"
+            # ✅ التعديل: استلام التوقيت (ts)
+            side, sl, entry, ts = logic_res
             
-            if key not in app_state.sent_signals or (time.time() - app_state.sent_signals[key]) > 21600:
+            # ✅ التعديل الذكي 2: المفتاح الآن يشمل توقيت الشمعة
+            # هذا يعني: العملة + الاتجاه + زمن الشمعة = مفتاح فريد
+            key = f"{symbol}_{side}_{ts}"
+            
+            # التحقق: إذا لم نرسل هذه الشمعة تحديداً من قبل
+            if key not in app_state.sent_signals:
                 
-                ticker = await exchange.fetch_ticker(symbol)
-                live_price = ticker['last']
-                entry = live_price 
+                # ✅ التعديل 3: حذفنا طلب السعر الثاني (fetch_ticker)
+                # نستخدم السعر القادم من التحليل مباشرة لمنع الاختلاف
                 
                 risk = abs(entry - sl)
                 if side == "LONG":
@@ -148,7 +156,6 @@ async def safe_check(symbol, app_state):
                 leverage = get_leverage(clean_name)
                 emoji_side = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
                 
-                # الرسالة النظيفة والقابلة للنسخ
                 msg = (f"<code>{clean_name}</code>\n"
                        f"{emoji_side} | {leverage}\n\n"
                        f"💰 Entry: <code>{format_price(entry)}</code>\n\n"
@@ -174,7 +181,7 @@ async def start_scanning(app_state):
         last_refresh_time = 0
         
         while True:
-            # ✅ التحديث الديناميكي: كل 30 دقيقة (1800 ثانية) نقوم بتحديث القائمة
+            # تحديث القائمة كل 30 دقيقة
             if time.time() - last_refresh_time > 1800:
                 print(f"🔄 Updating Active Pairs List (Vol >= $5M)...", end='\r')
                 try:
@@ -182,7 +189,6 @@ async def start_scanning(app_state):
                     new_filtered_symbols = []
                     
                     for symbol, ticker in tickers.items():
-                        # ✅ الشرط: أكبر من أو يساوي
                         if ticker['quoteVolume'] is not None and ticker['quoteVolume'] >= MIN_VOLUME_USDT:
                             new_filtered_symbols.append(symbol)
                     
@@ -192,7 +198,6 @@ async def start_scanning(app_state):
                 except Exception as e:
                     print(f"⚠️ Update Error: {str(e)}")
             
-            # بدء المسح للقائمة الحالية
             if not app_state.symbols:
                 await asyncio.sleep(10)
                 continue
