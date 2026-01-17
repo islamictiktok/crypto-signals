@@ -30,9 +30,8 @@ async def root():
     <html>
         <body style='background:#111;color:#ffaa00;text-align:center;padding-top:50px;font-family:sans-serif;'>
             <h1>🔥 MTF Breakout Sniper</h1>
-            <p>Strategy: Structure Breakout + Trend Following</p>
-            <p>Logic: Trend(1H) + Levels(1H) + Entry(15m)</p>
-            <p>Filter: Vol >= $5M | ADX > 20</p>
+            <p>Strategy: Breakout + Trend</p>
+            <p>Speed: Real-Time Monitoring (1s)</p>
         </body>
     </html>
     """
@@ -69,61 +68,45 @@ def format_price(price):
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # -------------------------------------------
-        # الخطوة 1: تحليل الاتجاه والدعوم (فريم الساعة)
-        # -------------------------------------------
+        # 1. تحليل الاتجاه (فريم الساعة)
         bars_1h = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=250)
         df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # مؤشرات الاتجاه (EMA 200) والقوة (ADX)
         df_1h.ta.ema(length=200, append=True)
         df_1h.ta.adx(length=14, append=True)
         
-        # التأكد من البيانات
         if 'EMA_200' not in df_1h.columns or pd.isna(df_1h['EMA_200'].iloc[-1]): return None
-        if 'ADX_14' not in df_1h.columns or df_1h['ADX_14'].iloc[-1] < 20: return None # السوق ضعيف
+        if 'ADX_14' not in df_1h.columns or df_1h['ADX_14'].iloc[-1] < 20: return None
 
-        # تحديد "الصندوق" (أعلى قمة وأقل قاع في آخر 20 ساعة)
-        # هذا يمثل المقاومة والدعم الديناميكي (Donchian Channel)
         window = 20
-        resistance_level = df_1h['high'].rolling(window=window).max().iloc[-2] # قمة النطاق السابق
-        support_level = df_1h['low'].rolling(window=window).min().iloc[-2]     # قاع النطاق السابق
+        resistance_level = df_1h['high'].rolling(window=window).max().iloc[-2]
+        support_level = df_1h['low'].rolling(window=window).min().iloc[-2]
         ema_200 = df_1h['EMA_200'].iloc[-1]
         
-        # -------------------------------------------
-        # الخطوة 2: توقيت الدخول والكسر (فريم 15 دقيقة)
-        # -------------------------------------------
+        # 2. الدخول (فريم 15 دقيقة)
         bars_15m = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=50)
         df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        current_close = df_15m['close'].iloc[-1]
-        current_open = df_15m['open'].iloc[-1]
-        current_vol = df_15m['vol'].iloc[-1]
-        vol_ma = df_15m['vol'].rolling(window=20).mean().iloc[-2]
+        confirmed_candle = df_15m.iloc[-2] 
         
-        # بصمة الشمعة
-        signal_timestamp = int(df_15m['time'].iloc[-1])
+        current_close = confirmed_candle['close']
+        current_open = confirmed_candle['open']
+        current_vol = confirmed_candle['vol']
+        vol_ma = df_15m['vol'].rolling(window=20).mean().iloc[-3]
         
-        # حساب ATR للستوب لوز
+        signal_timestamp = int(confirmed_candle['time'])
         atr = ta.atr(df_15m['high'], df_15m['low'], df_15m['close'], length=14).iloc[-1]
 
-        # شرط الفوليوم: لازم الكسر يكون بفوليوم حقيقي
         if current_vol <= vol_ma: return None
 
-        # 🔥 سيناريو الشراء (Breakout Long)
-        # 1. السعر كسر المقاومة (قمة الـ 20 ساعة الماضية)
-        # 2. الاتجاه العام صاعد (فوق EMA 200)
-        # 3. شمعة خضراء قوية
+        # 🔥 شراء
         if (current_close > resistance_level) and (current_close > ema_200) and (current_close > current_open):
-            sl = current_close - (atr * 2.0) # ستوب لوز أوسع قليلاً تحت منطقة الكسر
+            sl = current_close - (atr * 2.0)
             return "LONG", sl, current_close, signal_timestamp
 
-        # 🔥 سيناريو البيع (Breakout Short)
-        # 1. السعر كسر الدعم (قاع الـ 20 ساعة الماضية)
-        # 2. الاتجاه العام هابط (تحت EMA 200)
-        # 3. شمعة حمراء قوية
+        # 🔥 بيع
         if (current_close < support_level) and (current_close < ema_200) and (current_close < current_open):
-            sl = current_close + (atr * 2.0) # ستوب لوز فوق منطقة الكسر
+            sl = current_close + (atr * 2.0)
             return "SHORT", sl, current_close, signal_timestamp
 
         return None
@@ -141,6 +124,10 @@ def get_leverage(symbol):
     else: return "Cross 20x"
 
 async def safe_check(symbol, app_state):
+    # منع التكرار للصفقات النشطة
+    if symbol in app_state.active_trades:
+        return
+
     async with sem:
         logic_res = await get_signal_logic(symbol)
         
@@ -167,7 +154,6 @@ async def safe_check(symbol, app_state):
                 leverage = get_leverage(clean_name)
                 emoji_side = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
                 
-                # رسالة احترافية للبريك أوت
                 msg = (f"<code>{clean_name}</code>\n"
                        f"{emoji_side} | {leverage}\n"
                        f"🚀 <b>Breakout Signal</b>\n\n"
@@ -194,7 +180,6 @@ async def start_scanning(app_state):
         last_refresh_time = 0
         
         while True:
-            # تحديث القائمة كل 15 دقيقة
             if time.time() - last_refresh_time > 900:
                 print(f"🔄 Updating Active Pairs List (Vol >= $5M)...", end='\r')
                 try:
@@ -247,7 +232,8 @@ async def monitor_trades(app_state):
                 elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
 
             except: pass
-        await asyncio.sleep(5)
+        # ✅ التعديل هنا: الانتظار ثانية واحدة فقط بدلاً من 5
+        await asyncio.sleep(1)
 
 async def daily_report_task(app_state):
     while True:
