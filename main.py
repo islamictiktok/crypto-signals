@@ -18,7 +18,7 @@ CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# السيولة 5 مليون
+# فلتر السيولة
 MIN_VOLUME_USDT = 5_000_000
 
 app = FastAPI()
@@ -28,11 +28,11 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#111;color:#00ff88;text-align:center;padding-top:50px;font-family:sans-serif;'>
-            <h1>💎 SMC Elite Sniper</h1>
-            <p>Strategy: SFP + Pinbar + Volume Confirmation</p>
-            <p>Timeframe: 15m</p>
-            <p>Filter: Vol >= $5M</p>
+        <body style='background:#111;color:#ffaa00;text-align:center;padding-top:50px;font-family:sans-serif;'>
+            <h1>🔥 MTF Breakout Sniper</h1>
+            <p>Strategy: Structure Breakout + Trend Following</p>
+            <p>Logic: Trend(1H) + Levels(1H) + Entry(15m)</p>
+            <p>Filter: Vol >= $5M | ADX > 20</p>
         </body>
     </html>
     """
@@ -65,62 +65,66 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. محرك SMC (SFP + Wick + Volume)
+# 3. محرك الاستراتيجية (MTF Breakout)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # فريم 15 دقيقة
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
-        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        # -------------------------------------------
+        # الخطوة 1: تحليل الاتجاه والدعوم (فريم الساعة)
+        # -------------------------------------------
+        bars_1h = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=250)
+        df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        window_start = len(df) - 50
-        window_end = len(df) - 3
+        # مؤشرات الاتجاه (EMA 200) والقوة (ADX)
+        df_1h.ta.ema(length=200, append=True)
+        df_1h.ta.adx(length=14, append=True)
         
-        recent_highs = df['high'].iloc[window_start:window_end]
-        recent_lows = df['low'].iloc[window_start:window_end]
-        
-        key_resistance = recent_highs.max()
-        key_support = recent_lows.min()
-        
-        last_closed = df.iloc[-2]
-        curr = df.iloc[-1]
-        
-        signal_timestamp = int(last_closed['time'])
-        entry_price = curr['close']
-        atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
+        # التأكد من البيانات
+        if 'EMA_200' not in df_1h.columns or pd.isna(df_1h['EMA_200'].iloc[-1]): return None
+        if 'ADX_14' not in df_1h.columns or df_1h['ADX_14'].iloc[-1] < 20: return None # السوق ضعيف
 
-        # تفاصيل الشمعة
-        open_p = last_closed['open']
-        close_p = last_closed['close']
-        high_p = last_closed['high']
-        low_p = last_closed['low']
+        # تحديد "الصندوق" (أعلى قمة وأقل قاع في آخر 20 ساعة)
+        # هذا يمثل المقاومة والدعم الديناميكي (Donchian Channel)
+        window = 20
+        resistance_level = df_1h['high'].rolling(window=window).max().iloc[-2] # قمة النطاق السابق
+        support_level = df_1h['low'].rolling(window=window).min().iloc[-2]     # قاع النطاق السابق
+        ema_200 = df_1h['EMA_200'].iloc[-1]
         
-        body_len = abs(close_p - open_p)
-        upper_wick = high_p - max(open_p, close_p)
-        lower_wick = min(open_p, close_p) - low_p
-
-        # ✅ حساب متوسط الفوليوم لآخر 20 شمعة
-        vol_ma = df['vol'].rolling(window=20).mean().iloc[-2]
-        current_vol = last_closed['vol']
+        # -------------------------------------------
+        # الخطوة 2: توقيت الدخول والكسر (فريم 15 دقيقة)
+        # -------------------------------------------
+        bars_15m = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=50)
+        df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # ✅ شرط الفوليوم: هل فوليوم شمعة السحب أعلى من المتوسط؟
-        is_high_volume = current_vol > vol_ma
+        current_close = df_15m['close'].iloc[-1]
+        current_open = df_15m['open'].iloc[-1]
+        current_vol = df_15m['vol'].iloc[-1]
+        vol_ma = df_15m['vol'].rolling(window=20).mean().iloc[-2]
+        
+        # بصمة الشمعة
+        signal_timestamp = int(df_15m['time'].iloc[-1])
+        
+        # حساب ATR للستوب لوز
+        atr = ta.atr(df_15m['high'], df_15m['low'], df_15m['close'], length=14).iloc[-1]
 
-        # 💎 Bullish SFP (Long)
-        if (low_p < key_support) and (close_p > key_support):
-            if lower_wick > body_len * 0.5:
-                # شرط شكل الشمعة (Pinbar) + شرط الفوليوم
-                if (lower_wick > upper_wick * 2) and is_high_volume:
-                    sl = low_p - (atr * 0.5)
-                    return "LONG", sl, entry_price, signal_timestamp
+        # شرط الفوليوم: لازم الكسر يكون بفوليوم حقيقي
+        if current_vol <= vol_ma: return None
 
-        # 💎 Bearish SFP (Short)
-        if (high_p > key_resistance) and (close_p < key_resistance):
-            if upper_wick > body_len * 0.5:
-                # شرط شكل الشمعة (Pinbar) + شرط الفوليوم
-                if (upper_wick > lower_wick * 2) and is_high_volume:
-                    sl = high_p + (atr * 0.5)
-                    return "SHORT", sl, entry_price, signal_timestamp
+        # 🔥 سيناريو الشراء (Breakout Long)
+        # 1. السعر كسر المقاومة (قمة الـ 20 ساعة الماضية)
+        # 2. الاتجاه العام صاعد (فوق EMA 200)
+        # 3. شمعة خضراء قوية
+        if (current_close > resistance_level) and (current_close > ema_200) and (current_close > current_open):
+            sl = current_close - (atr * 2.0) # ستوب لوز أوسع قليلاً تحت منطقة الكسر
+            return "LONG", sl, current_close, signal_timestamp
+
+        # 🔥 سيناريو البيع (Breakout Short)
+        # 1. السعر كسر الدعم (قاع الـ 20 ساعة الماضية)
+        # 2. الاتجاه العام هابط (تحت EMA 200)
+        # 3. شمعة حمراء قوية
+        if (current_close < support_level) and (current_close < ema_200) and (current_close < current_open):
+            sl = current_close + (atr * 2.0) # ستوب لوز فوق منطقة الكسر
+            return "SHORT", sl, current_close, signal_timestamp
 
         return None
     except: return None
@@ -163,15 +167,17 @@ async def safe_check(symbol, app_state):
                 leverage = get_leverage(clean_name)
                 emoji_side = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
                 
+                # رسالة احترافية للبريك أوت
                 msg = (f"<code>{clean_name}</code>\n"
-                       f"{emoji_side} | {leverage}\n\n"
+                       f"{emoji_side} | {leverage}\n"
+                       f"🚀 <b>Breakout Signal</b>\n\n"
                        f"💰 Entry: <code>{format_price(entry)}</code>\n\n"
                        f"🎯 TP 1: <code>{format_price(tp1)}</code>\n"
                        f"🎯 TP 2: <code>{format_price(tp2)}</code>\n"
                        f"🎯 TP 3: <code>{format_price(tp3)}</code>\n\n"
                        f"🛑 Stop: <code>{format_price(sl)}</code>")
                 
-                print(f"\n💎 SIGNAL: {clean_name} {side}")
+                print(f"\n🚀 BREAKOUT: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 if mid: 
                     app_state.active_trades[symbol] = {
