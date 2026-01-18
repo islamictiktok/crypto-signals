@@ -17,7 +17,7 @@ TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
-MIN_VOLUME_USDT = 10_000_000  # رفعنا شرط السيولة لضمان حركات نظيفة
+MIN_VOLUME_USDT = 10_000_000  # سيولة عالية فقط
 
 app = FastAPI()
 
@@ -26,11 +26,11 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#0d1117;color:#58a6ff;text-align:center;padding-top:50px;font-family:sans-serif;'>
-            <h1>🧠 Trend Pullback Sniper</h1>
-            <p>Strategy: Buy the Dip in Strong Trend</p>
-            <p>Entry Zone: Between EMA 20 & EMA 50</p>
-            <p>Status: Active</p>
+        <body style='background:#000;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🏆 The King Strategy</h1>
+            <p>Type: Trend Follower + Dip Buyer</p>
+            <p>Timeframe: 4H Trend | 1H Entry</p>
+            <p>Logic: EMA 50 Bounce</p>
         </body>
     </html>
     """
@@ -63,81 +63,85 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. المحرك: Pullback Sniper Logic
+# 3. المحرك: Smart Pullback (1H Edition)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # 1. الاتجاه العام (4H) - يجب أن يكون قويًا جدًا
+        # 1. الاتجاه العام (4H) - هل نحن في تريند قوي؟
         bars_4h = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=100)
         df_4h = pd.DataFrame(bars_4h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        df_4h.ta.ema(length=50, append=True) # المتوسط البطيع
-        df_4h.ta.ema(length=20, append=True) # المتوسط السريع
+        df_4h.ta.ema(length=50, append=True)
+        df_4h.ta.ema(length=200, append=True)
         
         if 'EMA_50' not in df_4h.columns: return None
         
         ema_50_4h = df_4h['EMA_50'].iloc[-1]
-        ema_20_4h = df_4h['EMA_20'].iloc[-1]
+        ema_200_4h = df_4h['EMA_200'].iloc[-1]
         close_4h = df_4h['close'].iloc[-1]
 
-        # تحديد التريند: EMA 20 فوق EMA 50 والسعر فوقهم
         trend = "NEUTRAL"
-        if (close_4h > ema_20_4h) and (ema_20_4h > ema_50_4h):
+        # شروط تريند صارمة: السعر فوق متوسط 50 وفوق متوسط 200
+        if (close_4h > ema_50_4h) and (close_4h > ema_200_4h):
             trend = "BULLISH"
-        elif (close_4h < ema_20_4h) and (ema_20_4h < ema_50_4h):
+        elif (close_4h < ema_50_4h) and (close_4h < ema_200_4h):
             trend = "BEARISH"
         
         if trend == "NEUTRAL": return None
 
-        # 2. البحث عن منطقة التصحيح (15m)
-        bars_15m = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
-        df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        # 2. منطقة الدخول (1H) - البحث عن السعر الرخيص
+        bars_1h = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+        df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # المتوسطات للتصحيح
-        df_15m.ta.ema(length=50, append=True)
-        df_15m.ta.ema(length=20, append=True)
-        df_15m.ta.rsi(length=14, append=True)
+        df_1h.ta.ema(length=50, append=True) # هذا هو "خط الشراء"
+        df_1h.ta.rsi(length=14, append=True)
         
-        curr = df_15m.iloc[-1] # الشمعة الحالية (التي نراقبها لحظيًا)
-        
+        curr = df_1h.iloc[-1]
         current_price = curr['close']
         current_low = curr['low']
         current_high = curr['high']
-        
-        ema_20_15m = curr['EMA_20']
-        ema_50_15m = curr['EMA_50']
-        rsi_15m = curr['RSI_14']
-        atr = ta.atr(df_15m['high'], df_15m['low'], df_15m['close'], length=14).iloc[-1]
+        ema_50_1h = curr['EMA_50']
+        rsi_1h = curr['RSI_14']
+        atr = ta.atr(df_1h['high'], df_1h['low'], df_1h['close'], length=14).iloc[-1]
         signal_timestamp = int(curr['time'])
         
-        # 🔥 منطق القناص (Sniper Logic) 🔥
+        # 🔥 القناص (Sniper Logic) 🔥
         
         # ✅ سيناريو الشراء (LONG)
-        # التريند العام صاعد، لكننا ننتظر هبوط السعر في الـ 15 دقيقة
         if trend == "BULLISH":
-            # المنطقة الذهبية: السعر بين EMA 20 و EMA 50
-            # أو السعر لمس EMA 50 وارتد
+            # الشرط 1: السعر هبط ليلمس أو يقترب من EMA 50 (منطقة دعم)
+            # نسمح بفرق 1% حول المتوسط
+            zone_top = ema_50_1h * 1.01
+            zone_bottom = ema_50_1h * 0.99
             
-            # 1. هل حدث تصحيح؟ (RSI برد ونزل تحت 55) - يعني السعر رخيص
-            if rsi_15m < 55:
-                # 2. هل السعر دخل المنطقة بين المتوسطين؟
-                # Low الشمعة نزل تحت EMA 20 لكن السعر ما زال فوق EMA 50 (أو قريب جدًا منه)
-                if (current_low <= ema_20_15m) and (current_price >= ema_50_15m * 0.998):
-                    # 3. التأكيد: شمعة خضراء (ارتداد)
-                    if current_price > curr['open']:
-                        sl = ema_50_15m - (atr * 2.0) # الستوب تحت المتوسط البطيء
-                        return "LONG", sl, current_price, signal_timestamp
+            in_buy_zone = (current_low <= zone_top) and (current_price >= zone_bottom)
+            
+            # الشرط 2: RSI بارد (ليس في قمة)
+            rsi_cool = rsi_1h < 60
+            
+            # الشرط 3: شمعة ارتدادية (الحالية خضراء)
+            is_green = current_price > curr['open']
+            
+            if in_buy_zone and rsi_cool and is_green:
+                sl = zone_bottom - (atr * 2.0) # ستوب تحت منطقة الدعم
+                return "LONG", sl, current_price, signal_timestamp
 
         # ✅ سيناريو البيع (SHORT)
         if trend == "BEARISH":
-            # 1. هل حدث تصحيح للأعلى؟ (RSI ارتفع فوق 45)
-            if rsi_15m > 45:
-                # 2. هل السعر دخل المنطقة بين المتوسطين؟
-                # High الشمعة طلع فوق EMA 20 لكن السعر ما زال تحت EMA 50
-                if (current_high >= ema_20_15m) and (current_price <= ema_50_15m * 1.002):
-                    # 3. التأكيد: شمعة حمراء
-                    if current_price < curr['open']:
-                        sl = ema_50_15m + (atr * 2.0)
-                        return "SHORT", sl, current_price, signal_timestamp
+            # الشرط 1: السعر صعد ليلمس EMA 50 (منطقة مقاومة)
+            zone_bottom = ema_50_1h * 0.99
+            zone_top = ema_50_1h * 1.01
+            
+            in_sell_zone = (current_high >= zone_bottom) and (current_price <= zone_top)
+            
+            # الشرط 2: RSI بارد (ليس في قاع)
+            rsi_cool = rsi_1h > 40
+            
+            # الشرط 3: شمعة هبوطية (الحالية حمراء)
+            is_red = current_price < curr['open']
+            
+            if in_sell_zone and rsi_cool and is_red:
+                sl = zone_top + (atr * 2.0)
+                return "SHORT", sl, current_price, signal_timestamp
 
         return None
     except: return None
@@ -167,15 +171,15 @@ async def safe_check(symbol, app_state):
                 risk = abs(entry - sl)
                 
                 if side == "LONG":
-                    tp1 = entry + (risk * 2.0) # هدف أول ضعف المخاطرة
+                    tp1 = entry + (risk * 2.0) # R:R 1:2
                     tp2 = entry + (risk * 4.0)
                     tp3 = entry + (risk * 6.0)
-                    header = "🟢 <b>LONG (Dip)</b>"
+                    header = "🟢 <b>LONG (Smart Buy)</b>"
                 else:
                     tp1 = entry - (risk * 2.0)
                     tp2 = entry - (risk * 4.0)
                     tp3 = entry - (risk * 6.0)
-                    header = "🔴 <b>SHORT (Rally)</b>"
+                    header = "🔴 <b>SHORT (Smart Sell)</b>"
                 
                 app_state.sent_signals[key] = time.time()
                 app_state.stats["total"] += 1
@@ -184,7 +188,7 @@ async def safe_check(symbol, app_state):
                 leverage = get_leverage(clean_name)
                 
                 msg = (
-                    f"🧠 <b>#{clean_name}</b>\n"
+                    f"🏆 <b>#{clean_name}</b>\n"
                     f"{header} | {leverage}\n"
                     f"──────────────\n"
                     f"🛒 <b>Entry:</b> <code>{format_price(entry)}</code>\n\n"
@@ -195,7 +199,7 @@ async def safe_check(symbol, app_state):
                     f"🛑 <b>Stop Loss:</b> <code>{format_price(sl)}</code>"
                 )
                 
-                print(f"\n🧠 PULLBACK SIGNAL: {clean_name} {side}")
+                print(f"\n🏆 SMART SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 if mid: 
                     app_state.active_trades[symbol] = {
@@ -204,7 +208,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (Sniper Mode)...")
+    print(f"🚀 Connecting to KuCoin Futures (King Strategy)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -230,9 +234,8 @@ async def start_scanning(app_state):
 
             tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
             await asyncio.gather(*tasks)
-            # فحص كل 30 ثانية
             print(f"⏳ Scanning {len(app_state.symbols)} pairs...", end='\r')
-            await asyncio.sleep(30) 
+            await asyncio.sleep(60) 
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
