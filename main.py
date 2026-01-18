@@ -17,7 +17,7 @@ TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
-MIN_VOLUME_USDT = 5_000_000
+MIN_VOLUME_USDT = 10_000_000  # رفعنا شرط السيولة لضمان حركات نظيفة
 
 app = FastAPI()
 
@@ -26,9 +26,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#050505;color:#e6b800;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>👑 Royal Sniper (Clean UI)</h1>
-            <p>Strategy: 4H Trend + 1H Retest</p>
+        <body style='background:#0d1117;color:#58a6ff;text-align:center;padding-top:50px;font-family:sans-serif;'>
+            <h1>🧠 Trend Pullback Sniper</h1>
+            <p>Strategy: Buy the Dip in Strong Trend</p>
+            <p>Entry Zone: Between EMA 20 & EMA 50</p>
             <p>Status: Active</p>
         </body>
     </html>
@@ -62,77 +63,87 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. المحرك: Royal Retest Logic
+# 3. المحرك: Pullback Sniper Logic
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # 1. الاتجاه (4H)
-        bars_4h = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=200)
+        # 1. الاتجاه العام (4H) - يجب أن يكون قويًا جدًا
+        bars_4h = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=100)
         df_4h = pd.DataFrame(bars_4h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        df_4h.ta.ema(length=200, append=True)
-        df_4h.ta.adx(length=14, append=True)
+        df_4h.ta.ema(length=50, append=True) # المتوسط البطيع
+        df_4h.ta.ema(length=20, append=True) # المتوسط السريع
         
-        if 'EMA_200' not in df_4h.columns or pd.isna(df_4h['EMA_200'].iloc[-1]): return None
+        if 'EMA_50' not in df_4h.columns: return None
         
-        ema_200_4h = df_4h['EMA_200'].iloc[-1]
-        adx_4h = df_4h['ADX_14'].iloc[-1]
+        ema_50_4h = df_4h['EMA_50'].iloc[-1]
+        ema_20_4h = df_4h['EMA_20'].iloc[-1]
         close_4h = df_4h['close'].iloc[-1]
 
-        if adx_4h < 25: return None # فلتر قوة الاتجاه
-        
+        # تحديد التريند: EMA 20 فوق EMA 50 والسعر فوقهم
         trend = "NEUTRAL"
-        if close_4h > ema_200_4h: trend = "BULLISH"
-        elif close_4h < ema_200_4h: trend = "BEARISH"
+        if (close_4h > ema_20_4h) and (ema_20_4h > ema_50_4h):
+            trend = "BULLISH"
+        elif (close_4h < ema_20_4h) and (ema_20_4h < ema_50_4h):
+            trend = "BEARISH"
         
         if trend == "NEUTRAL": return None
 
-        # 2. الدخول وإعادة الاختبار (1H)
-        bars_1h = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=50)
-        df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        df_1h.ta.rsi(length=14, append=True)
+        # 2. البحث عن منطقة التصحيح (15m)
+        bars_15m = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
+        df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        window = 20
-        old_highs = df_1h['high'].iloc[-22:-2] 
-        old_lows = df_1h['low'].iloc[-22:-2]
-        resistance_1h = old_highs.max()
-        support_1h = old_lows.min()
+        # المتوسطات للتصحيح
+        df_15m.ta.ema(length=50, append=True)
+        df_15m.ta.ema(length=20, append=True)
+        df_15m.ta.rsi(length=14, append=True)
         
-        curr_candle = df_1h.iloc[-1]
-        current_price = curr_candle['close']
-        current_low = curr_candle['low']
-        current_high = curr_candle['high']
-        current_rsi = df_1h['RSI_14'].iloc[-1]
-        atr = ta.atr(df_1h['high'], df_1h['low'], df_1h['close'], length=14).iloc[-1]
-        signal_timestamp = int(curr_candle['time'])
-
-        # 🔥 True Retest Logic
+        curr = df_15m.iloc[-1] # الشمعة الحالية (التي نراقبها لحظيًا)
+        
+        current_price = curr['close']
+        current_low = curr['low']
+        current_high = curr['high']
+        
+        ema_20_15m = curr['EMA_20']
+        ema_50_15m = curr['EMA_50']
+        rsi_15m = curr['RSI_14']
+        atr = ta.atr(df_15m['high'], df_15m['low'], df_15m['close'], length=14).iloc[-1]
+        signal_timestamp = int(curr['time'])
+        
+        # 🔥 منطق القناص (Sniper Logic) 🔥
+        
+        # ✅ سيناريو الشراء (LONG)
+        # التريند العام صاعد، لكننا ننتظر هبوط السعر في الـ 15 دقيقة
         if trend == "BULLISH":
-            if current_price > resistance_1h:
-                if current_rsi < 70:
-                    retest_zone_top = resistance_1h * 1.003
-                    did_retest = (current_low <= retest_zone_top)
-                    is_bouncing = (current_price > resistance_1h)
-                    
-                    if did_retest and is_bouncing:
-                        sl = resistance_1h - (atr * 2.0)
+            # المنطقة الذهبية: السعر بين EMA 20 و EMA 50
+            # أو السعر لمس EMA 50 وارتد
+            
+            # 1. هل حدث تصحيح؟ (RSI برد ونزل تحت 55) - يعني السعر رخيص
+            if rsi_15m < 55:
+                # 2. هل السعر دخل المنطقة بين المتوسطين؟
+                # Low الشمعة نزل تحت EMA 20 لكن السعر ما زال فوق EMA 50 (أو قريب جدًا منه)
+                if (current_low <= ema_20_15m) and (current_price >= ema_50_15m * 0.998):
+                    # 3. التأكيد: شمعة خضراء (ارتداد)
+                    if current_price > curr['open']:
+                        sl = ema_50_15m - (atr * 2.0) # الستوب تحت المتوسط البطيء
                         return "LONG", sl, current_price, signal_timestamp
 
+        # ✅ سيناريو البيع (SHORT)
         if trend == "BEARISH":
-            if current_price < support_1h:
-                if current_rsi > 30:
-                    retest_zone_bottom = support_1h * 0.997
-                    did_retest = (current_high >= retest_zone_bottom)
-                    is_bouncing = (current_price < support_1h)
-                    
-                    if did_retest and is_bouncing:
-                        sl = support_1h + (atr * 2.0)
+            # 1. هل حدث تصحيح للأعلى؟ (RSI ارتفع فوق 45)
+            if rsi_15m > 45:
+                # 2. هل السعر دخل المنطقة بين المتوسطين؟
+                # High الشمعة طلع فوق EMA 20 لكن السعر ما زال تحت EMA 50
+                if (current_high >= ema_20_15m) and (current_price <= ema_50_15m * 1.002):
+                    # 3. التأكيد: شمعة حمراء
+                    if current_price < curr['open']:
+                        sl = ema_50_15m + (atr * 2.0)
                         return "SHORT", sl, current_price, signal_timestamp
 
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة والرسائل (Clean UI)
+# 4. المعالجة والرسائل
 # ==========================================
 sem = asyncio.Semaphore(5)
 
@@ -156,15 +167,15 @@ async def safe_check(symbol, app_state):
                 risk = abs(entry - sl)
                 
                 if side == "LONG":
-                    tp1 = entry + (risk * 1.5)
-                    tp2 = entry + (risk * 3.0)
+                    tp1 = entry + (risk * 2.0) # هدف أول ضعف المخاطرة
+                    tp2 = entry + (risk * 4.0)
                     tp3 = entry + (risk * 6.0)
-                    header = "🟢 <b>LONG</b>"
+                    header = "🟢 <b>LONG (Dip)</b>"
                 else:
-                    tp1 = entry - (risk * 1.5)
-                    tp2 = entry - (risk * 3.0)
+                    tp1 = entry - (risk * 2.0)
+                    tp2 = entry - (risk * 4.0)
                     tp3 = entry - (risk * 6.0)
-                    header = "🔴 <b>SHORT</b>"
+                    header = "🔴 <b>SHORT (Rally)</b>"
                 
                 app_state.sent_signals[key] = time.time()
                 app_state.stats["total"] += 1
@@ -172,12 +183,11 @@ async def safe_check(symbol, app_state):
                 clean_name = symbol.split(':')[0]
                 leverage = get_leverage(clean_name)
                 
-                # 🔥 تصميم الرسالة النظيفة (Clean Message)
                 msg = (
-                    f"💎 <b>#{clean_name}</b>\n"
+                    f"🧠 <b>#{clean_name}</b>\n"
                     f"{header} | {leverage}\n"
                     f"──────────────\n"
-                    f"⚡️ <b>Entry:</b> <code>{format_price(entry)}</code>\n\n"
+                    f"🛒 <b>Entry:</b> <code>{format_price(entry)}</code>\n\n"
                     f"🎯 <b>Target 1:</b> <code>{format_price(tp1)}</code>\n"
                     f"🎯 <b>Target 2:</b> <code>{format_price(tp2)}</code>\n"
                     f"🚀 <b>Target 3:</b> <code>{format_price(tp3)}</code>\n"
@@ -185,7 +195,7 @@ async def safe_check(symbol, app_state):
                     f"🛑 <b>Stop Loss:</b> <code>{format_price(sl)}</code>"
                 )
                 
-                print(f"\n💎 SIGNAL: {clean_name} {side}")
+                print(f"\n🧠 PULLBACK SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 if mid: 
                     app_state.active_trades[symbol] = {
@@ -194,7 +204,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (Royal Mode)...")
+    print(f"🚀 Connecting to KuCoin Futures (Sniper Mode)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -220,8 +230,9 @@ async def start_scanning(app_state):
 
             tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
             await asyncio.gather(*tasks)
+            # فحص كل 30 ثانية
             print(f"⏳ Scanning {len(app_state.symbols)} pairs...", end='\r')
-            await asyncio.sleep(60) 
+            await asyncio.sleep(30) 
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
@@ -238,7 +249,6 @@ async def monitor_trades(app_state):
                 for target, label in [("tp1", "TP 1"), ("tp2", "TP 2"), ("tp3", "TP 3")]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            # رد نظيف ومختصر
                             icon = "✅" if label == "TP 1" else "💰" if label == "TP 2" else "🚀"
                             await reply_telegram_msg(f"{icon} <b>Hit {label}</b>", msg_id)
                             trade["hit"].append(target)
