@@ -29,9 +29,11 @@ async def root():
     return """
     <html>
         <body style='background:#111;color:#ffaa00;text-align:center;padding-top:50px;font-family:sans-serif;'>
-            <h1>🔥 MTF Breakout Sniper</h1>
-            <p>Strategy: Breakout + Trend</p>
-            <p>Speed: Real-Time Monitoring (1s)</p>
+            <h1>🔥 MTF Sniper (Full Professional)</h1>
+            <p>1. Time Filter (2 Candles Confirmation)</p>
+            <p>2. Momentum (RSI Safe Zone)</p>
+            <p>3. Retest Logic (Price Proximity Check)</p>
+            <p>Speed: Real-Time (1s)</p>
         </body>
     </html>
     """
@@ -64,7 +66,7 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. محرك الاستراتيجية (MTF Breakout)
+# 3. محرك الاستراتيجية (The 3 Conditions)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -83,31 +85,57 @@ async def get_signal_logic(symbol):
         support_level = df_1h['low'].rolling(window=window).min().iloc[-2]
         ema_200 = df_1h['EMA_200'].iloc[-1]
         
-        # 2. الدخول (فريم 15 دقيقة)
+        # 2. الدخول والفلترة (فريم 15 دقيقة)
         bars_15m = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=50)
         df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        confirmed_candle = df_15m.iloc[-2] 
+        # حساب RSI
+        df_15m.ta.rsi(length=14, append=True)
+        if 'RSI_14' not in df_15m.columns: return None
         
-        current_close = confirmed_candle['close']
-        current_open = confirmed_candle['open']
-        current_vol = confirmed_candle['vol']
-        vol_ma = df_15m['vol'].rolling(window=20).mean().iloc[-3]
+        # ✅ الفلتر الزمني: نحتاج شمعتين (الأخيرة + قبل الأخيرة)
+        candle_1 = df_15m.iloc[-2] # الشمعة المكتملة الأخيرة (التأكيد)
+        candle_2 = df_15m.iloc[-3] # الشمعة التي قبلها (الكسر الأولي)
         
-        signal_timestamp = int(confirmed_candle['time'])
+        # البيانات الحالية
+        current_rsi = df_15m['RSI_14'].iloc[-2]
+        entry_price = candle_1['close']
+        signal_timestamp = int(candle_1['time'])
         atr = ta.atr(df_15m['high'], df_15m['low'], df_15m['close'], length=14).iloc[-1]
+        
+        # شرط الفوليوم (أعلى من المتوسط)
+        vol_ma = df_15m['vol'].rolling(window=20).mean().iloc[-3]
+        if candle_1['vol'] <= vol_ma: return None
 
-        if current_vol <= vol_ma: return None
+        # =========================================
+        # 🔥 الشروط الثلاثة (Time + Momentum + Retest Proximity)
+        # =========================================
 
-        # 🔥 شراء
-        if (current_close > resistance_level) and (current_close > ema_200) and (current_close > current_open):
-            sl = current_close - (atr * 2.0)
-            return "LONG", sl, current_close, signal_timestamp
+        # 🟢 سيناريو الشراء (LONG)
+        # 1. الاتجاه العام صاعد
+        if (entry_price > ema_200):
+            # 2. الفلترة الزمنية: الشمعتين 1 و 2 أغلقوا فوق المقاومة
+            if (candle_1['close'] > resistance_level) and (candle_2['close'] > resistance_level):
+                # 3. الزخم: RSI ليس متشبعاً (أقل من 70)
+                if current_rsi < 70:
+                    # 4. (إعادة الاختبار/القرب): السعر لم يهرب بعيداً (أقل من 1.5% فرق عن المقاومة)
+                    diff_percent = (entry_price - resistance_level) / resistance_level * 100
+                    if diff_percent <= 1.5:
+                        sl = entry_price - (atr * 2.0)
+                        return "LONG", sl, entry_price, signal_timestamp
 
-        # 🔥 بيع
-        if (current_close < support_level) and (current_close < ema_200) and (current_close < current_open):
-            sl = current_close + (atr * 2.0)
-            return "SHORT", sl, current_close, signal_timestamp
+        # 🔴 سيناريو البيع (SHORT)
+        # 1. الاتجاه العام هابط
+        if (entry_price < ema_200):
+            # 2. الفلترة الزمنية: الشمعتين 1 و 2 أغلقوا تحت الدعم
+            if (candle_1['close'] < support_level) and (candle_2['close'] < support_level):
+                # 3. الزخم: RSI ليس منهاراً (أكبر من 30)
+                if current_rsi > 30:
+                    # 4. (إعادة الاختبار/القرب): السعر لم يهرب بعيداً
+                    diff_percent = (support_level - entry_price) / support_level * 100
+                    if diff_percent <= 1.5:
+                        sl = entry_price + (atr * 2.0)
+                        return "SHORT", sl, entry_price, signal_timestamp
 
         return None
     except: return None
@@ -124,7 +152,6 @@ def get_leverage(symbol):
     else: return "Cross 20x"
 
 async def safe_check(symbol, app_state):
-    # منع التكرار للصفقات النشطة
     if symbol in app_state.active_trades:
         return
 
@@ -156,14 +183,15 @@ async def safe_check(symbol, app_state):
                 
                 msg = (f"<code>{clean_name}</code>\n"
                        f"{emoji_side} | {leverage}\n"
-                       f"🚀 <b>Breakout Signal</b>\n\n"
+                       f"🔥 <b>Confirmed Sniper</b>\n"
+                       f"<i>(Time Filter + RSI + Zone)</i>\n\n"
                        f"💰 Entry: <code>{format_price(entry)}</code>\n\n"
                        f"🎯 TP 1: <code>{format_price(tp1)}</code>\n"
                        f"🎯 TP 2: <code>{format_price(tp2)}</code>\n"
                        f"🎯 TP 3: <code>{format_price(tp3)}</code>\n\n"
                        f"🛑 Stop: <code>{format_price(sl)}</code>")
                 
-                print(f"\n🚀 BREAKOUT: {clean_name} {side}")
+                print(f"\n🔥 SNIPER: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 if mid: 
                     app_state.active_trades[symbol] = {
@@ -232,7 +260,6 @@ async def monitor_trades(app_state):
                 elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
 
             except: pass
-        # ✅ التعديل هنا: الانتظار ثانية واحدة فقط بدلاً من 5
         await asyncio.sleep(1)
 
 async def daily_report_task(app_state):
