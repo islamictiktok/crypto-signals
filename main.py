@@ -17,8 +17,6 @@ TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
-
-# فلتر السيولة
 MIN_VOLUME_USDT = 5_000_000
 
 app = FastAPI()
@@ -28,12 +26,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#111;color:#ffaa00;text-align:center;padding-top:50px;font-family:sans-serif;'>
-            <h1>🔥 MTF Sniper (Full Professional)</h1>
-            <p>1. Time Filter (2 Candles Confirmation)</p>
-            <p>2. Momentum (RSI Safe Zone)</p>
-            <p>3. Retest Logic (Price Proximity Check)</p>
-            <p>Speed: Real-Time (1s)</p>
+        <body style='background:#050505;color:#e6b800;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>👑 Royal Sniper (Clean UI)</h1>
+            <p>Strategy: 4H Trend + 1H Retest</p>
+            <p>Status: Active</p>
         </body>
     </html>
     """
@@ -66,94 +62,88 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. محرك الاستراتيجية (The 3 Conditions)
+# 3. المحرك: Royal Retest Logic
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # 1. تحليل الاتجاه (فريم الساعة)
-        bars_1h = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=250)
+        # 1. الاتجاه (4H)
+        bars_4h = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=200)
+        df_4h = pd.DataFrame(bars_4h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        df_4h.ta.ema(length=200, append=True)
+        df_4h.ta.adx(length=14, append=True)
+        
+        if 'EMA_200' not in df_4h.columns or pd.isna(df_4h['EMA_200'].iloc[-1]): return None
+        
+        ema_200_4h = df_4h['EMA_200'].iloc[-1]
+        adx_4h = df_4h['ADX_14'].iloc[-1]
+        close_4h = df_4h['close'].iloc[-1]
+
+        if adx_4h < 25: return None # فلتر قوة الاتجاه
+        
+        trend = "NEUTRAL"
+        if close_4h > ema_200_4h: trend = "BULLISH"
+        elif close_4h < ema_200_4h: trend = "BEARISH"
+        
+        if trend == "NEUTRAL": return None
+
+        # 2. الدخول وإعادة الاختبار (1H)
+        bars_1h = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=50)
         df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        df_1h.ta.rsi(length=14, append=True)
         
-        df_1h.ta.ema(length=200, append=True)
-        df_1h.ta.adx(length=14, append=True)
-        
-        if 'EMA_200' not in df_1h.columns or pd.isna(df_1h['EMA_200'].iloc[-1]): return None
-        if 'ADX_14' not in df_1h.columns or df_1h['ADX_14'].iloc[-1] < 20: return None
-
         window = 20
-        resistance_level = df_1h['high'].rolling(window=window).max().iloc[-2]
-        support_level = df_1h['low'].rolling(window=window).min().iloc[-2]
-        ema_200 = df_1h['EMA_200'].iloc[-1]
+        old_highs = df_1h['high'].iloc[-22:-2] 
+        old_lows = df_1h['low'].iloc[-22:-2]
+        resistance_1h = old_highs.max()
+        support_1h = old_lows.min()
         
-        # 2. الدخول والفلترة (فريم 15 دقيقة)
-        bars_15m = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=50)
-        df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        
-        # حساب RSI
-        df_15m.ta.rsi(length=14, append=True)
-        if 'RSI_14' not in df_15m.columns: return None
-        
-        # ✅ الفلتر الزمني: نحتاج شمعتين (الأخيرة + قبل الأخيرة)
-        candle_1 = df_15m.iloc[-2] # الشمعة المكتملة الأخيرة (التأكيد)
-        candle_2 = df_15m.iloc[-3] # الشمعة التي قبلها (الكسر الأولي)
-        
-        # البيانات الحالية
-        current_rsi = df_15m['RSI_14'].iloc[-2]
-        entry_price = candle_1['close']
-        signal_timestamp = int(candle_1['time'])
-        atr = ta.atr(df_15m['high'], df_15m['low'], df_15m['close'], length=14).iloc[-1]
-        
-        # شرط الفوليوم (أعلى من المتوسط)
-        vol_ma = df_15m['vol'].rolling(window=20).mean().iloc[-3]
-        if candle_1['vol'] <= vol_ma: return None
+        curr_candle = df_1h.iloc[-1]
+        current_price = curr_candle['close']
+        current_low = curr_candle['low']
+        current_high = curr_candle['high']
+        current_rsi = df_1h['RSI_14'].iloc[-1]
+        atr = ta.atr(df_1h['high'], df_1h['low'], df_1h['close'], length=14).iloc[-1]
+        signal_timestamp = int(curr_candle['time'])
 
-        # =========================================
-        # 🔥 الشروط الثلاثة (Time + Momentum + Retest Proximity)
-        # =========================================
-
-        # 🟢 سيناريو الشراء (LONG)
-        # 1. الاتجاه العام صاعد
-        if (entry_price > ema_200):
-            # 2. الفلترة الزمنية: الشمعتين 1 و 2 أغلقوا فوق المقاومة
-            if (candle_1['close'] > resistance_level) and (candle_2['close'] > resistance_level):
-                # 3. الزخم: RSI ليس متشبعاً (أقل من 70)
+        # 🔥 True Retest Logic
+        if trend == "BULLISH":
+            if current_price > resistance_1h:
                 if current_rsi < 70:
-                    # 4. (إعادة الاختبار/القرب): السعر لم يهرب بعيداً (أقل من 1.5% فرق عن المقاومة)
-                    diff_percent = (entry_price - resistance_level) / resistance_level * 100
-                    if diff_percent <= 1.5:
-                        sl = entry_price - (atr * 2.0)
-                        return "LONG", sl, entry_price, signal_timestamp
+                    retest_zone_top = resistance_1h * 1.003
+                    did_retest = (current_low <= retest_zone_top)
+                    is_bouncing = (current_price > resistance_1h)
+                    
+                    if did_retest and is_bouncing:
+                        sl = resistance_1h - (atr * 2.0)
+                        return "LONG", sl, current_price, signal_timestamp
 
-        # 🔴 سيناريو البيع (SHORT)
-        # 1. الاتجاه العام هابط
-        if (entry_price < ema_200):
-            # 2. الفلترة الزمنية: الشمعتين 1 و 2 أغلقوا تحت الدعم
-            if (candle_1['close'] < support_level) and (candle_2['close'] < support_level):
-                # 3. الزخم: RSI ليس منهاراً (أكبر من 30)
+        if trend == "BEARISH":
+            if current_price < support_1h:
                 if current_rsi > 30:
-                    # 4. (إعادة الاختبار/القرب): السعر لم يهرب بعيداً
-                    diff_percent = (support_level - entry_price) / support_level * 100
-                    if diff_percent <= 1.5:
-                        sl = entry_price + (atr * 2.0)
-                        return "SHORT", sl, entry_price, signal_timestamp
+                    retest_zone_bottom = support_1h * 0.997
+                    did_retest = (current_high >= retest_zone_bottom)
+                    is_bouncing = (current_price < support_1h)
+                    
+                    if did_retest and is_bouncing:
+                        sl = support_1h + (atr * 2.0)
+                        return "SHORT", sl, current_price, signal_timestamp
 
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة والرسائل
+# 4. المعالجة والرسائل (Clean UI)
 # ==========================================
 sem = asyncio.Semaphore(5)
 
 def get_leverage(symbol):
     base = symbol.split('/')[0]
     if base in ['BTC', 'ETH']: return "Cross 50x"
-    elif base in ['SOL', 'BNB', 'XRP', 'ADA', 'DOGE']: return "Cross 25x"
-    else: return "Cross 20x"
+    elif base in ['SOL', 'BNB', 'XRP', 'ADA', 'DOGE']: return "Cross 20x"
+    else: return "Cross 10x"
 
 async def safe_check(symbol, app_state):
-    if symbol in app_state.active_trades:
-        return
+    if symbol in app_state.active_trades: return
 
     async with sem:
         logic_res = await get_signal_logic(symbol)
@@ -163,35 +153,39 @@ async def safe_check(symbol, app_state):
             key = f"{symbol}_{side}_{ts}"
             
             if key not in app_state.sent_signals:
-                
                 risk = abs(entry - sl)
+                
                 if side == "LONG":
                     tp1 = entry + (risk * 1.5)
                     tp2 = entry + (risk * 3.0)
-                    tp3 = entry + (risk * 5.0)
+                    tp3 = entry + (risk * 6.0)
+                    header = "🟢 <b>LONG</b>"
                 else:
                     tp1 = entry - (risk * 1.5)
                     tp2 = entry - (risk * 3.0)
-                    tp3 = entry - (risk * 5.0)
+                    tp3 = entry - (risk * 6.0)
+                    header = "🔴 <b>SHORT</b>"
                 
                 app_state.sent_signals[key] = time.time()
                 app_state.stats["total"] += 1
                 
                 clean_name = symbol.split(':')[0]
                 leverage = get_leverage(clean_name)
-                emoji_side = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
                 
-                msg = (f"<code>{clean_name}</code>\n"
-                       f"{emoji_side} | {leverage}\n"
-                       f"🔥 <b>Confirmed Sniper</b>\n"
-                       f"<i>(Time Filter + RSI + Zone)</i>\n\n"
-                       f"💰 Entry: <code>{format_price(entry)}</code>\n\n"
-                       f"🎯 TP 1: <code>{format_price(tp1)}</code>\n"
-                       f"🎯 TP 2: <code>{format_price(tp2)}</code>\n"
-                       f"🎯 TP 3: <code>{format_price(tp3)}</code>\n\n"
-                       f"🛑 Stop: <code>{format_price(sl)}</code>")
+                # 🔥 تصميم الرسالة النظيفة (Clean Message)
+                msg = (
+                    f"💎 <b>#{clean_name}</b>\n"
+                    f"{header} | {leverage}\n"
+                    f"──────────────\n"
+                    f"⚡️ <b>Entry:</b> <code>{format_price(entry)}</code>\n\n"
+                    f"🎯 <b>Target 1:</b> <code>{format_price(tp1)}</code>\n"
+                    f"🎯 <b>Target 2:</b> <code>{format_price(tp2)}</code>\n"
+                    f"🚀 <b>Target 3:</b> <code>{format_price(tp3)}</code>\n"
+                    f"──────────────\n"
+                    f"🛑 <b>Stop Loss:</b> <code>{format_price(sl)}</code>"
+                )
                 
-                print(f"\n🔥 SNIPER: {clean_name} {side}")
+                print(f"\n💎 SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 if mid: 
                     app_state.active_trades[symbol] = {
@@ -200,7 +194,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures...")
+    print(f"🚀 Connecting to KuCoin Futures (Royal Mode)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -208,30 +202,26 @@ async def start_scanning(app_state):
         last_refresh_time = 0
         
         while True:
-            if time.time() - last_refresh_time > 900:
-                print(f"🔄 Updating Active Pairs List (Vol >= $5M)...", end='\r')
+            if time.time() - last_refresh_time > 1800:
+                print(f"🔄 Updating Pairs...", end='\r')
                 try:
                     tickers = await exchange.fetch_tickers(all_symbols)
                     new_filtered_symbols = []
                     for symbol, ticker in tickers.items():
                         if ticker['quoteVolume'] is not None and ticker['quoteVolume'] >= MIN_VOLUME_USDT:
                             new_filtered_symbols.append(symbol)
-                    
                     app_state.symbols = new_filtered_symbols
-                    print(f"\n✅ List Updated: {len(new_filtered_symbols)} Active Pairs (Vol >= 5M)")
+                    print(f"\n✅ Updated: {len(new_filtered_symbols)} Pairs.")
                     last_refresh_time = time.time()
-                except Exception as e:
-                    print(f"⚠️ Update Error: {str(e)}")
+                except: pass
             
             if not app_state.symbols:
-                await asyncio.sleep(10)
-                continue
+                await asyncio.sleep(10); continue
 
             tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
             await asyncio.gather(*tasks)
-            
-            print(f"🔄 Scanning {len(app_state.symbols)} pairs...", end='\r')
-            await asyncio.sleep(20)
+            print(f"⏳ Scanning {len(app_state.symbols)} pairs...", end='\r')
+            await asyncio.sleep(60) 
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
@@ -244,18 +234,19 @@ async def monitor_trades(app_state):
             try:
                 t = await exchange.fetch_ticker(sym); p, s = t['last'], trade['side']
                 msg_id = trade["msg_id"]
-                clean_name = sym.split(':')[0]
                 
                 for target, label in [("tp1", "TP 1"), ("tp2", "TP 2"), ("tp3", "TP 3")]:
                     if target not in trade["hit"]:
                         if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            await reply_telegram_msg(f"✅ <b>{clean_name} hit {label}</b>", msg_id)
+                            # رد نظيف ومختصر
+                            icon = "✅" if label == "TP 1" else "💰" if label == "TP 2" else "🚀"
+                            await reply_telegram_msg(f"{icon} <b>Hit {label}</b>", msg_id)
                             trade["hit"].append(target)
                             if target == "tp1": app_state.stats["wins"] += 1
 
                 if (s == "LONG" and p <= trade["sl"]) or (s == "SHORT" and p >= trade["sl"]):
                     app_state.stats["losses"] += 1
-                    await reply_telegram_msg(f"❌ <b>Stop Loss Hit</b>", msg_id)
+                    await reply_telegram_msg(f"🛑 <b>Stop Loss</b>", msg_id)
                     del app_state.active_trades[sym]
                 elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
 
@@ -277,7 +268,7 @@ async def daily_report_task(app_state):
 async def keep_alive_task():
     async with httpx.AsyncClient() as client:
         while True:
-            try: await client.get(RENDER_URL); print(f"💓 [Pulse] {datetime.now().strftime('%H:%M')}")
+            try: await client.get(RENDER_URL); print(f"💓 Pulse")
             except: pass
             await asyncio.sleep(600)
 
