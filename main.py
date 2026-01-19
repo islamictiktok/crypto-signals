@@ -26,11 +26,9 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#050505;color:#00ffcc;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>💎 FVG Sniper Bot</h1>
-            <p>Feature: Order Filled Alerts 🔔</p>
-            <p>Strategy: SMC (Fair Value Gaps)</p>
-            <p>Status: Active</p>
+        <body style='background:#000;color:#0f0;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>Bot Active</h1>
+            <p>Strategy: Impulse + Fib Golden Zone + FVG</p>
         </body>
     </html>
     """
@@ -63,67 +61,84 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. محرك الـ FVG (SMC Logic)
+# 3. المحرك: استراتيجية الصور (Impulse + Fib + FVG)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=50)
+        # نستخدم فريم 4 ساعات لتحديد الهيكل بوضوح (كما في الصور، الهيكل كبير)
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        df.ta.ema(length=50, append=True)
-        if 'EMA_50' not in df.columns: return None
-        ema_50 = df['EMA_50'].iloc[-1]
+        # 1. تحديد الاتجاه العام (فلتر)
+        df.ta.ema(length=200, append=True)
+        if 'EMA_200' not in df.columns: return None
+        ema_200 = df['EMA_200'].iloc[-1]
+        current_price = df['close'].iloc[-1]
+        atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
+
+        # 2. تحديد الموجة الدافعة (Impulse Leg)
+        # نبحث عن أعلى قمة وأدنى قاع في آخر 40 شمعة
+        recent_window = df.iloc[-40:]
+        swing_high = recent_window['high'].max()
+        swing_low = recent_window['low'].min()
         
-        for i in range(len(df)-2, len(df)-10, -1):
-            c1_high = df['high'].iloc[i-2]
-            c1_low = df['low'].iloc[i-2]
-            c3_high = df['high'].iloc[i]
-            c3_low = df['low'].iloc[i]
-            curr_price = df['close'].iloc[-1]
-            atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
+        # التأكد أن الموجة كبيرة بما يكفي
+        range_size = swing_high - swing_low
+        if range_size < (atr * 4): return None
 
-            # 🔥 LONG FVG
-            if (c3_low > c1_high) and (curr_price > c3_low):
-                if (c3_low - c1_high) > (atr * 0.2):
-                    if curr_price > ema_50:
-                        entry = c1_high
-                        sl = c1_low
-                        risk = entry - sl
-                        tp1 = entry + (risk * 2.0)
-                        tp2 = entry + (risk * 4.0)
-                        tp3 = entry + (risk * 6.0)
-                        
-                        is_filled = False
-                        for k in range(i+1, len(df)):
-                            if df['low'].iloc[k] <= entry: is_filled = True; break
-                        if not is_filled:
-                            return "LONG", entry, tp1, tp2, tp3, sl, int(df['time'].iloc[i])
+        # 🔥 سيناريو الشراء (LONG) - مطابق للصور
+        if current_price > ema_200:
+            # 3. حساب مستويات فيبوناتشي
+            fib_0618 = swing_high - (0.618 * range_size) # مستوى الدخول المثالي
+            fib_0786 = swing_high - (0.786 * range_size) # الحد الأقصى للمنطقة الذهبية
+            
+            # 4. البحث عن FVG *داخل* المنطقة الذهبية
+            # (يجب أن يكون الـ FVG قد تكون أثناء صعود الموجة)
+            valid_setup = False
+            
+            # نمسح الشموع داخل النافذة
+            for i in range(len(df)-35, len(df)-2):
+                # شمعة 1 (High) وشمعة 3 (Low)
+                c1_high = df['high'].iloc[i-1]
+                c3_low = df['low'].iloc[i+1]
+                
+                # شرط الفجوة الشرائية: قاع الشمعة 3 أعلى من قمة الشمعة 1
+                if c3_low > c1_high:
+                    fvg_top = c1_high # بداية الفجوة من الأسفل (نقطة الدعم)
+                    
+                    # 5. التوافق (Confluence): هل الـ FVG يقع في منطقة 0.618 - 0.786؟
+                    # نسمح بهامش بسيط
+                    if (fvg_top <= fib_0618 * 1.005) and (fvg_top >= fib_0786):
+                        valid_setup = True
+                        break
+            
+            # 6. القرار
+            # إذا وجدنا الهيكل والـ FVG، والسعر الحالي أعلى من 0.786 (لم يكسر الهيكل)
+            if valid_setup and (current_price > fib_0786):
+                # الدخول: نضع الأمر المعلق عند مستوى 0.618 بالضبط (أقوى نقطة)
+                entry = fib_0618
+                
+                # الستوب: تحت القاع الأصلي (Swing Low / Fib 1.0)
+                sl = swing_low - (atr * 0.2)
+                
+                # الأهداف (Extensions)
+                tp1 = swing_high # القمة السابقة (Fib 0)
+                tp2 = swing_high + (0.27 * range_size) # امتداد -0.27
+                tp3 = swing_high + (0.618 * range_size) # امتداد -0.618
+                
+                return "LONG", entry, tp1, tp2, tp3, sl, int(df['time'].iloc[-1])
 
-            # 🔥 SHORT FVG
-            if (c3_high < c1_low) and (curr_price < c3_high):
-                if (c1_low - c3_high) > (atr * 0.2):
-                    if curr_price < ema_50:
-                        entry = c1_low
-                        sl = c1_high
-                        risk = sl - entry
-                        tp1 = entry - (risk * 2.0)
-                        tp2 = entry - (risk * 4.0)
-                        tp3 = entry - (risk * 6.0)
-                        
-                        is_filled = False
-                        for k in range(i+1, len(df)):
-                            if df['high'].iloc[k] >= entry: is_filled = True; break
-                        if not is_filled:
-                            return "SHORT", entry, tp1, tp2, tp3, sl, int(df['time'].iloc[i])
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة والمراقبة الذكية
+# 4. المعالجة والرسائل (Minimalist UI)
 # ==========================================
 sem = asyncio.Semaphore(5)
 
 def get_leverage(symbol):
+    base = symbol.split('/')[0]
+    if base in ['BTC', 'ETH']: return "Cross 50x"
     return "Cross 20x"
 
 async def safe_check(symbol, app_state):
@@ -143,29 +158,31 @@ async def safe_check(symbol, app_state):
                 clean_name = symbol.split(':')[0]
                 leverage = get_leverage(clean_name)
                 
-                if side == "LONG": header = "💎 <b>FVG LONG</b> 🟢"
-                else: header = "💎 <b>FVG SHORT</b> 🔴"
+                if side == "LONG":
+                    side_emoji = "🟢 <b>LONG</b>"
+                else:
+                    side_emoji = "🔴 <b>SHORT</b>"
                 
+                # 🔥 تصميم الرسالة النظيف جداً (بدون مصطلحات) 🔥
                 msg = (
                     f"💎 <code>{clean_name}</code>\n"
-                    f"{header} | {leverage}\n"
+                    f"{side_emoji} | {leverage}\n"
                     f"──────────────\n"
-                    f"⚡ <b>Limit Entry:</b> <code>{format_price(entry)}</code>\n"
+                    f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
                     f"──────────────\n"
                     f"🎯 <b>TP 1:</b> <code>{format_price(tp1)}</code>\n"
                     f"🎯 <b>TP 2:</b> <code>{format_price(tp2)}</code>\n"
                     f"🚀 <b>TP 3:</b> <code>{format_price(tp3)}</code>\n"
                     f"──────────────\n"
-                    f"🛡️ <b>Stop Loss:</b> <code>{format_price(sl)}</code>"
+                    f"🛡️ <b>Stop:</b> <code>{format_price(sl)}</code>"
                 )
                 
                 print(f"\n💎 SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 
                 if mid: 
-                    # حفظ الصفقة بحالة PENDING
                     app_state.active_trades[symbol] = {
-                        "status": "PENDING", # الحالة الأولية
+                        "status": "PENDING",
                         "side": side, "entry": entry,
                         "tp1": tp1, "tp2": tp2, "tp3": tp3, 
                         "sl": sl, "msg_id": mid, "hit": [],
@@ -173,7 +190,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (SMC Monitor)...")
+    print(f"🚀 Connecting to KuCoin Futures (Image Strategy Mode)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -181,7 +198,7 @@ async def start_scanning(app_state):
         last_refresh_time = 0
         
         while True:
-            if time.time() - last_refresh_time > 1800:
+            if time.time() - last_refresh_time > 3600:
                 print(f"🔄 Updating Pairs...", end='\r')
                 try:
                     tickers = await exchange.fetch_tickers(all_symbols)
@@ -218,22 +235,18 @@ async def monitor_trades(app_state):
                 msg_id = trade["msg_id"]
                 side = trade['side']
 
-                # 1. حالة الانتظار (PENDING)
                 if trade['status'] == "PENDING":
-                    # هل السعر وصل للدخول؟
                     activated = False
                     if side == "LONG" and p <= trade['entry']: activated = True
                     elif side == "SHORT" and p >= trade['entry']: activated = True
                     
                     if activated:
-                        await reply_telegram_msg(f"🔔 <b>Order Filled / Activated!</b>", msg_id)
-                        trade['status'] = "ACTIVE" # تحويل لصفقة نشطة
+                        await reply_telegram_msg(f"🔔 <b>Filled</b>", msg_id)
+                        trade['status'] = "ACTIVE"
                     
-                    # حذف الصفقة إذا مرت 48 ساعة ولم تتفعل
                     if time.time() - trade['start_time'] > 172800:
                         del app_state.active_trades[sym]
 
-                # 2. حالة النشاط (ACTIVE)
                 elif trade['status'] == "ACTIVE":
                     for target, label in [("tp1", "TP 1"), ("tp2", "TP 2"), ("tp3", "TP 3")]:
                         if target not in trade["hit"]:
@@ -245,7 +258,7 @@ async def monitor_trades(app_state):
 
                     if (side == "LONG" and p <= trade["sl"]) or (side == "SHORT" and p >= trade["sl"]):
                         app_state.stats["losses"] = app_state.stats.get("losses", 0) + 1
-                        await reply_telegram_msg(f"🛑 <b>Stop Loss Hit</b>", msg_id)
+                        await reply_telegram_msg(f"🛑 <b>Stop Loss</b>", msg_id)
                         del app_state.active_trades[sym]
                     elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
 
@@ -259,7 +272,7 @@ async def daily_report_task(app_state):
             s = app_state.stats
             wins = s.get("wins", 0); losses = s.get("losses", 0); total = wins + losses
             wr = (wins / total * 100) if total > 0 else 0
-            report_msg = (f"📊 <b>Daily Report</b>\n──────────────\n✅ <b>Wins:</b> {wins}\n❌ <b>Losses:</b> {losses}\n📈 <b>Win Rate:</b> {wr:.1f}%\n──────────────\n💎 <i>FVG Sniper</i>")
+            report_msg = (f"📊 <b>Daily Report</b>\n──────────────\n✅ <b>Wins:</b> {wins}\n❌ <b>Losses:</b> {losses}\n📈 <b>Win Rate:</b> {wr:.1f}%\n──────────────")
             await send_telegram_msg(report_msg)
             app_state.stats = {"total": 0, "wins": 0, "losses": 0}
             await asyncio.sleep(70)
