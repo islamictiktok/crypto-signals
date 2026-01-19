@@ -28,7 +28,7 @@ async def root():
     <html>
         <body style='background:#050505;color:#00ffcc;text-align:center;padding-top:50px;font-family:monospace;'>
             <h1>💎 FVG Sniper Bot</h1>
-            <p>UI: Ultra Clean</p>
+            <p>Feature: Order Filled Alerts 🔔</p>
             <p>Strategy: SMC (Fair Value Gaps)</p>
             <p>Status: Active</p>
         </body>
@@ -67,7 +67,6 @@ def format_price(price):
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # الفريم: ساعة (1H)
         bars = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=50)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
@@ -75,27 +74,20 @@ async def get_signal_logic(symbol):
         if 'EMA_50' not in df.columns: return None
         ema_50 = df['EMA_50'].iloc[-1]
         
-        # البحث عن FVG
         for i in range(len(df)-2, len(df)-10, -1):
-            
-            candle_1_high = df['high'].iloc[i-2]
-            candle_1_low = df['low'].iloc[i-2]
-            
-            candle_3_high = df['high'].iloc[i]
-            candle_3_low = df['low'].iloc[i]
-            
-            current_price = df['close'].iloc[-1]
+            c1_high = df['high'].iloc[i-2]
+            c1_low = df['low'].iloc[i-2]
+            c3_high = df['high'].iloc[i]
+            c3_low = df['low'].iloc[i]
+            curr_price = df['close'].iloc[-1]
             atr = ta.atr(df['high'], df['low'], df['close'], length=14).iloc[-1]
 
-            # 🔥 Bullish FVG (LONG)
-            if (candle_3_low > candle_1_high) and (current_price > candle_3_low):
-                gap_size = candle_3_low - candle_1_high
-                
-                if gap_size > (atr * 0.2):
-                    if current_price > ema_50:
-                        entry = candle_1_high
-                        sl = candle_1_low
-                        
+            # 🔥 LONG FVG
+            if (c3_low > c1_high) and (curr_price > c3_low):
+                if (c3_low - c1_high) > (atr * 0.2):
+                    if curr_price > ema_50:
+                        entry = c1_high
+                        sl = c1_low
                         risk = entry - sl
                         tp1 = entry + (risk * 2.0)
                         tp2 = entry + (risk * 4.0)
@@ -103,21 +95,16 @@ async def get_signal_logic(symbol):
                         
                         is_filled = False
                         for k in range(i+1, len(df)):
-                            if df['low'].iloc[k] <= entry:
-                                is_filled = True; break
-                        
+                            if df['low'].iloc[k] <= entry: is_filled = True; break
                         if not is_filled:
                             return "LONG", entry, tp1, tp2, tp3, sl, int(df['time'].iloc[i])
 
-            # 🔥 Bearish FVG (SHORT)
-            if (candle_3_high < candle_1_low) and (current_price < candle_3_high):
-                gap_size = candle_1_low - candle_3_high
-                
-                if gap_size > (atr * 0.2):
-                    if current_price < ema_50:
-                        entry = candle_1_low
-                        sl = candle_1_high
-                        
+            # 🔥 SHORT FVG
+            if (c3_high < c1_low) and (curr_price < c3_high):
+                if (c1_low - c3_high) > (atr * 0.2):
+                    if curr_price < ema_50:
+                        entry = c1_low
+                        sl = c1_high
                         risk = sl - entry
                         tp1 = entry - (risk * 2.0)
                         tp2 = entry - (risk * 4.0)
@@ -125,17 +112,14 @@ async def get_signal_logic(symbol):
                         
                         is_filled = False
                         for k in range(i+1, len(df)):
-                            if df['high'].iloc[k] >= entry:
-                                is_filled = True; break
-                        
+                            if df['high'].iloc[k] >= entry: is_filled = True; break
                         if not is_filled:
                             return "SHORT", entry, tp1, tp2, tp3, sl, int(df['time'].iloc[i])
-
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة والرسائل (Clean UI)
+# 4. المعالجة والمراقبة الذكية
 # ==========================================
 sem = asyncio.Semaphore(5)
 
@@ -159,17 +143,14 @@ async def safe_check(symbol, app_state):
                 clean_name = symbol.split(':')[0]
                 leverage = get_leverage(clean_name)
                 
-                if side == "LONG":
-                    header = "💎 <b>FVG LONG</b> 🟢"
-                else:
-                    header = "💎 <b>FVG SHORT</b> 🔴"
+                if side == "LONG": header = "💎 <b>FVG LONG</b> 🟢"
+                else: header = "💎 <b>FVG SHORT</b> 🔴"
                 
-                # 🔥 تصميم الرسالة النهائي (Minimalist) 🔥
                 msg = (
                     f"💎 <code>{clean_name}</code>\n"
                     f"{header} | {leverage}\n"
                     f"──────────────\n"
-                    f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
+                    f"⚡ <b>Limit Entry:</b> <code>{format_price(entry)}</code>\n"
                     f"──────────────\n"
                     f"🎯 <b>TP 1:</b> <code>{format_price(tp1)}</code>\n"
                     f"🎯 <b>TP 2:</b> <code>{format_price(tp2)}</code>\n"
@@ -178,17 +159,21 @@ async def safe_check(symbol, app_state):
                     f"🛡️ <b>Stop Loss:</b> <code>{format_price(sl)}</code>"
                 )
                 
-                print(f"\n💎 FVG SIGNAL: {clean_name} {side}")
+                print(f"\n💎 SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 
                 if mid: 
+                    # حفظ الصفقة بحالة PENDING
                     app_state.active_trades[symbol] = {
-                        "side": side, "tp1": tp1, "tp2": tp2, "tp3": tp3, 
-                        "sl": sl, "msg_id": mid, "hit": []
+                        "status": "PENDING", # الحالة الأولية
+                        "side": side, "entry": entry,
+                        "tp1": tp1, "tp2": tp2, "tp3": tp3, 
+                        "sl": sl, "msg_id": mid, "hit": [],
+                        "start_time": time.time()
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (SMC Mode)...")
+    print(f"🚀 Connecting to KuCoin Futures (SMC Monitor)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -221,27 +206,48 @@ async def start_scanning(app_state):
         print(f"❌ Error: {str(e)}")
         await asyncio.sleep(10)
 
+# ==========================================
+# 🔥 المراقبة: تفعيل ثم متابعة
+# ==========================================
 async def monitor_trades(app_state):
     while True:
         for sym in list(app_state.active_trades.keys()):
             trade = app_state.active_trades[sym]
             try:
-                t = await exchange.fetch_ticker(sym); p, s = t['last'], trade['side']
+                t = await exchange.fetch_ticker(sym); p = t['last']
                 msg_id = trade["msg_id"]
-                
-                for target, label in [("tp1", "TP 1"), ("tp2", "TP 2"), ("tp3", "TP 3")]:
-                    if target not in trade["hit"]:
-                        if (s == "LONG" and p >= trade[target]) or (s == "SHORT" and p <= trade[target]):
-                            icon = "✅" if label == "TP 1" else "💰" if label == "TP 2" else "🚀"
-                            await reply_telegram_msg(f"{icon} <b>Hit {label}</b>", msg_id)
-                            trade["hit"].append(target)
-                            if target == "tp1": app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
+                side = trade['side']
 
-                if (s == "LONG" and p <= trade["sl"]) or (s == "SHORT" and p >= trade["sl"]):
-                    app_state.stats["losses"] = app_state.stats.get("losses", 0) + 1
-                    await reply_telegram_msg(f"🛑 <b>Stop Loss Hit</b>", msg_id)
-                    del app_state.active_trades[sym]
-                elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
+                # 1. حالة الانتظار (PENDING)
+                if trade['status'] == "PENDING":
+                    # هل السعر وصل للدخول؟
+                    activated = False
+                    if side == "LONG" and p <= trade['entry']: activated = True
+                    elif side == "SHORT" and p >= trade['entry']: activated = True
+                    
+                    if activated:
+                        await reply_telegram_msg(f"🔔 <b>Order Filled / Activated!</b>", msg_id)
+                        trade['status'] = "ACTIVE" # تحويل لصفقة نشطة
+                    
+                    # حذف الصفقة إذا مرت 48 ساعة ولم تتفعل
+                    if time.time() - trade['start_time'] > 172800:
+                        del app_state.active_trades[sym]
+
+                # 2. حالة النشاط (ACTIVE)
+                elif trade['status'] == "ACTIVE":
+                    for target, label in [("tp1", "TP 1"), ("tp2", "TP 2"), ("tp3", "TP 3")]:
+                        if target not in trade["hit"]:
+                            if (side == "LONG" and p >= trade[target]) or (side == "SHORT" and p <= trade[target]):
+                                icon = "✅" if label == "TP 1" else "💰" if label == "TP 2" else "🚀"
+                                await reply_telegram_msg(f"{icon} <b>Hit {label}</b>", msg_id)
+                                trade["hit"].append(target)
+                                if target == "tp1": app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
+
+                    if (side == "LONG" and p <= trade["sl"]) or (side == "SHORT" and p >= trade["sl"]):
+                        app_state.stats["losses"] = app_state.stats.get("losses", 0) + 1
+                        await reply_telegram_msg(f"🛑 <b>Stop Loss Hit</b>", msg_id)
+                        del app_state.active_trades[sym]
+                    elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
 
             except: pass
         await asyncio.sleep(2)
@@ -251,20 +257,9 @@ async def daily_report_task(app_state):
         now = datetime.now()
         if now.hour == 23 and now.minute == 59:
             s = app_state.stats
-            wins = s.get("wins", 0)
-            losses = s.get("losses", 0)
-            total = wins + losses
+            wins = s.get("wins", 0); losses = s.get("losses", 0); total = wins + losses
             wr = (wins / total * 100) if total > 0 else 0
-            
-            report_msg = (
-                f"📊 <b>Daily SMC Report</b>\n"
-                f"──────────────\n"
-                f"✅ <b>Wins:</b> {wins}\n"
-                f"❌ <b>Losses:</b> {losses}\n"
-                f"📈 <b>Win Rate:</b> {wr:.1f}%\n"
-                f"──────────────\n"
-                f"💎 <i>The FVG Sniper</i>"
-            )
+            report_msg = (f"📊 <b>Daily Report</b>\n──────────────\n✅ <b>Wins:</b> {wins}\n❌ <b>Losses:</b> {losses}\n📈 <b>Win Rate:</b> {wr:.1f}%\n──────────────\n💎 <i>FVG Sniper</i>")
             await send_telegram_msg(report_msg)
             app_state.stats = {"total": 0, "wins": 0, "losses": 0}
             await asyncio.sleep(70)
@@ -281,10 +276,8 @@ async def keep_alive_task():
 async def lifespan(app: FastAPI):
     await exchange.load_markets()
     app.state.sent_signals = {}; app.state.active_trades = {}; app.state.stats = {"total": 0, "wins": 0, "losses": 0}
-    t1 = asyncio.create_task(start_scanning(app.state))
-    t2 = asyncio.create_task(monitor_trades(app.state))
-    t3 = asyncio.create_task(daily_report_task(app.state))
-    t4 = asyncio.create_task(keep_alive_task())
+    t1 = asyncio.create_task(start_scanning(app.state)); t2 = asyncio.create_task(monitor_trades(app.state))
+    t3 = asyncio.create_task(daily_report_task(app.state)); t4 = asyncio.create_task(keep_alive_task())
     yield
     await exchange.close(); t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel()
 
