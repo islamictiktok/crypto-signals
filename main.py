@@ -26,9 +26,9 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#000;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>⚡ 3-Target Master</h1>
-            <p>Strategy: Triple EMA + Split Targets</p>
+        <body style='background:#222;color:#ffeb3b;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>📉 LinReg Bounce Bot</h1>
+            <p>UI: Clean (No Labels)</p>
         </body>
     </html>
     """
@@ -61,7 +61,7 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. المحرك: Triple EMA + 3 Targets
+# 3. المحرك: Linear Regression Bounce
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -69,66 +69,60 @@ async def get_signal_logic(symbol):
         bars = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # المتوسطات
-        ema_5 = df.ta.ema(length=5)
-        ema_13 = df.ta.ema(length=13)
-        ema_50 = df.ta.ema(length=50)
+        # Linear Regression Channel (Length 50, Width 2.0)
+        length = 50
+        df['linreg'] = df.ta.linreg(close=df['close'], length=length)
+        df['stdev'] = df.ta.stdev(close=df['close'], length=length)
         
-        # مؤشرات مساعدة
-        adx = df.ta.adx(length=14)
-        df.ta.atr(length=14, append=True)
-        
-        df = pd.concat([df, ema_5, ema_13, ema_50, adx], axis=1)
-        
-        if 'EMA_5' not in df.columns or 'EMA_13' not in df.columns or 'EMA_50' not in df.columns: return None
+        channel_width = 2.0
         
         curr = df.iloc[-1]
-        prev = df.iloc[-2]
+        mid_line = curr['linreg']
+        upper_line = mid_line + (curr['stdev'] * channel_width)
+        lower_line = mid_line - (curr['stdev'] * channel_width)
         
-        e5_curr = curr['EMA_5']
-        e13_curr = curr['EMA_13']
-        e5_prev = prev['EMA_5']
-        e13_prev = prev['EMA_13']
+        close_price = curr['close']
+        low_price = curr['low']
+        high_price = curr['high']
         
-        price = curr['close']
-        trend_filter = curr['EMA_50']
-        adx_val = curr['ADX_14']
-        atr_val = curr['ATRr_14']
+        # RSI Filter
+        rsi = ta.rsi(df['close'], length=14).iloc[-1]
 
-        # فلتر السيولة
-        if adx_val < 20: return None
+        # 🔥 LONG (Buy Bottom)
+        if (low_price <= lower_line) and (rsi < 40):
+            entry = close_price
+            
+            # Stop Loss (Outside Channel Buffer)
+            buffer = (upper_line - lower_line) * 0.15
+            sl = lower_line - buffer
+            
+            # Targets
+            tp1 = mid_line
+            tp2 = upper_line
+            
+            if tp1 <= entry: return None
 
-        # 🔥 LONG
-        if (price > trend_filter) and (e5_prev < e13_prev) and (e5_curr > e13_curr):
-            entry = price
-            sl = entry - (atr_val * 2.0) # ستوب 2 ATR
-            risk = entry - sl
-            
-            # حساب الأهداف
-            tp1 = entry + (risk * 1.5)
-            tp2 = entry + (risk * 2.5)
-            tp3 = entry + (risk * 4.0)
-            
-            return "LONG", entry, tp1, tp2, tp3, sl, int(curr['time'])
+            return "LONG", entry, tp1, tp2, sl, int(curr['time'])
 
-        # 🔥 SHORT
-        if (price < trend_filter) and (e5_prev > e13_prev) and (e5_curr < e13_curr):
-            entry = price
-            sl = entry + (atr_val * 2.0)
-            risk = sl - entry
+        # 🔥 SHORT (Sell Top)
+        if (high_price >= upper_line) and (rsi > 60):
+            entry = close_price
             
-            # حساب الأهداف
-            tp1 = entry - (risk * 1.5)
-            tp2 = entry - (risk * 2.5)
-            tp3 = entry - (risk * 4.0)
+            buffer = (upper_line - lower_line) * 0.15
+            sl = upper_line + buffer
             
-            return "SHORT", entry, tp1, tp2, tp3, sl, int(curr['time'])
+            tp1 = mid_line
+            tp2 = lower_line
+            
+            if tp1 >= entry: return None
+
+            return "SHORT", entry, tp1, tp2, sl, int(curr['time'])
 
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة والرسائل
+# 4. المعالجة والرسائل (Clean UI)
 # ==========================================
 sem = asyncio.Semaphore(5)
 
@@ -144,7 +138,7 @@ async def safe_check(symbol, app_state):
         logic_res = await get_signal_logic(symbol)
         
         if logic_res:
-            side, entry, tp1, tp2, tp3, sl, ts = logic_res
+            side, entry, tp1, tp2, sl, ts = logic_res
             key = f"{symbol}_{side}_{ts}"
             
             if key not in app_state.sent_signals:
@@ -159,34 +153,34 @@ async def safe_check(symbol, app_state):
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
-                # 🔥 تم تعديل الرسالة: إزالة (1.5R) وغيرها
+                # 🔥 تم تعديل الرسالة: أرقام فقط بدون نصوص
                 msg = (
-                    f"⚡ <code>{clean_name}</code>\n"
+                    f"📉 <code>{clean_name}</code>\n"
                     f"{side_emoji} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
                     f"──────────────\n"
                     f"🎯 <b>TP 1:</b> <code>{format_price(tp1)}</code>\n"
-                    f"💰 <b>TP 2:</b> <code>{format_price(tp2)}</code>\n"
-                    f"🚀 <b>TP 3:</b> <code>{format_price(tp3)}</code>\n"
+                    f"🚀 <b>TP 2:</b> <code>{format_price(tp2)}</code>\n"
                     f"──────────────\n"
-                    f"🛡️ <b>Stop ({sl_pct:.2f}%):</b> <code>{format_price(sl)}</code>"
+                    f"🛑 <b>Stop Loss:</b> <code>{format_price(sl)}</code>\n"
+                    f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n⚡ 3-TARGET SIGNAL: {clean_name} {side}")
+                print(f"\n📉 LINREG SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 
                 if mid: 
                     app_state.active_trades[symbol] = {
                         "status": "ACTIVE",
                         "side": side, "entry": entry,
-                        "tp1": tp1, "tp2": tp2, "tp3": tp3, 
+                        "tp1": tp1, "tp2": tp2, 
                         "sl": sl, "msg_id": mid, "hit": [],
                         "breakeven_triggered": False
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (Clean 3-Target)...")
+    print(f"🚀 Connecting to KuCoin Futures (Clean LinReg)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -228,10 +222,10 @@ async def monitor_trades(app_state):
                 msg_id = trade["msg_id"]
                 side = trade['side']
 
-                for target, label in [("tp1", "TP 1"), ("tp2", "TP 2"), ("tp3", "TP 3")]:
+                for target, label in [("tp1", "TP 1"), ("tp2", "TP 2")]:
                     if target not in trade["hit"]:
                         if (side == "LONG" and p >= trade[target]) or (side == "SHORT" and p <= trade[target]):
-                            icon = "✅" if label == "TP 1" else "💰" if label == "TP 2" else "🚀"
+                            icon = "✅" if label == "TP 1" else "🚀"
                             extra_msg = ""
                             if label == "TP 1" and not trade["breakeven_triggered"]:
                                 extra_msg = "\n🛡️ <b>Move SL to Entry!</b>"
@@ -245,7 +239,7 @@ async def monitor_trades(app_state):
                     app_state.stats["losses"] = app_state.stats.get("losses", 0) + 1
                     await reply_telegram_msg(f"🛑 <b>Stop Loss</b>", msg_id)
                     del app_state.active_trades[sym]
-                elif "tp3" in trade["hit"]: del app_state.active_trades[sym]
+                elif "tp2" in trade["hit"]: del app_state.active_trades[sym]
 
             except: pass
         await asyncio.sleep(2)
