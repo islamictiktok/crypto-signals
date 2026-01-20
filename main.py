@@ -27,10 +27,9 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#000;color:#00ffff;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🧱 Double Wall Scalper</h1>
-            <p>Strategy: LinReg (2.0) + Bollinger Bands (2.0)</p>
-            <p>Mode: Confluence Bounce (5m)</p>
+        <body style='background:#ff0000;color:#ffffff;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>⚡ RSI-2 Connors Scalper</h1>
+            <p>Mode: Aggressive High-Frequency</p>
         </body>
     </html>
     """
@@ -63,91 +62,64 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. المحرك: Double Wall Logic
+# 3. المحرك: Larry Connors RSI-2 Logic
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # فريم 5 دقائق
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
+        # فريم 5 دقائق (سكالبينج سريع)
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=200)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. LinReg Channel (رجعنا العرض لـ 2.0 الطبيعي)
-        length = 50
-        df['linreg'] = df.ta.linreg(close=df['close'], length=length)
-        df['stdev'] = df.ta.stdev(close=df['close'], length=length)
+        # 1. EMA 100 (لتحديد التريند العام)
+        df['ema100'] = df.ta.ema(close=df['close'], length=100)
         
-        linreg_width = 2.0
+        # 2. RSI (Length 2) - السر كله هنا
+        df['rsi2'] = df.ta.rsi(close=df['close'], length=2)
         
-        # 2. Bollinger Bands (التقنية الإضافية)
-        # الطول 20، العرض 2.0
-        bb = df.ta.bbands(length=20, std=2.0)
-        df = pd.concat([df, bb], axis=1)
-        
-        # تحديد أعمدة البولنجر
-        # عادة تكون: BBL_20_2.0, BBU_20_2.0
-        bb_lower_col = [c for c in df.columns if c.startswith('BBL')][0]
-        bb_upper_col = [c for c in df.columns if c.startswith('BBU')][0]
+        # 3. ATR لحساب الأهداف والستوب
+        df.ta.atr(length=14, append=True)
         
         curr = df.iloc[-1]
-        
-        # حساب خطوط LinReg
-        lr_mid = curr['linreg']
-        lr_upper = lr_mid + (curr['stdev'] * linreg_width)
-        lr_lower = lr_mid - (curr['stdev'] * linreg_width)
-        
-        # قيم البولنجر
-        bb_lower = curr[bb_lower_col]
-        bb_upper = curr[bb_upper_col]
-        
         close_price = curr['close']
-        low_price = curr['low']
-        high_price = curr['high']
+        ema100 = curr['ema100']
+        rsi2 = curr['rsi2']
+        atr = curr['ATRr_14']
         
-        # RSI للتأكيد النهائي
-        rsi = ta.rsi(df['close'], length=14).iloc[-1]
+        if pd.isna(ema100): return None
 
-        # 🔥 LONG (اختراق الجدارين للأسفل)
-        # 1. السعر عند أو تحت قاع LinReg
-        # 2. السعر عند أو تحت قاع Bollinger
-        # 3. RSI < 40 (ليس بالضرورة 30 لأن الجدارين كافيان)
-        if (low_price <= lr_lower) and (low_price <= bb_lower) and (rsi < 40):
+        # 🔥 LONG (شراء الخطفة)
+        # الشرط: السعر فوق EMA 100 (تريند صاعد) + RSI(2) انهار تحت 10
+        if (close_price > ema100) and (rsi2 < 10):
             entry = close_price
             
-            # Stop: أسفل القناة بقليل
-            buffer = (lr_upper - lr_lower) * 0.15
-            sl = lr_lower - buffer
+            # Stop Loss (واسع قليلاً لتحمل الذبذبة السريعة)
+            sl = entry - (atr * 2.5)
             
-            # Targets (حسب هندسة LinReg)
-            dist_to_top = lr_upper - lr_mid
-            tp1 = lr_mid
-            tp2 = lr_mid + (dist_to_top * 0.90) 
+            # Targets (أهداف سريعة)
+            tp1 = entry + (atr * 1.5)
+            tp2 = entry + (atr * 3.0)
             
-            if tp1 <= entry: return None
-
             return "LONG", entry, tp1, tp2, sl, int(curr['time'])
 
-        # 🔥 SHORT (اختراق الجدارين للأعلى)
-        # 1. السعر عند أو فوق قمة LinReg
-        # 2. السعر عند أو فوق قمة Bollinger
-        if (high_price >= lr_upper) and (high_price >= bb_upper) and (rsi > 60):
+        # 🔥 SHORT (بيع الخطفة)
+        # الشرط: السعر تحت EMA 100 (تريند هابط) + RSI(2) طار فوق 90
+        if (close_price < ema100) and (rsi2 > 90):
             entry = close_price
             
-            buffer = (lr_upper - lr_lower) * 0.15
-            sl = lr_upper + buffer
+            # Stop Loss
+            sl = entry + (atr * 2.5)
             
-            dist_to_bottom = lr_mid - lr_lower
-            tp1 = lr_mid
-            tp2 = lr_mid - (dist_to_bottom * 0.90)
+            # Targets
+            tp1 = entry - (atr * 1.5)
+            tp2 = entry - (atr * 3.0)
             
-            if tp1 >= entry: return None
-
             return "SHORT", entry, tp1, tp2, sl, int(curr['time'])
 
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة والرسائل
+# 4. المعالجة
 # ==========================================
 sem = asyncio.Semaphore(5)
 
@@ -157,6 +129,7 @@ def get_leverage(symbol):
     return "Cross 20x"
 
 async def safe_check(symbol, app_state):
+    # منع التكرار: طالما الصفقة مفتوحة لا نفتح جديدة
     if symbol in app_state.active_trades: return
 
     async with sem:
@@ -179,19 +152,19 @@ async def safe_check(symbol, app_state):
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"🧱 <code>{clean_name}</code>\n"
+                    f"⚡ <code>{clean_name}</code>\n"
                     f"{side_emoji} | {leverage}\n"
                     f"──────────────\n"
-                    f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
+                    f"🎯 <b>Entry:</b> <code>{format_price(entry)}</code>\n"
                     f"──────────────\n"
-                    f"🎯 <b>TP 1:</b> <code>{format_price(tp1)}</code>\n"
+                    f"💰 <b>TP 1:</b> <code>{format_price(tp1)}</code>\n"
                     f"🚀 <b>TP 2:</b> <code>{format_price(tp2)}</code>\n"
                     f"──────────────\n"
                     f"🛑 <b>Stop Loss:</b> <code>{format_price(sl)}</code>\n"
                     f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n🧱 DOUBLE WALL: {clean_name} {side}")
+                print(f"\n⚡ RSI-2 SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 
                 if mid: 
@@ -204,7 +177,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (Double Wall)...")
+    print(f"🚀 Connecting to KuCoin Futures (RSI-2 Scalper)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -238,7 +211,7 @@ async def start_scanning(app_state):
         await asyncio.sleep(10)
 
 # ==========================================
-# 5. المراقبة والتقرير (Wins / Losses / Breakeven)
+# 5. المراقبة والتقرير
 # ==========================================
 async def monitor_trades(app_state):
     while True:
@@ -297,7 +270,7 @@ async def daily_report_task(app_state):
             wr = (wins / effective_trades * 100) if effective_trades > 0 else 0
             
             report_msg = (
-                f"📊 <b>Daily Report (Double Wall)</b>\n"
+                f"📊 <b>Daily Report (RSI-2)</b>\n"
                 f"──────────────\n"
                 f"✅ <b>Wins:</b> {wins}\n"
                 f"🛡️ <b>Breakeven:</b> {breakeven}\n"
