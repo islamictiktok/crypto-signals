@@ -27,10 +27,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#002b36;color:#859900;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Safe 5m Scalper</h1>
-            <p>Strategy: Wide LinReg (2.5 StdDev)</p>
-            <p>Filter: RSI 30/70</p>
+        <body style='background:#000;color:#00ffff;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🧱 Double Wall Scalper</h1>
+            <p>Strategy: LinReg (2.0) + Bollinger Bands (2.0)</p>
+            <p>Mode: Confluence Bounce (5m)</p>
         </body>
     </html>
     """
@@ -63,7 +63,7 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. المحرك: Safe Logic (2.5 StdDev)
+# 3. المحرك: Double Wall Logic
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -71,58 +71,73 @@ async def get_signal_logic(symbol):
         bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # Linear Regression
+        # 1. LinReg Channel (رجعنا العرض لـ 2.0 الطبيعي)
         length = 50
         df['linreg'] = df.ta.linreg(close=df['close'], length=length)
         df['stdev'] = df.ta.stdev(close=df['close'], length=length)
         
-        # 🔥 التغيير الجوهري: توسيع القناة لتقليل المخاطر
-        channel_width = 2.5  # كانت 2.0 سابقاً
+        linreg_width = 2.0
+        
+        # 2. Bollinger Bands (التقنية الإضافية)
+        # الطول 20، العرض 2.0
+        bb = df.ta.bbands(length=20, std=2.0)
+        df = pd.concat([df, bb], axis=1)
+        
+        # تحديد أعمدة البولنجر
+        # عادة تكون: BBL_20_2.0, BBU_20_2.0
+        bb_lower_col = [c for c in df.columns if c.startswith('BBL')][0]
+        bb_upper_col = [c for c in df.columns if c.startswith('BBU')][0]
         
         curr = df.iloc[-1]
-        mid_line = curr['linreg']
-        stdev = curr['stdev']
         
-        upper_line = mid_line + (stdev * channel_width)
-        lower_line = mid_line - (stdev * channel_width)
+        # حساب خطوط LinReg
+        lr_mid = curr['linreg']
+        lr_upper = lr_mid + (curr['stdev'] * linreg_width)
+        lr_lower = lr_mid - (curr['stdev'] * linreg_width)
+        
+        # قيم البولنجر
+        bb_lower = curr[bb_lower_col]
+        bb_upper = curr[bb_upper_col]
         
         close_price = curr['close']
         low_price = curr['low']
         high_price = curr['high']
         
+        # RSI للتأكيد النهائي
         rsi = ta.rsi(df['close'], length=14).iloc[-1]
 
-        # 🔥 LONG (شراء آمن)
-        # 1. لمس الخط السفلي (البعيد)
-        # 2. RSI تحت 30 (تشبع حقيقي)
-        if (low_price <= lower_line) and (rsi < 30):
+        # 🔥 LONG (اختراق الجدارين للأسفل)
+        # 1. السعر عند أو تحت قاع LinReg
+        # 2. السعر عند أو تحت قاع Bollinger
+        # 3. RSI < 40 (ليس بالضرورة 30 لأن الجدارين كافيان)
+        if (low_price <= lr_lower) and (low_price <= bb_lower) and (rsi < 40):
             entry = close_price
             
-            # Stop Loss
-            buffer = (upper_line - lower_line) * 0.15
-            sl = lower_line - buffer
+            # Stop: أسفل القناة بقليل
+            buffer = (lr_upper - lr_lower) * 0.15
+            sl = lr_lower - buffer
             
-            # Targets
-            dist_to_top = upper_line - mid_line
-            tp1 = mid_line
-            tp2 = mid_line + (dist_to_top * 0.90) 
+            # Targets (حسب هندسة LinReg)
+            dist_to_top = lr_upper - lr_mid
+            tp1 = lr_mid
+            tp2 = lr_mid + (dist_to_top * 0.90) 
             
             if tp1 <= entry: return None
 
             return "LONG", entry, tp1, tp2, sl, int(curr['time'])
 
-        # 🔥 SHORT (بيع آمن)
-        # 1. لمس الخط العلوي (البعيد)
-        # 2. RSI فوق 70 (تشبع حقيقي)
-        if (high_price >= upper_line) and (rsi > 70):
+        # 🔥 SHORT (اختراق الجدارين للأعلى)
+        # 1. السعر عند أو فوق قمة LinReg
+        # 2. السعر عند أو فوق قمة Bollinger
+        if (high_price >= lr_upper) and (high_price >= bb_upper) and (rsi > 60):
             entry = close_price
             
-            buffer = (upper_line - lower_line) * 0.15
-            sl = upper_line + buffer
+            buffer = (lr_upper - lr_lower) * 0.15
+            sl = lr_upper + buffer
             
-            dist_to_bottom = mid_line - lower_line
-            tp1 = mid_line
-            tp2 = mid_line - (dist_to_bottom * 0.90)
+            dist_to_bottom = lr_mid - lr_lower
+            tp1 = lr_mid
+            tp2 = lr_mid - (dist_to_bottom * 0.90)
             
             if tp1 >= entry: return None
 
@@ -164,7 +179,7 @@ async def safe_check(symbol, app_state):
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"🛡️ <code>{clean_name}</code>\n"
+                    f"🧱 <code>{clean_name}</code>\n"
                     f"{side_emoji} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -176,7 +191,7 @@ async def safe_check(symbol, app_state):
                     f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n🛡️ SAFE SCALP: {clean_name} {side}")
+                print(f"\n🧱 DOUBLE WALL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 
                 if mid: 
@@ -189,7 +204,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (Safe Mode)...")
+    print(f"🚀 Connecting to KuCoin Futures (Double Wall)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -223,7 +238,7 @@ async def start_scanning(app_state):
         await asyncio.sleep(10)
 
 # ==========================================
-# 5. المراقبة والتقرير
+# 5. المراقبة والتقرير (Wins / Losses / Breakeven)
 # ==========================================
 async def monitor_trades(app_state):
     while True:
@@ -282,7 +297,7 @@ async def daily_report_task(app_state):
             wr = (wins / effective_trades * 100) if effective_trades > 0 else 0
             
             report_msg = (
-                f"📊 <b>Daily Report (Safe Mode)</b>\n"
+                f"📊 <b>Daily Report (Double Wall)</b>\n"
                 f"──────────────\n"
                 f"✅ <b>Wins:</b> {wins}\n"
                 f"🛡️ <b>Breakeven:</b> {breakeven}\n"
