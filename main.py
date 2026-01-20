@@ -27,10 +27,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#1a1a2e;color:#e94560;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🎯 Sniper Limit Bot</h1>
-            <p>UI: Clean</p>
+        <body style='background:#1a1a2e;color:#00ff88;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🏰 Fortress Sniper Bot</h1>
             <p>Strategy: Pivot S2/R2</p>
+            <p>Protection: RSI + ADX Filters</p>
         </body>
     </html>
     """
@@ -63,18 +63,18 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. المحرك: Pivot Points Sniper
+# 3. المحرك: Fortress Logic (Pivot + RSI + ADX)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # فريم 4 ساعات لتحديد المستويات القوية
+        # فريم 4 ساعات
         bars = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=50)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
         curr = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # حساب Pivot Points
+        # 1. Pivot Points
         high = prev['high']
         low = prev['low']
         close = prev['close']
@@ -85,22 +85,33 @@ async def get_signal_logic(symbol):
         
         curr_price = curr['close']
         
-        # المسافة المسموحة (0.2% - 1.5%)
+        # 2. Indicators (RSI & ADX)
+        rsi = df.ta.rsi(length=14).iloc[-1]
+        adx = df.ta.adx(length=14).iloc[-1]['ADX_14'] # قوة الاتجاه
+        atr = df.ta.atr(length=14).iloc[-1]
+        
+        # المسافة (ضيقة جداً للدقة)
         dist_to_s2 = (curr_price - s2) / curr_price * 100
         dist_to_r2 = (r2 - curr_price) / curr_price * 100
         
-        atr = df.ta.atr(length=14).iloc[-1]
+        # 🔥 الشروط الصارمة (The Fortress Rules)
         
-        # 🔥 BUY LIMIT (S2)
-        if (0.2 < dist_to_s2 < 1.5):
+        # BUY LIMIT (S2)
+        # 1. قربنا من S2
+        # 2. RSI منخفض (تحت 40) -> يعني السعر "تعبان" من الهبوط
+        # 3. ADX ليس "مجنوناً" (تحت 50) -> يعني ليس انهياراً كاملاً
+        if (0.1 < dist_to_s2 < 0.8) and (rsi < 45) and (adx < 50):
             entry = s2
             sl = entry - (atr * 0.5)
             tp1 = pp
             tp2 = r2
             return "LONG", entry, tp1, tp2, sl, int(curr['time'])
 
-        # 🔥 SELL LIMIT (R2)
-        if (0.2 < dist_to_r2 < 1.5):
+        # SELL LIMIT (R2)
+        # 1. قربنا من R2
+        # 2. RSI مرتفع (فوق 60) -> يعني السعر "تعبان" من الصعود
+        # 3. ADX تحت 50
+        if (0.1 < dist_to_r2 < 0.8) and (rsi > 55) and (adx < 50):
             entry = r2
             sl = entry + (atr * 0.5)
             tp1 = pp
@@ -111,7 +122,7 @@ async def get_signal_logic(symbol):
     except: return None
 
 # ==========================================
-# 4. المعالجة (رسالة نظيفة جداً)
+# 4. المعالجة (رسالة نظيفة)
 # ==========================================
 sem = asyncio.Semaphore(5)
 
@@ -149,9 +160,8 @@ async def safe_check(symbol, app_state):
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
-                # 🔥 الرسالة النظيفة الجديدة 🔥
                 msg = (
-                    f"🎯 <code>{clean_name}</code>\n"
+                    f"🏰 <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -163,7 +173,7 @@ async def safe_check(symbol, app_state):
                     f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n🎯 SNIPER: {clean_name} {side}")
+                print(f"\n🏰 FORTRESS: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 
                 if mid: 
@@ -175,7 +185,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (Sniper Clean UI)...")
+    print(f"🚀 Connecting to KuCoin Futures (Fortress Mode)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -209,7 +219,7 @@ async def start_scanning(app_state):
         await asyncio.sleep(10)
 
 # ==========================================
-# 5. المراقبة والتقرير
+# 5. المراقبة
 # ==========================================
 async def monitor_trades(app_state):
     while True:
@@ -221,14 +231,14 @@ async def monitor_trades(app_state):
                 side = trade['side']
                 status = trade.get("status", "ACTIVE")
 
-                # 1. PENDING PHASE
+                # PENDING -> ACTIVE
                 if status == "PENDING":
                     if (side == "LONG" and p <= trade["entry"]) or (side == "SHORT" and p >= trade["entry"]):
                         await reply_telegram_msg(f"⚡ <b>Order Filled</b>", msg_id)
                         trade["status"] = "ACTIVE"
                     continue
 
-                # 2. ACTIVE PHASE
+                # ACTIVE Phase
                 for target, label in [("tp1", "TP 1"), ("tp2", "TP 2")]:
                     if target not in trade["hit"]:
                         if (side == "LONG" and p >= trade[target]) or (side == "SHORT" and p <= trade[target]):
