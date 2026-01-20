@@ -27,9 +27,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#ff0000;color:#ffffff;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>⚡ RSI-2 Connors Scalper</h1>
-            <p>Mode: Aggressive High-Frequency</p>
+        <body style='background:#1a1a2e;color:#e94560;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🎯 Sniper Limit Bot</h1>
+            <p>UI: Clean</p>
+            <p>Strategy: Pivot S2/R2</p>
         </body>
     </html>
     """
@@ -62,64 +63,55 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. المحرك: Larry Connors RSI-2 Logic
+# 3. المحرك: Pivot Points Sniper
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # فريم 5 دقائق (سكالبينج سريع)
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=200)
+        # فريم 4 ساعات لتحديد المستويات القوية
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=50)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. EMA 100 (لتحديد التريند العام)
-        df['ema100'] = df.ta.ema(close=df['close'], length=100)
-        
-        # 2. RSI (Length 2) - السر كله هنا
-        df['rsi2'] = df.ta.rsi(close=df['close'], length=2)
-        
-        # 3. ATR لحساب الأهداف والستوب
-        df.ta.atr(length=14, append=True)
-        
         curr = df.iloc[-1]
-        close_price = curr['close']
-        ema100 = curr['ema100']
-        rsi2 = curr['rsi2']
-        atr = curr['ATRr_14']
+        prev = df.iloc[-2]
         
-        if pd.isna(ema100): return None
-
-        # 🔥 LONG (شراء الخطفة)
-        # الشرط: السعر فوق EMA 100 (تريند صاعد) + RSI(2) انهار تحت 10
-        if (close_price > ema100) and (rsi2 < 10):
-            entry = close_price
-            
-            # Stop Loss (واسع قليلاً لتحمل الذبذبة السريعة)
-            sl = entry - (atr * 2.5)
-            
-            # Targets (أهداف سريعة)
-            tp1 = entry + (atr * 1.5)
-            tp2 = entry + (atr * 3.0)
-            
+        # حساب Pivot Points
+        high = prev['high']
+        low = prev['low']
+        close = prev['close']
+        
+        pp = (high + low + close) / 3
+        r2 = pp + (high - low)
+        s2 = pp - (high - low)
+        
+        curr_price = curr['close']
+        
+        # المسافة المسموحة (0.2% - 1.5%)
+        dist_to_s2 = (curr_price - s2) / curr_price * 100
+        dist_to_r2 = (r2 - curr_price) / curr_price * 100
+        
+        atr = df.ta.atr(length=14).iloc[-1]
+        
+        # 🔥 BUY LIMIT (S2)
+        if (0.2 < dist_to_s2 < 1.5):
+            entry = s2
+            sl = entry - (atr * 0.5)
+            tp1 = pp
+            tp2 = r2
             return "LONG", entry, tp1, tp2, sl, int(curr['time'])
 
-        # 🔥 SHORT (بيع الخطفة)
-        # الشرط: السعر تحت EMA 100 (تريند هابط) + RSI(2) طار فوق 90
-        if (close_price < ema100) and (rsi2 > 90):
-            entry = close_price
-            
-            # Stop Loss
-            sl = entry + (atr * 2.5)
-            
-            # Targets
-            tp1 = entry - (atr * 1.5)
-            tp2 = entry - (atr * 3.0)
-            
+        # 🔥 SELL LIMIT (R2)
+        if (0.2 < dist_to_r2 < 1.5):
+            entry = r2
+            sl = entry + (atr * 0.5)
+            tp1 = pp
+            tp2 = s2
             return "SHORT", entry, tp1, tp2, sl, int(curr['time'])
 
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة
+# 4. المعالجة (رسالة نظيفة جداً)
 # ==========================================
 sem = asyncio.Semaphore(5)
 
@@ -129,7 +121,10 @@ def get_leverage(symbol):
     return "Cross 20x"
 
 async def safe_check(symbol, app_state):
-    # منع التكرار: طالما الصفقة مفتوحة لا نفتح جديدة
+    # Cooldown 2 Hours
+    last_sig_time = app_state.last_signal_time.get(symbol, 0)
+    if time.time() - last_sig_time < (120 * 60): return
+
     if symbol in app_state.active_trades: return
 
     async with sem:
@@ -140,44 +135,47 @@ async def safe_check(symbol, app_state):
             key = f"{symbol}_{side}_{ts}"
             
             if key not in app_state.sent_signals:
+                app_state.last_signal_time[symbol] = time.time()
                 app_state.sent_signals[key] = time.time()
                 app_state.stats["total"] = app_state.stats.get("total", 0) + 1
                 
                 clean_name = symbol.split(':')[0]
                 leverage = get_leverage(clean_name)
                 
-                if side == "LONG": side_emoji = "🟢 <b>LONG</b>"
-                else: side_emoji = "🔴 <b>SHORT</b>"
+                if side == "LONG": 
+                    side_text = "🟢 <b>BUY LIMIT</b>"
+                else: 
+                    side_text = "🔴 <b>SELL LIMIT</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
+                # 🔥 الرسالة النظيفة الجديدة 🔥
                 msg = (
-                    f"⚡ <code>{clean_name}</code>\n"
-                    f"{side_emoji} | {leverage}\n"
+                    f"🎯 <code>{clean_name}</code>\n"
+                    f"{side_text} | {leverage}\n"
                     f"──────────────\n"
-                    f"🎯 <b>Entry:</b> <code>{format_price(entry)}</code>\n"
+                    f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
                     f"──────────────\n"
-                    f"💰 <b>TP 1:</b> <code>{format_price(tp1)}</code>\n"
+                    f"🎯 <b>TP 1:</b> <code>{format_price(tp1)}</code>\n"
                     f"🚀 <b>TP 2:</b> <code>{format_price(tp2)}</code>\n"
                     f"──────────────\n"
                     f"🛑 <b>Stop Loss:</b> <code>{format_price(sl)}</code>\n"
                     f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n⚡ RSI-2 SIGNAL: {clean_name} {side}")
+                print(f"\n🎯 SNIPER: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 
                 if mid: 
                     app_state.active_trades[symbol] = {
-                        "status": "ACTIVE",
+                        "status": "PENDING",
                         "side": side, "entry": entry,
                         "tp1": tp1, "tp2": tp2, 
-                        "sl": sl, "msg_id": mid, "hit": [],
-                        "breakeven_triggered": False
+                        "sl": sl, "msg_id": mid, "hit": []
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (RSI-2 Scalper)...")
+    print(f"🚀 Connecting to KuCoin Futures (Sniper Clean UI)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -221,26 +219,26 @@ async def monitor_trades(app_state):
                 t = await exchange.fetch_ticker(sym); p = t['last']
                 msg_id = trade["msg_id"]
                 side = trade['side']
+                status = trade.get("status", "ACTIVE")
 
-                # مراقبة الأهداف
+                # 1. PENDING PHASE
+                if status == "PENDING":
+                    if (side == "LONG" and p <= trade["entry"]) or (side == "SHORT" and p >= trade["entry"]):
+                        await reply_telegram_msg(f"⚡ <b>Order Filled</b>", msg_id)
+                        trade["status"] = "ACTIVE"
+                    continue
+
+                # 2. ACTIVE PHASE
                 for target, label in [("tp1", "TP 1"), ("tp2", "TP 2")]:
                     if target not in trade["hit"]:
                         if (side == "LONG" and p >= trade[target]) or (side == "SHORT" and p <= trade[target]):
                             icon = "✅" if label == "TP 1" else "🚀"
-                            extra_msg = ""
-                            if label == "TP 1" and not trade["breakeven_triggered"]:
-                                extra_msg = "\n🛡️ <b>Move SL to Entry!</b>"
-                                trade["breakeven_triggered"] = True
-                            
-                            await reply_telegram_msg(f"{icon} <b>Hit {label}</b>{extra_msg}", msg_id)
+                            await reply_telegram_msg(f"{icon} <b>Hit {label}</b>", msg_id)
                             trade["hit"].append(target)
-                            
                             if target == "tp1": 
                                 app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
 
-                # مراقبة الستوب
                 if (side == "LONG" and p <= trade["sl"]) or (side == "SHORT" and p >= trade["sl"]):
-                    
                     if "tp1" in trade["hit"]:
                         await reply_telegram_msg(f"🛡️ <b>Breakeven Exit</b>", msg_id)
                         app_state.stats["wins"] -= 1 
@@ -248,7 +246,6 @@ async def monitor_trades(app_state):
                     else:
                         app_state.stats["losses"] = app_state.stats.get("losses", 0) + 1
                         await reply_telegram_msg(f"🛑 <b>Stop Loss Hit</b>", msg_id)
-                    
                     del app_state.active_trades[sym]
 
                 elif "tp2" in trade["hit"]: 
@@ -265,19 +262,13 @@ async def daily_report_task(app_state):
             wins = s.get("wins", 0)
             losses = s.get("losses", 0)
             breakeven = s.get("breakeven", 0)
-            
             effective_trades = wins + losses
             wr = (wins / effective_trades * 100) if effective_trades > 0 else 0
             
             report_msg = (
-                f"📊 <b>Daily Report (RSI-2)</b>\n"
-                f"──────────────\n"
-                f"✅ <b>Wins:</b> {wins}\n"
-                f"🛡️ <b>Breakeven:</b> {breakeven}\n"
-                f"❌ <b>Losses:</b> {losses}\n"
-                f"──────────────\n"
-                f"📈 <b>Win Rate:</b> {wr:.1f}%\n"
-                f"──────────────"
+                f"📊 <b>Daily Report</b>\n──────────────\n"
+                f"✅ <b>Wins:</b> {wins}\n🛡️ <b>Breakeven:</b> {breakeven}\n❌ <b>Losses:</b> {losses}\n"
+                f"──────────────\n📈 <b>Win Rate:</b> {wr:.1f}%\n──────────────"
             )
             await send_telegram_msg(report_msg)
             app_state.stats = {"total": 0, "wins": 0, "losses": 0, "breakeven": 0}
@@ -296,6 +287,7 @@ async def lifespan(app: FastAPI):
     await exchange.load_markets()
     app.state.sent_signals = {}
     app.state.active_trades = {}
+    app.state.last_signal_time = {}
     app.state.stats = {"total": 0, "wins": 0, "losses": 0, "breakeven": 0}
     
     t1 = asyncio.create_task(start_scanning(app.state))
