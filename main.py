@@ -9,15 +9,16 @@ from contextlib import asynccontextmanager
 import time
 from datetime import datetime
 import httpx
+import numpy as np
 
 # ==========================================
-# 1. الإعدادات
+# 1. الإعدادات (Configuration)
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
-MIN_VOLUME_USDT = 5_000_000 
+MIN_VOLUME_USDT = 5_000_000  # سيولة 5 مليون
 
 app = FastAPI()
 
@@ -26,15 +27,16 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#222;color:#ffeb3b;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>📉 LinReg Bounce Bot</h1>
-            <p>UI: Clean (No Labels)</p>
+        <body style='background:#111;color:#ffeb3b;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>📉 LinReg Pro Bot</h1>
+            <p>Strategy: Linear Regression Bounce (15m)</p>
+            <p>Reporting: Wins / Losses / Breakeven</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 2. دوال الاتصال
+# 2. دوال الاتصال (Communication)
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -61,7 +63,7 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. المحرك: Linear Regression Bounce
+# 3. المحرك: LinReg Logic (HQ Setup)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -69,50 +71,61 @@ async def get_signal_logic(symbol):
         bars = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # Linear Regression Channel (Length 50, Width 2.0)
+        # إعدادات القناة
         length = 50
         df['linreg'] = df.ta.linreg(close=df['close'], length=length)
         df['stdev'] = df.ta.stdev(close=df['close'], length=length)
+        df['slope'] = df['linreg'].diff(1) # حساب ميل القناة
         
         channel_width = 2.0
         
         curr = df.iloc[-1]
         mid_line = curr['linreg']
-        upper_line = mid_line + (curr['stdev'] * channel_width)
-        lower_line = mid_line - (curr['stdev'] * channel_width)
+        stdev = curr['stdev']
+        
+        upper_line = mid_line + (stdev * channel_width)
+        lower_line = mid_line - (stdev * channel_width)
         
         close_price = curr['close']
         low_price = curr['low']
         high_price = curr['high']
+        slope = curr['slope']
         
-        # RSI Filter
         rsi = ta.rsi(df['close'], length=14).iloc[-1]
 
-        # 🔥 LONG (Buy Bottom)
-        if (low_price <= lower_line) and (rsi < 40):
+        # 🔥 LONG (شراء من القاع)
+        # شرط الميل: القناة ليست هابطة بقوة
+        slope_threshold = -(close_price * 0.0001) 
+        
+        if (low_price <= lower_line) and (rsi < 45) and (slope > slope_threshold):
             entry = close_price
             
-            # Stop Loss (Outside Channel Buffer)
+            # Stop Loss (بفر بسيط تحت القناة)
             buffer = (upper_line - lower_line) * 0.15
             sl = lower_line - buffer
             
             # Targets
+            dist_to_top = upper_line - mid_line
             tp1 = mid_line
-            tp2 = upper_line
+            tp2 = mid_line + (dist_to_top * 0.90) # 90% من المسافة للسقف
             
             if tp1 <= entry: return None
 
             return "LONG", entry, tp1, tp2, sl, int(curr['time'])
 
-        # 🔥 SHORT (Sell Top)
-        if (high_price >= upper_line) and (rsi > 60):
+        # 🔥 SHORT (بيع من القمة)
+        # شرط الميل: القناة ليست صاعدة بقوة
+        slope_threshold_pos = (close_price * 0.0001)
+        
+        if (high_price >= upper_line) and (rsi > 55) and (slope < slope_threshold_pos):
             entry = close_price
             
             buffer = (upper_line - lower_line) * 0.15
             sl = upper_line + buffer
             
+            dist_to_bottom = mid_line - lower_line
             tp1 = mid_line
-            tp2 = lower_line
+            tp2 = mid_line - (dist_to_bottom * 0.90) # 90% من المسافة للقاع
             
             if tp1 >= entry: return None
 
@@ -153,7 +166,7 @@ async def safe_check(symbol, app_state):
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
-                # 🔥 تم تعديل الرسالة: أرقام فقط بدون نصوص
+                # الرسالة النظيفة (أرقام فقط)
                 msg = (
                     f"📉 <code>{clean_name}</code>\n"
                     f"{side_emoji} | {leverage}\n"
@@ -167,7 +180,7 @@ async def safe_check(symbol, app_state):
                     f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n📉 LINREG SIGNAL: {clean_name} {side}")
+                print(f"\n📉 SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 
                 if mid: 
@@ -180,7 +193,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (Clean LinReg)...")
+    print(f"🚀 Connecting to KuCoin Futures (Pro Mode)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -213,6 +226,9 @@ async def start_scanning(app_state):
         print(f"❌ Error: {str(e)}")
         await asyncio.sleep(10)
 
+# ==========================================
+# 5. المراقبة الذكية والتقرير (Smart Monitoring)
+# ==========================================
 async def monitor_trades(app_state):
     while True:
         for sym in list(app_state.active_trades.keys()):
@@ -222,24 +238,43 @@ async def monitor_trades(app_state):
                 msg_id = trade["msg_id"]
                 side = trade['side']
 
+                # 1. مراقبة الأهداف
                 for target, label in [("tp1", "TP 1"), ("tp2", "TP 2")]:
                     if target not in trade["hit"]:
                         if (side == "LONG" and p >= trade[target]) or (side == "SHORT" and p <= trade[target]):
                             icon = "✅" if label == "TP 1" else "🚀"
                             extra_msg = ""
+                            # تنبيه النقل للدخول
                             if label == "TP 1" and not trade["breakeven_triggered"]:
                                 extra_msg = "\n🛡️ <b>Move SL to Entry!</b>"
                                 trade["breakeven_triggered"] = True
                             
                             await reply_telegram_msg(f"{icon} <b>Hit {label}</b>{extra_msg}", msg_id)
                             trade["hit"].append(target)
-                            if target == "tp1": app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
+                            
+                            # نزيد الـ Wins مؤقتاً عند ضرب الهدف الأول
+                            if target == "tp1": 
+                                app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
 
+                # 2. مراقبة الستوب (مع منطق Breakeven)
                 if (side == "LONG" and p <= trade["sl"]) or (side == "SHORT" and p >= trade["sl"]):
-                    app_state.stats["losses"] = app_state.stats.get("losses", 0) + 1
-                    await reply_telegram_msg(f"🛑 <b>Stop Loss</b>", msg_id)
+                    
+                    if "tp1" in trade["hit"]:
+                        # إذا ضربت هدف أول ثم عادت للستوب
+                        await reply_telegram_msg(f"🛡️ <b>Breakeven Exit (Safe)</b>", msg_id)
+                        
+                        # 🔥 التصحيح: نسحبها من الـ Wins ونضيفها للـ Breakeven
+                        app_state.stats["wins"] -= 1 
+                        app_state.stats["breakeven"] = app_state.stats.get("breakeven", 0) + 1
+                    else:
+                        # خسارة حقيقية
+                        app_state.stats["losses"] = app_state.stats.get("losses", 0) + 1
+                        await reply_telegram_msg(f"🛑 <b>Stop Loss Hit</b>", msg_id)
+                    
                     del app_state.active_trades[sym]
-                elif "tp2" in trade["hit"]: del app_state.active_trades[sym]
+
+                elif "tp2" in trade["hit"]: 
+                    del app_state.active_trades[sym]
 
             except: pass
         await asyncio.sleep(2)
@@ -249,11 +284,29 @@ async def daily_report_task(app_state):
         now = datetime.now()
         if now.hour == 23 and now.minute == 59:
             s = app_state.stats
-            wins = s.get("wins", 0); losses = s.get("losses", 0); total = wins + losses
-            wr = (wins / total * 100) if total > 0 else 0
-            report_msg = (f"📊 <b>Daily Report</b>\n──────────────\n✅ <b>Wins:</b> {wins}\n❌ <b>Losses:</b> {losses}\n📈 <b>Win Rate:</b> {wr:.1f}%\n──────────────")
+            wins = s.get("wins", 0)
+            losses = s.get("losses", 0)
+            breakeven = s.get("breakeven", 0)
+            
+            # حساب نسبة الفوز (Wins / (Wins + Losses))
+            # نتجاهل Breakeven في النسبة لأنها محايدة
+            effective_trades = wins + losses
+            wr = (wins / effective_trades * 100) if effective_trades > 0 else 0
+            
+            report_msg = (
+                f"📊 <b>Daily Report</b>\n"
+                f"──────────────\n"
+                f"✅ <b>Wins:</b> {wins}\n"
+                f"🛡️ <b>Breakeven:</b> {breakeven}\n"
+                f"❌ <b>Losses:</b> {losses}\n"
+                f"──────────────\n"
+                f"📈 <b>Win Rate:</b> {wr:.1f}%\n"
+                f"──────────────"
+            )
             await send_telegram_msg(report_msg)
-            app_state.stats = {"total": 0, "wins": 0, "losses": 0}
+            
+            # تصفير العدادات
+            app_state.stats = {"total": 0, "wins": 0, "losses": 0, "breakeven": 0}
             await asyncio.sleep(70)
         await asyncio.sleep(30)
 
@@ -267,9 +320,15 @@ async def keep_alive_task():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await exchange.load_markets()
-    app.state.sent_signals = {}; app.state.active_trades = {}; app.state.stats = {"total": 0, "wins": 0, "losses": 0}
-    t1 = asyncio.create_task(start_scanning(app.state)); t2 = asyncio.create_task(monitor_trades(app.state))
-    t3 = asyncio.create_task(daily_report_task(app.state)); t4 = asyncio.create_task(keep_alive_task())
+    # تهيئة المتغيرات
+    app.state.sent_signals = {}
+    app.state.active_trades = {}
+    app.state.stats = {"total": 0, "wins": 0, "losses": 0, "breakeven": 0}
+    
+    t1 = asyncio.create_task(start_scanning(app.state))
+    t2 = asyncio.create_task(monitor_trades(app.state))
+    t3 = asyncio.create_task(daily_report_task(app.state))
+    t4 = asyncio.create_task(keep_alive_task())
     yield
     await exchange.close(); t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel()
 
