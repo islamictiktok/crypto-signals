@@ -27,10 +27,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#1a1a2e;color:#00ff88;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🏰 Fortress Sniper Bot</h1>
-            <p>Strategy: Pivot S2/R2</p>
-            <p>Protection: RSI + ADX Filters</p>
+        <body style='background:#000000;color:#d4af37;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>💎 Elite Sniper Bot</h1>
+            <p>Strategy: Pivot S2/R2 (Extreme Filter)</p>
+            <p>RSI: 30/70 | ADX: < 45</p>
         </body>
     </html>
     """
@@ -63,7 +63,7 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. المحرك: Fortress Logic (Pivot + RSI + ADX)
+# 3. المحرك: Elite Logic
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -74,7 +74,6 @@ async def get_signal_logic(symbol):
         curr = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # 1. Pivot Points
         high = prev['high']
         low = prev['low']
         close = prev['close']
@@ -85,35 +84,36 @@ async def get_signal_logic(symbol):
         
         curr_price = curr['close']
         
-        # 2. Indicators (RSI & ADX)
+        # المؤشرات
         rsi = df.ta.rsi(length=14).iloc[-1]
-        adx = df.ta.adx(length=14).iloc[-1]['ADX_14'] # قوة الاتجاه
+        # خفضنا ADX لـ 45 لضمان أن السوق ليس في حالة "انهيار"
+        adx = df.ta.adx(length=14).iloc[-1]['ADX_14'] 
         atr = df.ta.atr(length=14).iloc[-1]
         
-        # المسافة (ضيقة جداً للدقة)
+        # المسافة (ضيقة جداً 0.6% كحد أقصى)
         dist_to_s2 = (curr_price - s2) / curr_price * 100
         dist_to_r2 = (r2 - curr_price) / curr_price * 100
         
-        # 🔥 الشروط الصارمة (The Fortress Rules)
+        # 🔥 قواعد النخبة (Elite Rules)
         
         # BUY LIMIT (S2)
-        # 1. قربنا من S2
-        # 2. RSI منخفض (تحت 40) -> يعني السعر "تعبان" من الهبوط
-        # 3. ADX ليس "مجنوناً" (تحت 50) -> يعني ليس انهياراً كاملاً
-        if (0.1 < dist_to_s2 < 0.8) and (rsi < 45) and (adx < 50):
+        # 1. قربنا جداً من S2 (بين 0.1% و 0.6%)
+        # 2. RSI تحت 30 (تشبع حقيقي) -> هذا سيقلل الصفقات لكن يرفع الدقة
+        # 3. ADX هادئ (تحت 45)
+        if (0.1 < dist_to_s2 < 0.6) and (rsi < 30) and (adx < 45):
             entry = s2
-            sl = entry - (atr * 0.5)
+            sl = entry - (atr * 0.6)
             tp1 = pp
             tp2 = r2
             return "LONG", entry, tp1, tp2, sl, int(curr['time'])
 
         # SELL LIMIT (R2)
-        # 1. قربنا من R2
-        # 2. RSI مرتفع (فوق 60) -> يعني السعر "تعبان" من الصعود
-        # 3. ADX تحت 50
-        if (0.1 < dist_to_r2 < 0.8) and (rsi > 55) and (adx < 50):
+        # 1. قربنا جداً من R2
+        # 2. RSI فوق 70 (تشبع حقيقي)
+        # 3. ADX هادئ
+        if (0.1 < dist_to_r2 < 0.6) and (rsi > 70) and (adx < 45):
             entry = r2
-            sl = entry + (atr * 0.5)
+            sl = entry + (atr * 0.6)
             tp1 = pp
             tp2 = s2
             return "SHORT", entry, tp1, tp2, sl, int(curr['time'])
@@ -122,7 +122,7 @@ async def get_signal_logic(symbol):
     except: return None
 
 # ==========================================
-# 4. المعالجة (رسالة نظيفة)
+# 4. المعالجة
 # ==========================================
 sem = asyncio.Semaphore(5)
 
@@ -161,7 +161,7 @@ async def safe_check(symbol, app_state):
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"🏰 <code>{clean_name}</code>\n"
+                    f"💎 <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -173,7 +173,7 @@ async def safe_check(symbol, app_state):
                     f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n🏰 FORTRESS: {clean_name} {side}")
+                print(f"\n💎 ELITE SNIPER: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 
                 if mid: 
@@ -185,7 +185,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (Fortress Mode)...")
+    print(f"🚀 Connecting to KuCoin Futures (Elite Mode)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
