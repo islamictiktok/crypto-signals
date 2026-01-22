@@ -27,10 +27,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#000000;color:#d4af37;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>💎 Elite Sniper Bot</h1>
-            <p>Strategy: Pivot S2/R2 (Extreme Filter)</p>
-            <p>RSI: 30/70 | ADX: < 45</p>
+        <body style='background:#0f172a;color:#38bdf8;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>💎 SMC Pro Sniper</h1>
+            <p>Strategy: Order Block + FVG + EMA 200</p>
+            <p>Accuracy: High</p>
         </body>
     </html>
     """
@@ -63,66 +63,93 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. المحرك: Elite Logic
+# 3. المحرك: SMC Pro Logic (OB + FVG)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # فريم 4 ساعات
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=50)
+        # نحتاج بيانات أكثر لحساب EMA 200 بدقة
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=250)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        curr = df.iloc[-1]
-        prev = df.iloc[-2]
+        # 1. الاتجاه العام (EMA 200)
+        df['ema200'] = df.ta.ema(length=200)
+        df['atr'] = df.ta.atr(length=14)
         
-        high = prev['high']
-        low = prev['low']
-        close = prev['close']
+        last_idx = len(df) - 1
+        curr_price = df.iloc[-1]['close']
+        ema_now = df.iloc[-1]['ema200']
         
-        pp = (high + low + close) / 3
-        r2 = pp + (high - low)
-        s2 = pp - (high - low)
-        
-        curr_price = curr['close']
-        
-        # المؤشرات
-        rsi = df.ta.rsi(length=14).iloc[-1]
-        # خفضنا ADX لـ 45 لضمان أن السوق ليس في حالة "انهيار"
-        adx = df.ta.adx(length=14).iloc[-1]['ADX_14'] 
-        atr = df.ta.atr(length=14).iloc[-1]
-        
-        # المسافة (ضيقة جداً 0.6% كحد أقصى)
-        dist_to_s2 = (curr_price - s2) / curr_price * 100
-        dist_to_r2 = (r2 - curr_price) / curr_price * 100
-        
-        # 🔥 قواعد النخبة (Elite Rules)
-        
-        # BUY LIMIT (S2)
-        # 1. قربنا جداً من S2 (بين 0.1% و 0.6%)
-        # 2. RSI تحت 30 (تشبع حقيقي) -> هذا سيقلل الصفقات لكن يرفع الدقة
-        # 3. ADX هادئ (تحت 45)
-        if (0.1 < dist_to_s2 < 0.6) and (rsi < 30) and (adx < 45):
-            entry = s2
-            sl = entry - (atr * 0.6)
-            tp1 = pp
-            tp2 = r2
-            return "LONG", entry, tp1, tp2, sl, int(curr['time'])
+        if pd.isna(ema_now): return None
 
-        # SELL LIMIT (R2)
-        # 1. قربنا جداً من R2
-        # 2. RSI فوق 70 (تشبع حقيقي)
-        # 3. ADX هادئ
-        if (0.1 < dist_to_r2 < 0.6) and (rsi > 70) and (adx < 45):
-            entry = r2
-            sl = entry + (atr * 0.6)
-            tp1 = pp
-            tp2 = s2
-            return "SHORT", entry, tp1, tp2, sl, int(curr['time'])
+        # البحث في آخر 15 شمعة
+        for i in range(last_idx - 1, last_idx - 15, -1):
+            # الشمعة الحالية (الانفجارية المحتملة) واللي قبلها (OB) واللي قبلها (لتأكيد الحركة)
+            candle_impulse = df.iloc[i]     # الشمعة القوية
+            candle_ob = df.iloc[i-1]        # شمعة الأوردر بلوك
+            candle_pre = df.iloc[i-2]       # ما قبل البلوك (لحساب الفجوة)
+            
+            # حجم الجسم ومقارنته بالـ ATR
+            body_size = abs(candle_impulse['close'] - candle_impulse['open'])
+            atr_val = candle_impulse['atr']
+            is_big_candle = body_size > (atr_val * 1.2)
+            
+            if is_big_candle:
+                
+                # === 🔥 سيناريو الشراء (Bullish OB + FVG) ===
+                # 1. الاتجاه صاعد (السعر الحالي فوق EMA 200)
+                # 2. الشمعة الانفجارية خضراء
+                # 3. الشمعة OB حمراء (أو أصغر)
+                if (curr_price > ema_now) and \
+                   (candle_impulse['close'] > candle_impulse['open']) and \
+                   (candle_ob['close'] < candle_ob['open']):
+                    
+                    # 🔥 شرط الفجوة (FVG):
+                    # قاع الشمعة التي تلي الانفجار (أو الحالية) يجب ألا يغطي قمة الشمعة OB تماماً
+                    # ببساطة: هل يوجد فراغ بين قمة OB وقاع الشمعة رقم i+1؟
+                    # هنا سنبسطها: هل الشمعة القوية أغلقت بعيداً جداً عن قمة OB؟
+                    
+                    # تحديد منطقة الدخول
+                    ob_high = candle_ob['high'] # دخول
+                    ob_low = candle_ob['low']   # ستوب
+                    
+                    # السعر الحالي يجب أن يكون فوق المنطقة ويعود لاختبارها
+                    # ويجب ألا يكون قد كسرها لأسفل
+                    if (curr_price > ob_high) and (curr_price < ob_high * 1.025):
+                        entry = ob_high
+                        sl = ob_low - (atr_val * 0.1) # ستوب ضيق
+                        
+                        risk = entry - sl
+                        tp1 = entry + (risk * 2)
+                        tp2 = entry + (risk * 5) # ريشيو عالي
+                        
+                        return "LONG", entry, tp1, tp2, sl, int(df.iloc[-1]['time'])
 
+                # === 🔥 سيناريو البيع (Bearish OB + FVG) ===
+                # 1. الاتجاه هابط (السعر الحالي تحت EMA 200)
+                # 2. الشمعة الانفجارية حمراء
+                # 3. الشمعة OB خضراء
+                elif (curr_price < ema_now) and \
+                     (candle_impulse['close'] < candle_impulse['open']) and \
+                     (candle_ob['close'] > candle_ob['open']):
+                    
+                    ob_low = candle_ob['low']   # دخول
+                    ob_high = candle_ob['high'] # ستوب
+                    
+                    if (curr_price < ob_low) and (curr_price > ob_low * 0.975):
+                        entry = ob_low
+                        sl = ob_high + (atr_val * 0.1)
+                        
+                        risk = sl - entry
+                        tp1 = entry - (risk * 2)
+                        tp2 = entry - (risk * 5)
+                        
+                        return "SHORT", entry, tp1, tp2, sl, int(df.iloc[-1]['time'])
+                        
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة
+# 4. المعالجة والرسائل
 # ==========================================
 sem = asyncio.Semaphore(5)
 
@@ -132,9 +159,9 @@ def get_leverage(symbol):
     return "Cross 20x"
 
 async def safe_check(symbol, app_state):
-    # Cooldown 2 Hours
+    # Cooldown 1 Hour
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    if time.time() - last_sig_time < (120 * 60): return
+    if time.time() - last_sig_time < (60 * 60): return
 
     if symbol in app_state.active_trades: return
 
@@ -154,9 +181,9 @@ async def safe_check(symbol, app_state):
                 leverage = get_leverage(clean_name)
                 
                 if side == "LONG": 
-                    side_text = "🟢 <b>BUY LIMIT</b>"
+                    side_text = "🟢 <b>BUY LIMIT (SMC)</b>"
                 else: 
-                    side_text = "🔴 <b>SELL LIMIT</b>"
+                    side_text = "🔴 <b>SELL LIMIT (SMC)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
@@ -173,7 +200,7 @@ async def safe_check(symbol, app_state):
                     f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n💎 ELITE SNIPER: {clean_name} {side}")
+                print(f"\n💎 SMC SIGNAL: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 
                 if mid: 
@@ -185,7 +212,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (Elite Mode)...")
+    print(f"🚀 Connecting to KuCoin Futures (SMC Pro)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -234,7 +261,7 @@ async def monitor_trades(app_state):
                 # PENDING -> ACTIVE
                 if status == "PENDING":
                     if (side == "LONG" and p <= trade["entry"]) or (side == "SHORT" and p >= trade["entry"]):
-                        await reply_telegram_msg(f"⚡ <b>Order Filled</b>", msg_id)
+                        await reply_telegram_msg(f"⚡ <b>Order Filled (SMC)</b>", msg_id)
                         trade["status"] = "ACTIVE"
                     continue
 
