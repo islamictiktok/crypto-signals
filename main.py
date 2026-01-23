@@ -27,10 +27,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#121212;color:#ff3333;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>💣 TTM Squeeze Bot</h1>
-            <p>Strategy: Volatility Breakout</p>
-            <p>Entry: Exact Keltner Level</p>
+        <body style='background:#131722;color:#2962ff;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>📉 LinReg Channel Bot (4H)</h1>
+            <p>Settings: Length 100 | Deviation 2</p>
+            <p>Strategy: Reversion to Mean</p>
         </body>
     </html>
     """
@@ -63,77 +63,89 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. المحرك: TTM Squeeze Logic
+# 3. المحرك: Linear Regression Channel (100, 2)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # فريم 15 دقيقة
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
+        # 🔥 تغيير الفريم لـ 4 ساعات كما في الصورة
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=200)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. Bollinger Bands (20, 2.0)
-        bb = df.ta.bbands(length=20, std=2.0)
-        df = pd.concat([df, bb], axis=1)
+        # إعدادات القناة حسب الصورة (Length 100, Dev 2)
+        length = 100
+        mult = 2.0
         
-        # 2. Keltner Channels (20, 1.5)
-        kc = df.ta.kc(length=20, scalar=1.5)
-        df = pd.concat([df, kc], axis=1)
+        # حساب خط المنتصف (Linear Regression)
+        df['linreg'] = df.ta.linreg(close=df['close'], length=length)
         
-        # تحديد خطوط الانفجار بدقة
-        kc_upper = df.iloc[-1][f'KCUe_20_1.5']
-        kc_lower = df.iloc[-1][f'KCLe_20_1.5']
+        # حساب الانحراف المعياري
+        df['stdev'] = df.ta.stdev(close=df['close'], length=length)
         
-        # 3. Momentum
-        df['mom'] = df.ta.linreg(close=df['close'], length=20, angle=True)
-        momentum = df.iloc[-1]['mom']
+        curr = df.iloc[-1]
         
-        curr_price = df.iloc[-1]['close']
+        mid_line = curr['linreg']
+        stdev = curr['stdev']
         
-        # فحص الضغط السابق (Squeeze)
-        prev_bb_up = df.iloc[-2][f'BBU_20_2.0']
-        prev_kc_up = df.iloc[-2][f'KCUe_20_1.5']
+        if pd.isna(mid_line) or pd.isna(stdev): return None
         
-        # الشرط: هل البولنجر كان داخل الكلتنر سابقاً؟ (هدوء ما قبل العاصفة)
-        was_squeezed = (prev_bb_up < prev_kc_up) 
+        # حساب القنوات العلوية والسفلية
+        upper_line = mid_line + (stdev * mult)
+        lower_line = mid_line - (stdev * mult)
         
-        atr = df.ta.atr(length=14).iloc[-1]
+        close_price = curr['close']
+        low_price = curr['low']
+        high_price = curr['high']
+        
+        # حساب عرض القناة لاستخدامه في الستوب والفلترة
+        channel_width = upper_line - lower_line
+        
+        # === منطق الدخول (الاقتراب من الخط) ===
+        # نسمح بدخول إذا كان السعر قريباً جداً من الخط (Buffer 0.2% من القناة)
+        proximity_buffer = channel_width * 0.05 
+        
+        # 🔥 LONG (شراء من القاع)
+        # السعر لمس الخط السفلي أو نزل تحته أو اقترب منه جداً
+        if (low_price <= (lower_line + proximity_buffer)):
+            entry = close_price
+            
+            # Stop Loss: أسفل الخط بمسافة أمان (15% من عرض القناة) للذيول
+            sl_buffer = channel_width * 0.15
+            sl = lower_line - sl_buffer
+            
+            # Targets
+            tp1 = mid_line # الهدف الأول: المنتصف
+            
+            # الهدف الثاني: 90% من المسافة للخط العلوي
+            dist_to_top = upper_line - mid_line
+            tp2 = mid_line + (dist_to_top * 0.90)
+            
+            # فلتر جودة: التأكد أن الهدف يستحق المخاطرة (R:R > 1)
+            if (tp1 - entry) > (entry - sl):
+                return "LONG", entry, tp1, tp2, sl, int(curr['time'])
 
-        # 🔥 LONG BREAKOUT
-        # السعر كسر خط الكلتنر العلوي
-        if (curr_price > kc_upper) and (momentum > 0):
-            # 🔥 التعديل: سعر الدخول هو خط الكلتنر نفسه (نقطة الكسر)
-            entry = kc_upper 
+        # 🔥 SHORT (بيع من القمة)
+        # السعر لمس الخط العلوي أو طلع فوقه أو اقترب منه جداً
+        if (high_price >= (upper_line - proximity_buffer)):
+            entry = close_price
             
-            # Stop Loss (أسفل خط المنتصف بقليل)
-            mid_line = df.iloc[-1]['EMA_20'] if 'EMA_20' in df else (kc_upper - atr)
-            sl = mid_line - (atr * 0.5)
+            # Stop Loss: فوق الخط بمسافة أمان
+            sl_buffer = channel_width * 0.15
+            sl = upper_line + sl_buffer
             
-            risk = entry - sl
-            tp1 = entry + (risk * 1.5)
-            tp2 = entry + (risk * 3.0) # انفجار = أهداف بعيدة
+            # Targets
+            tp1 = mid_line
             
-            return "LONG", entry, tp1, tp2, sl, int(df.iloc[-1]['time'])
-
-        # 🔥 SHORT BREAKOUT
-        # السعر كسر خط الكلتنر السفلي
-        if (curr_price < kc_lower) and (momentum < 0):
-            # 🔥 التعديل: سعر الدخول هو خط الكلتنر السفلي
-            entry = kc_lower
+            dist_to_bottom = mid_line - lower_line
+            tp2 = mid_line - (dist_to_bottom * 0.90)
             
-            mid_line = df.iloc[-1]['EMA_20'] if 'EMA_20' in df else (kc_lower + atr)
-            sl = mid_line + (atr * 0.5)
-            
-            risk = sl - entry
-            tp1 = entry - (risk * 1.5)
-            tp2 = entry - (risk * 3.0)
-            
-            return "SHORT", entry, tp1, tp2, sl, int(df.iloc[-1]['time'])
+            if (entry - tp1) > (sl - entry):
+                return "SHORT", entry, tp1, tp2, sl, int(curr['time'])
 
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة
+# 4. المعالجة والرسائل
 # ==========================================
 sem = asyncio.Semaphore(5)
 
@@ -143,10 +155,6 @@ def get_leverage(symbol):
     return "Cross 20x"
 
 async def safe_check(symbol, app_state):
-    # Cooldown 30 Minutes
-    last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    if time.time() - last_sig_time < (30 * 60): return
-
     if symbol in app_state.active_trades: return
 
     async with sem:
@@ -157,35 +165,31 @@ async def safe_check(symbol, app_state):
             key = f"{symbol}_{side}_{ts}"
             
             if key not in app_state.sent_signals:
-                app_state.last_signal_time[symbol] = time.time()
                 app_state.sent_signals[key] = time.time()
                 app_state.stats["total"] = app_state.stats.get("total", 0) + 1
                 
                 clean_name = symbol.split(':')[0]
                 leverage = get_leverage(clean_name)
                 
-                if side == "LONG": 
-                    side_text = "🟢 <b>BUY (Breakout Level)</b>"
-                else: 
-                    side_text = "🔴 <b>SELL (Breakout Level)</b>"
+                if side == "LONG": side_emoji = "🟢 <b>LONG (Channel Bottom)</b>"
+                else: side_emoji = "🔴 <b>SHORT (Channel Top)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"💣 <code>{clean_name}</code>\n"
-                    f"{side_text} | {leverage}\n"
+                    f"📉 <code>{clean_name}</code>\n"
+                    f"{side_emoji} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
-                    f"<i>(Breakout Point)</i>\n"
                     f"──────────────\n"
-                    f"🎯 <b>TP 1:</b> <code>{format_price(tp1)}</code>\n"
-                    f"🚀 <b>TP 2:</b> <code>{format_price(tp2)}</code>\n"
+                    f"🎯 <b>TP 1 (Mid):</b> <code>{format_price(tp1)}</code>\n"
+                    f"🚀 <b>TP 2 (High):</b> <code>{format_price(tp2)}</code>\n"
                     f"──────────────\n"
                     f"🛑 <b>Stop Loss:</b> <code>{format_price(sl)}</code>\n"
                     f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n💣 SQUEEZE: {clean_name} {side}")
+                print(f"\n📉 LINREG 4H: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 
                 if mid: 
@@ -198,7 +202,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (Squeeze + Defined Entry)...")
+    print(f"🚀 Connecting to KuCoin Futures (LinReg 100/2 - 4H)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -225,14 +229,14 @@ async def start_scanning(app_state):
             tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
             await asyncio.gather(*tasks)
             print(f"⏳ Scanning {len(app_state.symbols)} pairs...", end='\r')
-            await asyncio.sleep(30) 
+            await asyncio.sleep(60) 
 
     except Exception as e:
         print(f"❌ Error: {str(e)}")
         await asyncio.sleep(10)
 
 # ==========================================
-# 5. المراقبة
+# 5. المراقبة والتقرير
 # ==========================================
 async def monitor_trades(app_state):
     while True:
@@ -250,7 +254,7 @@ async def monitor_trades(app_state):
                             icon = "✅" if label == "TP 1" else "🚀"
                             extra_msg = ""
                             if label == "TP 1" and not trade["breakeven_triggered"]:
-                                extra_msg = "\n🛡️ <b>Secure Profit</b>"
+                                extra_msg = "\n🛡️ <b>Secure Profit (SL to Entry)</b>"
                                 trade["breakeven_triggered"] = True
                             
                             await reply_telegram_msg(f"{icon} <b>Hit {label}</b>{extra_msg}", msg_id)
@@ -309,7 +313,6 @@ async def lifespan(app: FastAPI):
     await exchange.load_markets()
     app.state.sent_signals = {}
     app.state.active_trades = {}
-    app.state.last_signal_time = {}
     app.state.stats = {"total": 0, "wins": 0, "losses": 0, "breakeven": 0}
     
     t1 = asyncio.create_task(start_scanning(app.state))
