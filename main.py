@@ -27,10 +27,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#131722;color:#2962ff;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>📉 LinReg Channel Bot (4H)</h1>
-            <p>Settings: Length 100 | Deviation 2</p>
-            <p>Strategy: Reversion to Mean</p>
+        <body style='background:#000;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🛡️ Trend-Aligned LinReg Bot</h1>
+            <p>Strategy: LinReg (100, 2) + EMA 200 Filter</p>
+            <p>Mode: Trade WITH Trend Only</p>
         </body>
     </html>
     """
@@ -63,89 +63,84 @@ def format_price(price):
     return f"{price:.2f}"
 
 # ==========================================
-# 3. المحرك: Linear Regression Channel (100, 2)
+# 3. المحرك: LinReg + Trend Filter
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # 🔥 تغيير الفريم لـ 4 ساعات كما في الصورة
-        bars = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=200)
+        # فريم 4 ساعات (كما في الصورة والطلب السابق)
+        bars = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=250)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # إعدادات القناة حسب الصورة (Length 100, Dev 2)
+        # 1. تحديد الاتجاه (The King: EMA 200)
+        df['ema200'] = df.ta.ema(length=200)
+        
+        # 2. LinReg Channel (100, 2)
         length = 100
         mult = 2.0
         
-        # حساب خط المنتصف (Linear Regression)
         df['linreg'] = df.ta.linreg(close=df['close'], length=length)
-        
-        # حساب الانحراف المعياري
         df['stdev'] = df.ta.stdev(close=df['close'], length=length)
         
         curr = df.iloc[-1]
         
         mid_line = curr['linreg']
         stdev = curr['stdev']
+        ema200 = curr['ema200']
         
-        if pd.isna(mid_line) or pd.isna(stdev): return None
+        if pd.isna(mid_line) or pd.isna(ema200): return None
         
-        # حساب القنوات العلوية والسفلية
         upper_line = mid_line + (stdev * mult)
         lower_line = mid_line - (stdev * mult)
+        channel_width = upper_line - lower_line
         
         close_price = curr['close']
         low_price = curr['low']
         high_price = curr['high']
         
-        # حساب عرض القناة لاستخدامه في الستوب والفلترة
-        channel_width = upper_line - lower_line
-        
-        # === منطق الدخول (الاقتراب من الخط) ===
-        # نسمح بدخول إذا كان السعر قريباً جداً من الخط (Buffer 0.2% من القناة)
-        proximity_buffer = channel_width * 0.05 
-        
-        # 🔥 LONG (شراء من القاع)
-        # السعر لمس الخط السفلي أو نزل تحته أو اقترب منه جداً
-        if (low_price <= (lower_line + proximity_buffer)):
-            entry = close_price
-            
-            # Stop Loss: أسفل الخط بمسافة أمان (15% من عرض القناة) للذيول
-            sl_buffer = channel_width * 0.15
-            sl = lower_line - sl_buffer
-            
-            # Targets
-            tp1 = mid_line # الهدف الأول: المنتصف
-            
-            # الهدف الثاني: 90% من المسافة للخط العلوي
-            dist_to_top = upper_line - mid_line
-            tp2 = mid_line + (dist_to_top * 0.90)
-            
-            # فلتر جودة: التأكد أن الهدف يستحق المخاطرة (R:R > 1)
-            if (tp1 - entry) > (entry - sl):
+        # هامش التقاط الإشارة (لضمان الدخول حتى لو لم يلمس بالمليمتر)
+        proximity = channel_width * 0.05 
+
+        # 🔥 LONG STRATEGY (شراء القاع في تريند صاعد)
+        # الشرط 1: السعر العام فوق EMA 200 (تريند صاعد)
+        # الشرط 2: السعر نزل ولمس الخط السفلي للقناة (فرصة شراء ذهبية)
+        if (close_price > ema200): 
+            if (low_price <= (lower_line + proximity)):
+                entry = close_price # أو يمكن جعلها Limit عند lower_line
+                
+                # Stop Loss: أسفل الخط بمسافة أمان
+                sl_buffer = channel_width * 0.15
+                sl = lower_line - sl_buffer
+                
+                # Targets
+                tp1 = mid_line
+                dist_to_top = upper_line - mid_line
+                tp2 = mid_line + (dist_to_top * 0.90)
+                
                 return "LONG", entry, tp1, tp2, sl, int(curr['time'])
 
-        # 🔥 SHORT (بيع من القمة)
-        # السعر لمس الخط العلوي أو طلع فوقه أو اقترب منه جداً
-        if (high_price >= (upper_line - proximity_buffer)):
-            entry = close_price
-            
-            # Stop Loss: فوق الخط بمسافة أمان
-            sl_buffer = channel_width * 0.15
-            sl = upper_line + sl_buffer
-            
-            # Targets
-            tp1 = mid_line
-            
-            dist_to_bottom = mid_line - lower_line
-            tp2 = mid_line - (dist_to_bottom * 0.90)
-            
-            if (entry - tp1) > (sl - entry):
+        # 🔥 SHORT STRATEGY (بيع القمة في تريند هابط)
+        # الشرط 1: السعر العام تحت EMA 200 (تريند هابط)
+        # الشرط 2: السعر صعد ولمس الخط العلوي للقناة (فرصة بيع ذهبية)
+        if (close_price < ema200):
+            if (high_price >= (upper_line - proximity)):
+                entry = close_price
+                
+                # Stop Loss
+                sl_buffer = channel_width * 0.15
+                sl = upper_line + sl_buffer
+                
+                # Targets
+                tp1 = mid_line
+                dist_to_bottom = mid_line - lower_line
+                tp2 = mid_line - (dist_to_bottom * 0.90)
+                
                 return "SHORT", entry, tp1, tp2, sl, int(curr['time'])
 
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة والرسائل
+# 4. المعالجة
 # ==========================================
 sem = asyncio.Semaphore(5)
 
@@ -171,25 +166,25 @@ async def safe_check(symbol, app_state):
                 clean_name = symbol.split(':')[0]
                 leverage = get_leverage(clean_name)
                 
-                if side == "LONG": side_emoji = "🟢 <b>LONG (Channel Bottom)</b>"
-                else: side_emoji = "🔴 <b>SHORT (Channel Top)</b>"
+                if side == "LONG": side_emoji = "🟢 <b>LONG (Trend Dip)</b>"
+                else: side_emoji = "🔴 <b>SHORT (Trend Rally)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"📉 <code>{clean_name}</code>\n"
+                    f"🛡️ <code>{clean_name}</code>\n"
                     f"{side_emoji} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
                     f"──────────────\n"
-                    f"🎯 <b>TP 1 (Mid):</b> <code>{format_price(tp1)}</code>\n"
-                    f"🚀 <b>TP 2 (High):</b> <code>{format_price(tp2)}</code>\n"
+                    f"🎯 <b>TP 1:</b> <code>{format_price(tp1)}</code>\n"
+                    f"🚀 <b>TP 2:</b> <code>{format_price(tp2)}</code>\n"
                     f"──────────────\n"
                     f"🛑 <b>Stop Loss:</b> <code>{format_price(sl)}</code>\n"
                     f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n📉 LINREG 4H: {clean_name} {side}")
+                print(f"\n🛡️ TREND LINREG: {clean_name} {side}")
                 mid = await send_telegram_msg(msg)
                 
                 if mid: 
@@ -202,7 +197,7 @@ async def safe_check(symbol, app_state):
                     }
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (LinReg 100/2 - 4H)...")
+    print(f"🚀 Connecting to KuCoin Futures (Trend LinReg 4H)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -259,7 +254,6 @@ async def monitor_trades(app_state):
                             
                             await reply_telegram_msg(f"{icon} <b>Hit {label}</b>{extra_msg}", msg_id)
                             trade["hit"].append(target)
-                            
                             if target == "tp1": 
                                 app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
 
