@@ -18,10 +18,7 @@ TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
-# العملات المستقرة أو المحظورة
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
-
-# MEXC سيولتها عالية، سنضع 5 مليون كحد أدنى لضمان جودة الصفقات
 MIN_VOLUME_USDT = 5_000_000 
 
 app = FastAPI()
@@ -32,15 +29,14 @@ async def root():
     return """
     <html>
         <body style='background:#0b0e11;color:#00c076;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🏛️ The Fortress Bot (MEXC Edition)</h1>
-            <p>Source: MEXC Perpetual Futures</p>
-            <p>Status: High Performance Scanning...</p>
+            <h1>🏛️ The Fortress Bot (MEXC Fixed)</h1>
+            <p>Status: Tracking Active ✅</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 2. الاتصال بالتليجرام
+# 2. التليجرام والتنسيق
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -59,25 +55,23 @@ async def reply_telegram_msg(message, reply_to_msg_id):
         try: await client.post(url, json=payload)
         except: pass
 
+# 🔥 تعديل 1: دالة تنسيق الأسعار (كما في المنصة)
 def format_price(price):
     if price is None: return "0.00"
-    if price < 0.001: return f"{price:.8f}"
-    if price < 1.0: return f"{price:.6f}"
-    if price < 100: return f"{price:.4f}"
-    return f"{price:.2f}"
+    # تحويل الرقم لنص مع 8 خانات عشرية، ثم حذف الأصفار الزائدة من اليمين
+    return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. محرك التحليل (The Fortress Logic)
+# 3. المنطق (Fortress)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # جلب البيانات من MEXC
         ohlcv_1h_task = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=210)
         ohlcv_15m_task = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         
         bars_1h, bars_15m = await asyncio.gather(ohlcv_1h_task, ohlcv_15m_task)
         
-        # --- تحليل فريم الساعة (1H) ---
+        # --- 1H ---
         df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         df_1h['ema200'] = df_1h.ta.ema(length=200)
         trend_1h = df_1h.iloc[-1]['ema200']
@@ -85,15 +79,11 @@ async def get_signal_logic(symbol):
         
         if pd.isna(trend_1h): return None
 
-        # --- تحليل فريم الربع ساعة (15m) ---
+        # --- 15m ---
         df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         df_15m['ema50'] = df_15m.ta.ema(length=50)
-        
-        # Stoch RSI
         stoch = df_15m.ta.stochrsi(length=14, rsi_length=14, k=3, d=3)
         df_15m = pd.concat([df_15m, stoch], axis=1)
-        
-        # ADX (مؤشر القوة)
         adx_df = df_15m.ta.adx(length=14)
         df_15m = pd.concat([df_15m, adx_df], axis=1)
 
@@ -113,7 +103,7 @@ async def get_signal_logic(symbol):
         
         if pd.isna(ema50_15m) or pd.isna(k_now): return None
 
-        # --- Logs ---
+        # Logs
         if adx_now < 20:
             print(f"💤 {symbol}: Weak ADX ({adx_now:.1f})")
             return None 
@@ -125,7 +115,7 @@ async def get_signal_logic(symbol):
             print(f"🔀 {symbol}: Trend Conflict")
             return None
 
-        # 🔥 إشارة الشراء
+        # Signals
         if is_long:
             if (k_prev < d_prev) and (k_now > d_now) and (k_prev < 25):
                 entry = curr_price
@@ -134,9 +124,8 @@ async def get_signal_logic(symbol):
                 tp = entry + (risk * 1.5)
                 return "LONG", entry, tp, sl, int(df_15m.iloc[-1]['time'])
             else:
-                print(f"⏳ {symbol}: Waiting Buy Trigger...")
+                print(f"⏳ {symbol}: Buying Setup (Wait Trigger)")
 
-        # 🔥 إشارة البيع
         if is_short:
             if (k_prev > d_prev) and (k_now < d_now) and (k_prev > 75):
                 entry = curr_price
@@ -145,20 +134,19 @@ async def get_signal_logic(symbol):
                 tp = entry - (risk * 1.5)
                 return "SHORT", entry, tp, sl, int(df_15m.iloc[-1]['time'])
             else:
-                print(f"⏳ {symbol}: Waiting Sell Trigger...")
+                print(f"⏳ {symbol}: Selling Setup (Wait Trigger)")
 
         return None
-    except Exception as e:
-        print(f"⚠️ Error {symbol}: {str(e)}")
-        return None
+    except: return None
 
 # ==========================================
-# 4. معالجة الإشارات
+# 4. المعالجة
 # ==========================================
 sem = asyncio.Semaphore(5)
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
+    # وقت انتظار 30 دقيقة
     if time.time() - last_sig_time < (30 * 60): return
     if symbol in app_state.active_trades: return
 
@@ -177,7 +165,10 @@ async def safe_check(symbol, app_state):
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
                 side_text = "🟢 <b>BUY (MEXC)</b>" if side == "LONG" else "🔴 <b>SELL (MEXC)</b>"
+                
+                # حساب النسبة المئوية للربح والخسارة للعرض
                 sl_pct = abs(entry - sl) / entry * 100
+                tp_pct = abs(entry - tp) / entry * 100
                 
                 msg = (
                     f"🏛️ <code>{clean_name}</code>\n"
@@ -186,12 +177,13 @@ async def safe_check(symbol, app_state):
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
                     f"──────────────\n"
                     f"🏆 <b>TARGET:</b> <code>{format_price(tp)}</code>\n"
+                    f"<i>(Profit: {tp_pct:.2f}%)</i>\n"
                     f"──────────────\n"
                     f"🛑 <b>STOP:</b> <code>{format_price(sl)}</code>\n"
                     f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n🔥 >>> SIGNAL FOUND: {clean_name} {side} <<<\n")
+                print(f"\n🔥 SIGNAL: {clean_name} {side}")
                 msg_id = await send_telegram_msg(msg)
                 
                 if msg_id:
@@ -200,38 +192,58 @@ async def safe_check(symbol, app_state):
                     }
 
 # ==========================================
-# 5. المراقبة
+# 5. 🔥 نظام المراقبة المصحح (Tracking Fix)
 # ==========================================
 async def monitor_trades(app_state):
+    print("👀 Tracking System Started...")
     while True:
-        for sym in list(app_state.active_trades.keys()):
+        # نسخة من القائمة لتجنب أخطاء التعديل أثناء الدوران
+        current_trades = list(app_state.active_trades.keys())
+        
+        for sym in current_trades:
             trade = app_state.active_trades[sym]
             try:
+                # جلب السعر الحالي
                 ticker = await exchange.fetch_ticker(sym)
-                price = ticker['last']
+                current_price = ticker['last']
+                
+                # طباعة حالة المراقبة في الـ Logs (عشان تتأكد إنه شغال)
+                clean_name = sym.split(':')[0]
+                print(f"👀 {clean_name}: Now={format_price(current_price)} | TP={format_price(trade['tp'])} | SL={format_price(trade['sl'])}")
                 
                 hit_tp = False
                 hit_sl = False
                 
+                # منطق التحقق
                 if trade['side'] == "LONG":
-                    if price >= trade['tp']: hit_tp = True
-                    elif price <= trade['sl']: hit_sl = True
-                else:
-                    if price <= trade['tp']: hit_tp = True
-                    elif price >= trade['sl']: hit_sl = True
+                    if current_price >= trade['tp']: hit_tp = True
+                    elif current_price <= trade['sl']: hit_sl = True
+                else: # SHORT
+                    if current_price <= trade['tp']: hit_tp = True
+                    elif current_price >= trade['sl']: hit_sl = True
                 
+                # الإجراءات
                 if hit_tp:
-                    await reply_telegram_msg(f"✅ <b>TARGET HIT!</b>", trade['msg_id'])
+                    await reply_telegram_msg(f"✅ <b>TARGET HIT!</b>\n<i>Price: {format_price(current_price)}</i>", trade['msg_id'])
                     app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
                     del app_state.active_trades[sym]
+                    print(f"✅ {sym} Closed (Win)")
                     
                 elif hit_sl:
-                    await reply_telegram_msg(f"🛑 <b>STOP LOSS HIT</b>", trade['msg_id'])
+                    await reply_telegram_msg(f"🛑 <b>STOP LOSS HIT</b>\n<i>Price: {format_price(current_price)}</i>", trade['msg_id'])
                     app_state.stats["losses"] = app_state.stats.get("losses", 0) + 1
                     del app_state.active_trades[sym]
-            except: pass
+                    print(f"🛑 {sym} Closed (Loss)")
+                    
+            except Exception as e:
+                print(f"⚠️ Tracking Error {sym}: {e}")
+        
+        # فحص كل 5 ثواني (سريع بما يكفي لـ MEXC)
         await asyncio.sleep(5)
 
+# ==========================================
+# 6. التشغيل
+# ==========================================
 async def daily_report_task(app_state):
     while True:
         now = datetime.now()
@@ -245,22 +257,21 @@ async def daily_report_task(app_state):
         await asyncio.sleep(30)
 
 async def start_scanning(app_state):
-    print(f"🚀 System Online: MEXC Futures (High Performance)...")
+    print(f"🚀 System Online: MEXC Futures...")
     try:
         await exchange.load_markets()
         
         while True:
             try:
-                # سحب كل العقود التي تنتهي بـ USDT:USDT (رمز العقود في MEXC)
+                # تصفية أزواج USDT فقط من MEXC
                 all_symbols = [s for s in exchange.symbols if '/USDT:USDT' in s]
-                
                 tickers = await exchange.fetch_tickers(all_symbols)
                 new_symbols = []
                 for s, t in tickers.items():
                     if t['quoteVolume'] and t['quoteVolume'] >= MIN_VOLUME_USDT:
                         new_symbols.append(s)
                 app_state.symbols = new_symbols
-                print(f"\n🔄 Filter Updated: Found {len(new_symbols)} Active MEXC Pairs.")
+                print(f"\n🔄 Filter Updated: Found {len(new_symbols)} Active Pairs.")
             except: pass
             
             if not app_state.symbols: await asyncio.sleep(10); continue
@@ -269,6 +280,7 @@ async def start_scanning(app_state):
             tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
             await asyncio.gather(*tasks)
             print("--- END SCAN ---\n")
+            
             await asyncio.sleep(40)
 
     except Exception as e:
@@ -289,8 +301,9 @@ async def lifespan(app: FastAPI):
     app.state.active_trades = {}
     app.state.last_signal_time = {}
     app.state.stats = {"total": 0, "wins": 0, "losses": 0}
+    
     t1 = asyncio.create_task(start_scanning(app.state))
-    t2 = asyncio.create_task(monitor_trades(app.state))
+    t2 = asyncio.create_task(monitor_trades(app.state)) # هذا التاسك هو المسؤول عن التتبع
     t3 = asyncio.create_task(daily_report_task(app.state))
     t4 = asyncio.create_task(keep_alive_task())
     yield
@@ -298,12 +311,9 @@ async def lifespan(app: FastAPI):
 
 app.router.lifespan_context = lifespan
 
-# 🔥 الاتصال بـ MEXC Futures
 exchange = ccxt.mexc({
     'enableRateLimit': True,
-    'options': {
-        'defaultType': 'swap', # عقود المبادلة الدائمة
-    }
+    'options': { 'defaultType': 'swap' }
 })
 
 if __name__ == "__main__":
