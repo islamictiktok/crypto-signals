@@ -12,7 +12,7 @@ import httpx
 import numpy as np
 
 # ==========================================
-# 1. إعدادات النخبة
+# 1. إعدادات TITAN
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
@@ -28,9 +28,9 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#000;color:#ff0055;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🏛️ Fortress ELITE (MFI Fixed)</h1>
-            <p>Status: All Systems Nominal ✅</p>
+        <body style='background:#0f172a;color:#38bdf8;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🛡️ Fortress TITAN (Distance + BB Filter)</h1>
+            <p>Status: Surgical Precision Mode ✅</p>
         </body>
     </html>
     """
@@ -60,7 +60,7 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق المطور (MFI + Candle Color)
+# 3. منطق TITAN (الاستراتيجية المطورة)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -71,7 +71,6 @@ async def get_signal_logic(symbol):
         bars_1h, bars_15m = await asyncio.gather(ohlcv_1h_task, ohlcv_15m_task)
         
         # --- تحليل 1H ---
-        # 🔥 تصحيح: سمينا العمود volume بدلاً من vol
         df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         df_1h['ema200'] = df_1h.ta.ema(length=200)
         trend_1h = df_1h.iloc[-1]['ema200']
@@ -80,26 +79,32 @@ async def get_signal_logic(symbol):
         if pd.isna(trend_1h): return None
 
         # --- تحليل 15m ---
-        # 🔥 تصحيح: سمينا العمود volume بدلاً من vol ليعمل الـ MFI
         df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        
+        # المؤشرات الأساسية
         df_15m['ema50'] = df_15m.ta.ema(length=50)
         
-        # Stoch RSI
-        stoch = df_15m.ta.stochrsi(length=14, rsi_length=14, k=3, d=3)
-        df_15m = pd.concat([df_15m, stoch], axis=1)
+        # Bollinger Bands (لقياس المساحة)
+        bbands = df_15m.ta.bbands(length=20, std=2)
+        df_15m = pd.concat([df_15m, bbands], axis=1)
         
-        # ADX
+        # Stoch RSI & ADX & MFI
+        stoch = df_15m.ta.stochrsi(length=14, rsi_length=14, k=3, d=3)
         adx_df = df_15m.ta.adx(length=14)
-        df_15m = pd.concat([df_15m, adx_df], axis=1)
+        mfi_df = df_15m.ta.mfi(length=14) # سيعمل الآن لأن عمود volume موجود
+        
+        df_15m = pd.concat([df_15m, stoch, adx_df], axis=1)
+        df_15m['mfi'] = mfi_df
 
-        # 🔥 MFI (الآن سيعمل لأن عمود volume موجود)
-        df_15m['mfi'] = df_15m.ta.mfi(length=14)
-
-        # قراءة القيم
+        # تعريف الأعمدة
         k_col = [c for c in df_15m.columns if c.startswith('STOCHRSIk')][0]
         d_col = [c for c in df_15m.columns if c.startswith('STOCHRSId')][0]
         adx_col = [c for c in df_15m.columns if c.startswith('ADX_14')][0]
+        # أعمدة البولنجر
+        bb_upper_col = [c for c in df_15m.columns if c.startswith('BBU_')][0]
+        bb_lower_col = [c for c in df_15m.columns if c.startswith('BBL_')][0]
         
+        # القيم الحالية
         k_now = df_15m.iloc[-1][k_col]
         d_now = df_15m.iloc[-1][d_col]
         k_prev = df_15m.iloc[-2][k_col]
@@ -111,13 +116,22 @@ async def get_signal_logic(symbol):
         curr_close = df_15m.iloc[-1]['close']
         curr_open = df_15m.iloc[-1]['open']
         ema50_15m = df_15m.iloc[-1]['ema50']
+        bb_upper = df_15m.iloc[-1][bb_upper_col]
+        bb_lower = df_15m.iloc[-1][bb_lower_col]
         atr = df_15m.ta.atr(length=14).iloc[-1]
         
         if pd.isna(ema50_15m) or pd.isna(k_now) or pd.isna(mfi_now): return None
 
-        # --- الفلاتر ---
+        # --- الفلاتر الأساسية ---
         if adx_now < 20: 
             print(f"💤 {symbol}: Weak ADX ({adx_now:.1f})")
+            return None
+
+        # --- 🔥 فلتر المسافة (The Rubber Band) ---
+        # نحسب النسبة المئوية لبعد السعر عن المتوسط
+        dist_from_ema = abs(curr_close - ema50_15m) / ema50_15m * 100
+        if dist_from_ema > 2.5: # إذا ابتعد أكثر من 2.5% نعتبره متضخم
+            print(f"⚠️ {symbol}: Skipped (Overextended by {dist_from_ema:.2f}%)")
             return None
 
         is_long_trend = (price_1h > trend_1h) and (curr_close > ema50_15m)
@@ -129,39 +143,48 @@ async def get_signal_logic(symbol):
 
         # 🔥 LONG STRATEGY
         if is_long_trend:
+            # 1. Stoch Trigger
             stoch_signal = (k_prev < d_prev) and (k_now > d_now) and (k_prev < 30)
-            mfi_signal = (mfi_now < 80)
+            # 2. MFI Healthy (Not extreme)
+            mfi_signal = (mfi_now < 85)
+            # 3. Candle Color
             candle_signal = (curr_close > curr_open)
+            # 4. 🔥 Bollinger Room: هل يوجد مسافة للحد العلوي؟
+            # نريد أن يكون السعر تحت الحد العلوي بمسافة تسمح بالربح
+            bb_room = (curr_close < bb_upper) 
 
-            if stoch_signal and mfi_signal and candle_signal:
+            if stoch_signal and mfi_signal and candle_signal and bb_room:
                 entry = curr_close
-                sl = entry - (atr * 1.2)
+                sl = entry - (atr * 1.5) # زدنا الستوب قليلاً للأمان
                 risk = entry - sl
                 tp = entry + (risk * 1.5)
                 return "LONG", entry, tp, sl, int(df_15m.iloc[-1]['time'])
             else:
-                # طباعة سبب الانتظار
-                print(f"⏳ {symbol}: Long Wait.. Stoch:{stoch_signal} MFI:{mfi_signal} GreenCandle:{candle_signal}")
+                print(f"⏳ {symbol}: Long Wait.. Stoch:{stoch_signal} BB_Room:{bb_room}")
 
         # 🔥 SHORT STRATEGY
         if is_short_trend:
+            # 1. Stoch Trigger
             stoch_signal = (k_prev > d_prev) and (k_now < d_now) and (k_prev > 70)
-            mfi_signal = (mfi_now > 20)
+            # 2. MFI Healthy
+            mfi_signal = (mfi_now > 15)
+            # 3. Candle Color
             candle_signal = (curr_close < curr_open)
+            # 4. 🔥 Bollinger Room: هل السعر فوق الحد السفلي؟
+            bb_room = (curr_close > bb_lower)
 
-            if stoch_signal and mfi_signal and candle_signal:
+            if stoch_signal and mfi_signal and candle_signal and bb_room:
                 entry = curr_close
-                sl = entry + (atr * 1.2)
+                sl = entry + (atr * 1.5)
                 risk = sl - entry
                 tp = entry - (risk * 1.5)
                 return "SHORT", entry, tp, sl, int(df_15m.iloc[-1]['time'])
             else:
-                print(f"⏳ {symbol}: Short Wait.. Stoch:{stoch_signal} MFI:{mfi_signal} RedCandle:{candle_signal}")
+                print(f"⏳ {symbol}: Short Wait.. Stoch:{stoch_signal} BB_Room:{bb_room}")
 
         return None
     except Exception as e:
-        # هنا سيطبع الخطأ إن وجد، لكن الآن اختفى خطأ volume
-        # print(f"⚠️ Error {symbol}: {e}") 
+        # print(f"⚠️ Error {symbol}: {e}")
         return None
 
 # ==========================================
@@ -188,13 +211,13 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (Elite)</b>" if side == "LONG" else "🔴 <b>SELL (Elite)</b>"
+                side_text = "🟢 <b>BUY (TITAN)</b>" if side == "LONG" else "🔴 <b>SELL (TITAN)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 tp_pct = abs(entry - tp) / entry * 100
                 
                 msg = (
-                    f"🏛️ <code>{clean_name}</code>\n"
+                    f"🛡️ <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -204,10 +227,10 @@ async def safe_check(symbol, app_state):
                     f"──────────────\n"
                     f"🛑 <b>STOP:</b> <code>{format_price(sl)}</code>\n"
                     f"<i>(Risk: {sl_pct:.2f}%)</i>\n"
-                    f"<i>(MFI + Candle Confirmed ✅)</i>"
+                    f"<i>(BB Room + Safe Entry ✅)</i>"
                 )
                 
-                print(f"\n💎 ELITE SIGNAL: {clean_name} {side}")
+                print(f"\n🛡️ TITAN SIGNAL: {clean_name} {side}")
                 msg_id = await send_telegram_msg(msg)
                 
                 if msg_id:
@@ -219,7 +242,7 @@ async def safe_check(symbol, app_state):
 # 5. المراقبة
 # ==========================================
 async def monitor_trades(app_state):
-    print("👀 Elite Tracking Started...")
+    print("👀 TITAN Tracking Started...")
     while True:
         current_trades = list(app_state.active_trades.keys())
         for sym in current_trades:
@@ -269,7 +292,7 @@ async def daily_report_task(app_state):
         await asyncio.sleep(30)
 
 async def start_scanning(app_state):
-    print(f"🚀 System Online: MEXC Elite (MFI+Candle)...")
+    print(f"🚀 System Online: MEXC TITAN (Distance+BB)...")
     try:
         await exchange.load_markets()
         while True:
@@ -281,7 +304,7 @@ async def start_scanning(app_state):
                     if t['quoteVolume'] and t['quoteVolume'] >= MIN_VOLUME_USDT:
                         new_symbols.append(s)
                 app_state.symbols = new_symbols
-                print(f"\n🔄 Filter: {len(new_symbols)} Elite Pairs.")
+                print(f"\n🔄 Filter: {len(new_symbols)} Titan Pairs.")
             except: pass
             
             if not app_state.symbols: await asyncio.sleep(10); continue
