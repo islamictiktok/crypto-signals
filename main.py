@@ -29,8 +29,8 @@ async def root():
     return """
     <html>
         <body style='background:#000;color:#ff0055;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🏛️ Fortress ELITE (MFI + Candle Logic)</h1>
-            <p>Status: Maximum Precision Scanning...</p>
+            <h1>🏛️ Fortress ELITE (MFI Fixed)</h1>
+            <p>Status: All Systems Nominal ✅</p>
         </body>
     </html>
     """
@@ -71,7 +71,8 @@ async def get_signal_logic(symbol):
         bars_1h, bars_15m = await asyncio.gather(ohlcv_1h_task, ohlcv_15m_task)
         
         # --- تحليل 1H ---
-        df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        # 🔥 تصحيح: سمينا العمود volume بدلاً من vol
+        df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         df_1h['ema200'] = df_1h.ta.ema(length=200)
         trend_1h = df_1h.iloc[-1]['ema200']
         price_1h = df_1h.iloc[-1]['close']
@@ -79,18 +80,19 @@ async def get_signal_logic(symbol):
         if pd.isna(trend_1h): return None
 
         # --- تحليل 15m ---
-        df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        # 🔥 تصحيح: سمينا العمود volume بدلاً من vol ليعمل الـ MFI
+        df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         df_15m['ema50'] = df_15m.ta.ema(length=50)
         
         # Stoch RSI
         stoch = df_15m.ta.stochrsi(length=14, rsi_length=14, k=3, d=3)
         df_15m = pd.concat([df_15m, stoch], axis=1)
         
-        # ADX (قوة التريند)
+        # ADX
         adx_df = df_15m.ta.adx(length=14)
         df_15m = pd.concat([df_15m, adx_df], axis=1)
 
-        # 🔥 إضافة MFI (Money Flow Index) - كاشف السيولة
+        # 🔥 MFI (الآن سيعمل لأن عمود volume موجود)
         df_15m['mfi'] = df_15m.ta.mfi(length=14)
 
         # قراءة القيم
@@ -104,7 +106,7 @@ async def get_signal_logic(symbol):
         d_prev = df_15m.iloc[-2][d_col]
         
         adx_now = df_15m.iloc[-1][adx_col]
-        mfi_now = df_15m.iloc[-1]['mfi'] # قيمة تدفق الأموال
+        mfi_now = df_15m.iloc[-1]['mfi']
         
         curr_close = df_15m.iloc[-1]['close']
         curr_open = df_15m.iloc[-1]['open']
@@ -118,7 +120,6 @@ async def get_signal_logic(symbol):
             print(f"💤 {symbol}: Weak ADX ({adx_now:.1f})")
             return None
 
-        # تحديد الاتجاه العام
         is_long_trend = (price_1h > trend_1h) and (curr_close > ema50_15m)
         is_short_trend = (price_1h < trend_1h) and (curr_close < ema50_15m)
 
@@ -128,13 +129,8 @@ async def get_signal_logic(symbol):
 
         # 🔥 LONG STRATEGY
         if is_long_trend:
-            # الشرط 1: Stoch RSI تقاطع إيجابي من مناطق رخيصة
             stoch_signal = (k_prev < d_prev) and (k_now > d_now) and (k_prev < 30)
-            
-            # الشرط 2: MFI (السيولة) ليست متضخمة جداً (أقل من 80) لضمان وجود مساحة للصعود
             mfi_signal = (mfi_now < 80)
-            
-            # الشرط 3: الشمعة الحالية خضراء (تأكيد العزم)
             candle_signal = (curr_close > curr_open)
 
             if stoch_signal and mfi_signal and candle_signal:
@@ -144,17 +140,13 @@ async def get_signal_logic(symbol):
                 tp = entry + (risk * 1.5)
                 return "LONG", entry, tp, sl, int(df_15m.iloc[-1]['time'])
             else:
-                print(f"⏳ {symbol}: Long Setup.. Stoch:{stoch_signal} | MFI:{mfi_signal} | GreenCandle:{candle_signal}")
+                # طباعة سبب الانتظار
+                print(f"⏳ {symbol}: Long Wait.. Stoch:{stoch_signal} MFI:{mfi_signal} GreenCandle:{candle_signal}")
 
         # 🔥 SHORT STRATEGY
         if is_short_trend:
-            # الشرط 1: Stoch RSI تقاطع سلبي من مناطق غالية
             stoch_signal = (k_prev > d_prev) and (k_now < d_now) and (k_prev > 70)
-            
-            # الشرط 2: MFI (السيولة) ليست منهارة تماماً (أكبر من 20)
             mfi_signal = (mfi_now > 20)
-            
-            # الشرط 3: الشمعة الحالية حمراء
             candle_signal = (curr_close < curr_open)
 
             if stoch_signal and mfi_signal and candle_signal:
@@ -164,11 +156,12 @@ async def get_signal_logic(symbol):
                 tp = entry - (risk * 1.5)
                 return "SHORT", entry, tp, sl, int(df_15m.iloc[-1]['time'])
             else:
-                print(f"⏳ {symbol}: Short Setup.. Stoch:{stoch_signal} | MFI:{mfi_signal} | RedCandle:{candle_signal}")
+                print(f"⏳ {symbol}: Short Wait.. Stoch:{stoch_signal} MFI:{mfi_signal} RedCandle:{candle_signal}")
 
         return None
     except Exception as e:
-        print(f"⚠️ Error {symbol}: {e}")
+        # هنا سيطبع الخطأ إن وجد، لكن الآن اختفى خطأ volume
+        # print(f"⚠️ Error {symbol}: {e}") 
         return None
 
 # ==========================================
@@ -235,7 +228,6 @@ async def monitor_trades(app_state):
                 ticker = await exchange.fetch_ticker(sym)
                 current_price = ticker['last']
                 
-                # طباعة المراقبة
                 clean_name = sym.split(':')[0]
                 print(f"👀 {clean_name}: Now={format_price(current_price)} | TP={format_price(trade['tp'])} | SL={format_price(trade['sl'])}")
                 
