@@ -19,7 +19,9 @@ CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
-MIN_VOLUME_USDT = 20_000_000 
+
+# 🔥 التعديل: خفضنا السيولة لـ 10 مليون لزيادة الفرص مع الحفاظ على الأمان
+MIN_VOLUME_USDT = 10_000_000 
 
 app = FastAPI()
 
@@ -29,9 +31,9 @@ async def root():
     return """
     <html>
         <body style='background:#050505;color:#ffcc00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🏛️ The Fortress Bot (MTF)</h1>
+            <h1>🏛️ The Fortress Bot (10M+)</h1>
             <p>Strategy: 1H Trend + 15m Entry + ADX Power</p>
-            <p>Status: Maximum Security Mode</p>
+            <p>Status: Optimized for Opportunities</p>
         </body>
     </html>
     """
@@ -61,7 +63,7 @@ def format_price(price):
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # جلب البيانات للفريمين بالتوازي (لسرعة التنفيذ)
+        # جلب البيانات للفريمين بالتوازي
         ohlcv_1h_task = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=210)
         ohlcv_15m_task = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         
@@ -87,7 +89,6 @@ async def get_signal_logic(symbol):
         adx_df = df_15m.ta.adx(length=14)
         df_15m = pd.concat([df_15m, adx_df], axis=1)
 
-        # تحديد الأعمدة
         k_col = [c for c in df_15m.columns if c.startswith('STOCHRSIk')][0]
         d_col = [c for c in df_15m.columns if c.startswith('STOCHRSId')][0]
         adx_col = [c for c in df_15m.columns if c.startswith('ADX_14')][0]
@@ -108,9 +109,6 @@ async def get_signal_logic(symbol):
         if adx_now < 25: return None 
 
         # 🔥 LONG STRATEGY
-        # 1. (1H Condition): السعر فوق EMA 200 على الساعة
-        # 2. (15m Condition): السعر فوق EMA 50 على الربع ساعة
-        # 3. (Trigger): تقاطع Stoch للأعلى
         if (price_1h > trend_1h) and (curr_price > ema50_15m):
             if (k_prev < d_prev) and (k_now > d_now) and (k_prev < 20):
                 entry = curr_price
@@ -120,9 +118,6 @@ async def get_signal_logic(symbol):
                 return "LONG", entry, tp, sl, int(df_15m.iloc[-1]['time'])
 
         # 🔥 SHORT STRATEGY
-        # 1. (1H Condition): السعر تحت EMA 200 على الساعة
-        # 2. (15m Condition): السعر تحت EMA 50 على الربع ساعة
-        # 3. (Trigger): تقاطع Stoch للأسفل
         if (price_1h < trend_1h) and (curr_price < ema50_15m):
             if (k_prev > d_prev) and (k_now < d_now) and (k_prev > 80):
                 entry = curr_price
@@ -190,7 +185,7 @@ async def safe_check(symbol, app_state):
                 app_state.active_trades[symbol] = {"status": "SENT"}
 
 async def start_scanning(app_state):
-    print(f"🚀 Connecting to KuCoin Futures (The Fortress MTF)...")
+    print(f"🚀 Connecting to KuCoin Futures (The Fortress 10M+)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT' in s and s.split('/')[0] not in BLACKLIST]
@@ -204,10 +199,11 @@ async def start_scanning(app_state):
                     tickers = await exchange.fetch_tickers(all_symbols)
                     new_filtered_symbols = []
                     for symbol, ticker in tickers.items():
+                        # 🔥 الفلتر الجديد: 10 مليون دولار
                         if ticker['quoteVolume'] is not None and ticker['quoteVolume'] >= MIN_VOLUME_USDT:
                             new_filtered_symbols.append(symbol)
                     app_state.symbols = new_filtered_symbols
-                    print(f"\n✅ Updated: {len(new_filtered_symbols)} Fortress Pairs.")
+                    print(f"\n✅ Updated: {len(new_filtered_symbols)} Pairs (10M+ Vol).")
                     last_refresh_time = time.time()
                 except: pass
             
