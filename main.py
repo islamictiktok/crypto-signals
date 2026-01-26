@@ -20,8 +20,8 @@ RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# 🔥 السيولة 15 مليون (حسب طلبك الأخير لضمان الجودة)
-MIN_VOLUME_USDT = 15_000_000 
+# 🔥 تم التعديل: السيولة 10 مليون (توازن مثالي بين الفرص والأمان)
+MIN_VOLUME_USDT = 10_000_000 
 
 app = FastAPI()
 
@@ -31,9 +31,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#58a6ff;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (Stoch RSI Strategy)</h1>
+            <h1>🛡️ Fortress Bot (10M+ Edition)</h1>
             <p>Exchange: MEXC Futures</p>
-            <p>Liquidity: 15M+ Only</p>
+            <p>Liquidity: 10M+ USDT</p>
         </body>
     </html>
     """
@@ -58,13 +58,13 @@ async def reply_telegram_msg(message, reply_to_msg_id):
         try: await client.post(url, json=payload)
         except: pass
 
-# 🔥 تنسيق السعر بدقة MEXC
+# تنسيق السعر بدقة منصة MEXC
 def format_price(price):
     if price is None: return "0"
     return f"{price:.10f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Stoch RSI + ADX)
+# 3. المنطق (Stoch RSI Strategy)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -94,12 +94,10 @@ async def get_signal_logic(symbol):
         adx_df = df_15m.ta.adx(length=14)
         df_15m = pd.concat([df_15m, adx_df], axis=1)
 
-        # تحديد أسماء الأعمدة الصحيحة
         k_col = [c for c in df_15m.columns if c.startswith('STOCHRSIk')][0]
         d_col = [c for c in df_15m.columns if c.startswith('STOCHRSId')][0]
         adx_col = [c for c in df_15m.columns if c.startswith('ADX_14')][0]
         
-        # القيم الحالية والسابقة
         k_now = df_15m.iloc[-1][k_col]
         d_now = df_15m.iloc[-1][d_col]
         k_prev = df_15m.iloc[-2][k_col]
@@ -124,14 +122,13 @@ async def get_signal_logic(symbol):
         is_short_setup = (price_1h < trend_1h) and (curr_price < ema50_15m)
 
         if not is_long_setup and not is_short_setup:
-            # print(f"🔀 {symbol}: Trend Conflict")
+            # صامت لعدم إزعاج اللوج
             return None
 
-        # 3. إشارة الدخول (Stoch RSI Crossover)
+        # 3. إشارة الدخول (Stoch RSI)
         
         # 🔥 LONG Check
         if is_long_setup:
-            # تقاطع للأعلى من تحت مستوى 25
             if (k_prev < d_prev) and (k_now > d_now) and (k_prev < 25):
                 entry = curr_price
                 sl = entry - (atr * 1.2)
@@ -141,7 +138,6 @@ async def get_signal_logic(symbol):
 
         # 🔥 SHORT Check
         if is_short_setup:
-            # تقاطع للأسفل من فوق مستوى 75
             if (k_prev > d_prev) and (k_now < d_now) and (k_prev > 75):
                 entry = curr_price
                 sl = entry + (atr * 1.2)
@@ -151,7 +147,6 @@ async def get_signal_logic(symbol):
 
         return None
     except Exception as e:
-        # print(f"⚠️ Error {symbol}: {str(e)}")
         return None
 
 # ==========================================
@@ -179,7 +174,7 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (Stoch RSI)</b>" if side == "LONG" else "🔴 <b>SELL (Stoch RSI)</b>"
+                side_text = "🟢 <b>BUY (Stoch)</b>" if side == "LONG" else "🔴 <b>SELL (Stoch)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
@@ -270,7 +265,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: MEXC Stoch RSI Strategy...")
+    print(f"🚀 System Online: MEXC Stoch RSI (10M+)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT:USDT' in s]
@@ -284,7 +279,7 @@ async def start_scanning(app_state):
                         new_symbols.append(s)
                 app_state.symbols = new_symbols
                 
-                print(f"\n🔄 Filter Updated: Found {len(new_symbols)} coins (15M+).")
+                print(f"\n🔄 Filter Updated: Found {len(new_symbols)} coins (10M+).")
                 
             except: pass
             
@@ -327,7 +322,6 @@ async def lifespan(app: FastAPI):
 
 app.router.lifespan_context = lifespan
 
-# 🔥 تم ضبط المنصة على MEXC
 exchange = ccxt.mexc({
     'enableRateLimit': True,
     'options': { 'defaultType': 'swap' }
