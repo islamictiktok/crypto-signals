@@ -28,21 +28,21 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#0d1117;color:#58a6ff;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (3-Decimal Fix)</h1>
-            <p>Exchange: MEXC Futures</p>
-            <p>Format: Medium coins = 3 decimals</p>
+        <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🚀 Fortress Bot (TURBO MODE)</h1>
+            <p>Logs: Full Detail (Verbose)</p>
+            <p>Speed: High Concurrency</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 2. دوال الاتصال وتنسيق السعر (المعدل)
+# 2. دوال الاتصال وتنسيق السعر
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             res = await client.post(url, json=payload)
             if res.status_code == 200: return res.json()['result']['message_id']
@@ -52,31 +52,20 @@ async def send_telegram_msg(message):
 async def reply_telegram_msg(message, reply_to_msg_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML", "reply_to_message_id": reply_to_msg_id}
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=10.0) as client:
         try: await client.post(url, json=payload)
         except: pass
 
-# 🔥 دالة التنسيق الجديدة (3 أرقام للمتوسطة)
+# تنسيق السعر (3 أرقام للمتوسطة)
 def format_price(price):
     if price is None: return "0"
-    
-    # 1. الكبار (فوق 1000 دولار) -> خانتين
-    if price >= 1000: 
-        return f"{price:.2f}"
-    
-    # 2. المتوسطة (من 1 دولار إلى 1000) -> 3 خانات فقط (طلبك)
-    if price >= 1: 
-        return f"{price:.3f}"
-    
-    # 3. الصغيرة (بين 1 سنت و 1 دولار) -> 5 خانات للدقة
-    if price >= 0.01:
-        return f"{price:.5f}"
-        
-    # 4. الميم كوين (أقل من سنت) -> 8 خانات
+    if price >= 1000: return f"{price:.2f}"
+    if price >= 1: return f"{price:.3f}"
+    if price >= 0.01: return f"{price:.5f}"
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Stoch RSI Strategy)
+# 3. المنطق (Detailed Logs + Stoch RSI)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -120,18 +109,22 @@ async def get_signal_logic(symbol):
         
         if pd.isna(ema50_15m) or pd.isna(k_now): return None
 
-        # --- الفلاتر ---
+        # --- التفاصيل والطباعة (Verbose) ---
+
+        # 1. فحص ADX
         if adx_now < 20:
             print(f"💤 {symbol}: Weak ADX ({adx_now:.1f})")
             return None 
 
+        # 2. فحص الاتجاه
         is_long_setup = (price_1h > trend_1h) and (curr_price > ema50_15m)
         is_short_setup = (price_1h < trend_1h) and (curr_price < ema50_15m)
 
         if not is_long_setup and not is_short_setup:
+            print(f"🔀 {symbol}: Trend Conflict (1H vs 15m)")
             return None
 
-        # --- الإشارات ---
+        # 3. فحص الإشارة
         
         # 🔥 LONG
         if is_long_setup:
@@ -141,6 +134,8 @@ async def get_signal_logic(symbol):
                 risk = entry - sl
                 tp = entry + (risk * 1.5)
                 return "LONG", entry, tp, sl, int(df_15m.iloc[-1]['time'])
+            else:
+                print(f"⏳ {symbol}: Uptrend Valid (Waiting Stoch...)")
 
         # 🔥 SHORT
         if is_short_setup:
@@ -150,15 +145,19 @@ async def get_signal_logic(symbol):
                 risk = sl - entry
                 tp = entry - (risk * 1.5)
                 return "SHORT", entry, tp, sl, int(df_15m.iloc[-1]['time'])
+            else:
+                print(f"⏳ {symbol}: Downtrend Valid (Waiting Stoch...)")
 
         return None
     except Exception as e:
+        # print(f"⚠️ Error {symbol}: {str(e)}")
         return None
 
 # ==========================================
-# 4. المعالجة
+# 4. المعالجة السريعة
 # ==========================================
-sem = asyncio.Semaphore(5)
+# 🔥 تسريع: فحص 20 عملة في نفس الوقت بدلاً من 5
+sem = asyncio.Semaphore(20)
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
@@ -184,7 +183,7 @@ async def safe_check(symbol, app_state):
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"🛡️ <code>{clean_name}</code>\n"
+                    f"🚀 <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -207,7 +206,7 @@ async def safe_check(symbol, app_state):
 # 5. المراقبة
 # ==========================================
 async def monitor_trades(app_state):
-    print("👀 Monitoring Active Trades...")
+    print("👀 Monitoring Active Trades (Turbo)...")
     while True:
         current_symbols = list(app_state.active_trades.keys())
         for sym in current_symbols:
@@ -244,7 +243,8 @@ async def monitor_trades(app_state):
                     print(f"🛑 {sym} Loss")
                     
             except: pass
-        await asyncio.sleep(5)
+        # 🔥 تسريع المراقبة لثانيتين
+        await asyncio.sleep(2)
 
 async def daily_report_task(app_state):
     while True:
@@ -270,7 +270,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: MEXC 3-Decimal Fixed...")
+    print(f"🚀 System Online: TURBO MODE (Detailed Logs)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT:USDT' in s]
@@ -291,12 +291,13 @@ async def start_scanning(app_state):
             if not app_state.symbols:
                 await asyncio.sleep(10); continue
 
-            print("--- SCANNING ---")
+            print("--- START SCAN ---")
             tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
             await asyncio.gather(*tasks)
-            print("--- DONE ---\n")
+            print("--- END SCAN ---\n")
             
-            await asyncio.sleep(40) 
+            # 🔥 تسريع الفحص: راحة 10 ثواني فقط بين الدورات
+            await asyncio.sleep(10) 
 
     except Exception as e:
         print(f"❌ Critical Error: {e}")
