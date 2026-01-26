@@ -19,8 +19,6 @@ CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
-
-# 🔥 تم التعديل: السيولة 10 مليون (توازن مثالي بين الفرص والأمان)
 MIN_VOLUME_USDT = 10_000_000 
 
 app = FastAPI()
@@ -31,15 +29,15 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#58a6ff;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (10M+ Edition)</h1>
+            <h1>🛡️ Fortress Bot (3-Decimal Fix)</h1>
             <p>Exchange: MEXC Futures</p>
-            <p>Liquidity: 10M+ USDT</p>
+            <p>Format: Medium coins = 3 decimals</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 2. دوال الاتصال وتنسيق السعر
+# 2. دوال الاتصال وتنسيق السعر (المعدل)
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -58,23 +56,37 @@ async def reply_telegram_msg(message, reply_to_msg_id):
         try: await client.post(url, json=payload)
         except: pass
 
-# تنسيق السعر بدقة منصة MEXC
+# 🔥 دالة التنسيق الجديدة (3 أرقام للمتوسطة)
 def format_price(price):
     if price is None: return "0"
-    return f"{price:.10f}".rstrip('0').rstrip('.')
+    
+    # 1. الكبار (فوق 1000 دولار) -> خانتين
+    if price >= 1000: 
+        return f"{price:.2f}"
+    
+    # 2. المتوسطة (من 1 دولار إلى 1000) -> 3 خانات فقط (طلبك)
+    if price >= 1: 
+        return f"{price:.3f}"
+    
+    # 3. الصغيرة (بين 1 سنت و 1 دولار) -> 5 خانات للدقة
+    if price >= 0.01:
+        return f"{price:.5f}"
+        
+    # 4. الميم كوين (أقل من سنت) -> 8 خانات
+    return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
 # 3. المنطق (Stoch RSI Strategy)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # جلب البيانات (1H + 15m)
+        # جلب البيانات
         ohlcv_1h_task = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=210)
         ohlcv_15m_task = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         
         bars_1h, bars_15m = await asyncio.gather(ohlcv_1h_task, ohlcv_15m_task)
         
-        # --- 1H Analysis (Trend) ---
+        # --- 1H Analysis ---
         df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         df_1h['ema200'] = df_1h.ta.ema(length=200)
         trend_1h = df_1h.iloc[-1]['ema200']
@@ -82,15 +94,13 @@ async def get_signal_logic(symbol):
         
         if pd.isna(trend_1h): return None
 
-        # --- 15m Analysis (Entry) ---
+        # --- 15m Analysis ---
         df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         df_15m['ema50'] = df_15m.ta.ema(length=50)
         
-        # Stoch RSI
         stoch = df_15m.ta.stochrsi(length=14, rsi_length=14, k=3, d=3)
         df_15m = pd.concat([df_15m, stoch], axis=1)
         
-        # ADX
         adx_df = df_15m.ta.adx(length=14)
         df_15m = pd.concat([df_15m, adx_df], axis=1)
 
@@ -110,24 +120,20 @@ async def get_signal_logic(symbol):
         
         if pd.isna(ema50_15m) or pd.isna(k_now): return None
 
-        # --- الفلاتر والشروط ---
-
-        # 1. فحص قوة الـ ADX
+        # --- الفلاتر ---
         if adx_now < 20:
             print(f"💤 {symbol}: Weak ADX ({adx_now:.1f})")
             return None 
 
-        # 2. فحص توافق التريند
         is_long_setup = (price_1h > trend_1h) and (curr_price > ema50_15m)
         is_short_setup = (price_1h < trend_1h) and (curr_price < ema50_15m)
 
         if not is_long_setup and not is_short_setup:
-            # صامت لعدم إزعاج اللوج
             return None
 
-        # 3. إشارة الدخول (Stoch RSI)
+        # --- الإشارات ---
         
-        # 🔥 LONG Check
+        # 🔥 LONG
         if is_long_setup:
             if (k_prev < d_prev) and (k_now > d_now) and (k_prev < 25):
                 entry = curr_price
@@ -136,7 +142,7 @@ async def get_signal_logic(symbol):
                 tp = entry + (risk * 1.5)
                 return "LONG", entry, tp, sl, int(df_15m.iloc[-1]['time'])
 
-        # 🔥 SHORT Check
+        # 🔥 SHORT
         if is_short_setup:
             if (k_prev > d_prev) and (k_now < d_now) and (k_prev > 75):
                 entry = curr_price
@@ -150,13 +156,12 @@ async def get_signal_logic(symbol):
         return None
 
 # ==========================================
-# 4. إدارة الصفقات
+# 4. المعالجة
 # ==========================================
 sem = asyncio.Semaphore(5)
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    # فاصل زمني 30 دقيقة
     if time.time() - last_sig_time < (30 * 60): return
     if symbol in app_state.active_trades: return
 
@@ -199,7 +204,7 @@ async def safe_check(symbol, app_state):
                     }
 
 # ==========================================
-# 5. المراقبة والتقارير
+# 5. المراقبة
 # ==========================================
 async def monitor_trades(app_state):
     print("👀 Monitoring Active Trades...")
@@ -265,7 +270,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: MEXC Stoch RSI (10M+)...")
+    print(f"🚀 System Online: MEXC 3-Decimal Fixed...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT:USDT' in s]
