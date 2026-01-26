@@ -12,7 +12,7 @@ import httpx
 import numpy as np
 
 # ==========================================
-# 1. إعدادات TITAN ULTIMATE
+# 1. إعدادات MATRIX
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
@@ -28,10 +28,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#000;color:#00ff88;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🌍 Fortress TITAN ULTIMATE</h1>
-            <p>Analysis: 1D + 4H + 1H + 15m</p>
-            <p>Status: Seeking Perfection...</p>
+        <body style='background:#000;color:#00eaff;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🧬 THE MATRIX BOT</h1>
+            <p>1D (Safety) | 4H (Momentum) | 1H (Value) | 15m (Trigger)</p>
+            <p>Status: Calculating Matrix...</p>
         </body>
     </html>
     """
@@ -61,150 +61,131 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق الرباعي (4 Timeframes)
+# 3. منطق المصفوفة (The Matrix Logic)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # جلب البيانات لـ 4 فريمات بالتوازي
-        task_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=210)
-        task_4h = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=210)
-        task_1h = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=210)
+        # جلب البيانات لـ 4 فريمات
+        task_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=100)
+        task_4h = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=100)
+        task_1h = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
         task_15m = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         
         bars_1d, bars_4h, bars_1h, bars_15m = await asyncio.gather(task_1d, task_4h, task_1h, task_15m)
         
-        # --- 1. تحليل الفريم اليومي (1D) ---
+        # -------------------------------------------
+        # 1. تحليل 1D (الحارس: الاتجاه + الأمان)
+        # -------------------------------------------
         df_1d = pd.DataFrame(bars_1d, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         df_1d['ema200'] = df_1d.ta.ema(length=200)
-        trend_1d = df_1d.iloc[-1]['ema200']
+        df_1d['rsi'] = df_1d.ta.rsi(length=14)
+        
+        # استبدال EMA200 بـ EMA50 للعملات الجديدة
+        trend_1d_val = df_1d.iloc[-1]['ema200'] if not pd.isna(df_1d.iloc[-1]['ema200']) else df_1d.ta.ema(length=50).iloc[-1]
+        rsi_1d = df_1d.iloc[-1]['rsi']
         price_1d = df_1d.iloc[-1]['close']
-        
-        if pd.isna(trend_1d): return None # العملة جديدة جداً ليس لها 200 يوم
 
-        # --- 2. تحليل فريم 4 ساعات (4H) ---
+        if pd.isna(trend_1d_val): return None
+
+        # الشروط:
+        # 1. فوق EMA (تريند صاعد)
+        # 2. RSI ليس متضخماً (تحت 75) لحمايتنا من قمة السوق
+        is_safe_bull_1d = (price_1d > trend_1d_val) and (rsi_1d < 75)
+        is_safe_bear_1d = (price_1d < trend_1d_val) and (rsi_1d > 25)
+
+        if not is_safe_bull_1d and not is_safe_bear_1d: return None
+
+        # -------------------------------------------
+        # 2. تحليل 4H (المحرك: الزخم MACD)
+        # -------------------------------------------
         df_4h = pd.DataFrame(bars_4h, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-        df_4h['ema200'] = df_4h.ta.ema(length=200)
-        trend_4h = df_4h.iloc[-1]['ema200']
-        price_4h = df_4h.iloc[-1]['close']
+        # حساب MACD
+        macd = df_4h.ta.macd(fast=12, slow=26, signal=9)
+        df_4h = pd.concat([df_4h, macd], axis=1)
         
-        if pd.isna(trend_4h): return None
+        # أعمدة MACD (Histogram هو الأهم للزخم)
+        hist_col = [c for c in df_4h.columns if c.startswith('MACDh')][0]
+        hist_now = df_4h.iloc[-1][hist_col]
+        hist_prev = df_4h.iloc[-2][hist_col]
+        
+        # الشروط: الزخم يتزايد
+        is_momentum_bull_4h = (hist_now > 0) and (hist_now > hist_prev)
+        is_momentum_bear_4h = (hist_now < 0) and (hist_now < hist_prev)
 
-        # --- 3. تحليل فريم الساعة (1H) ---
+        if is_safe_bull_1d and not is_momentum_bull_4h: return None
+        if is_safe_bear_1d and not is_momentum_bear_4h: return None
+
+        # -------------------------------------------
+        # 3. تحليل 1H (منطقة القيمة: السعر العادل)
+        # -------------------------------------------
         df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-        df_1h['ema200'] = df_1h.ta.ema(length=200)
-        trend_1h = df_1h.iloc[-1]['ema200']
+        df_1h['ema50'] = df_1h.ta.ema(length=50)
+        
         price_1h = df_1h.iloc[-1]['close']
+        ema50_1h = df_1h.iloc[-1]['ema50']
+        
+        if pd.isna(ema50_1h): return None
 
-        # --- 4. تحليل فريم الدخول (15m) ---
+        # الشروط: نريد السعر قريب من EMA50 (تصحيح) وليس بعيداً جداً
+        # نسمح بمسافة 2% كحد أقصى (Value Zone)
+        dist_1h = abs(price_1h - ema50_1h) / ema50_1h * 100
+        is_value_zone = (dist_1h < 2.5) # السعر قريب من المتوسط (فرصة شراء)
+
+        if not is_value_zone: return None
+
+        # -------------------------------------------
+        # 4. تحليل 15m (الزناد: تفاصيل الدخول)
+        # -------------------------------------------
         df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         
-        # المؤشرات
-        df_15m['ema50'] = df_15m.ta.ema(length=50)
-        bbands = df_15m.ta.bbands(length=20, std=2)
-        df_15m = pd.concat([df_15m, bbands], axis=1)
-        
-        stoch = df_15m.ta.stochrsi(length=14, rsi_length=14, k=3, d=3)
-        adx_df = df_15m.ta.adx(length=14)
-        mfi_df = df_15m.ta.mfi(length=14)
-        
-        df_15m = pd.concat([df_15m, stoch, adx_df], axis=1)
-        df_15m['mfi'] = mfi_df
-
-        # الأعمدة والقيم
-        k_col = [c for c in df_15m.columns if c.startswith('STOCHRSIk')][0]
-        d_col = [c for c in df_15m.columns if c.startswith('STOCHRSId')][0]
-        adx_col = [c for c in df_15m.columns if c.startswith('ADX_14')][0]
-        bb_upper_col = [c for c in df_15m.columns if c.startswith('BBU_')][0]
-        bb_lower_col = [c for c in df_15m.columns if c.startswith('BBL_')][0]
-        
-        k_now = df_15m.iloc[-1][k_col]
-        d_now = df_15m.iloc[-1][d_col]
-        k_prev = df_15m.iloc[-2][k_col]
-        d_prev = df_15m.iloc[-2][d_col]
-        
-        adx_now = df_15m.iloc[-1][adx_col]
-        mfi_now = df_15m.iloc[-1]['mfi']
-        
-        curr_close = df_15m.iloc[-1]['close']
-        curr_open = df_15m.iloc[-1]['open']
-        ema50_15m = df_15m.iloc[-1]['ema50']
-        bb_upper = df_15m.iloc[-1][bb_upper_col]
-        bb_lower = df_15m.iloc[-1][bb_lower_col]
+        # فيبوناتشي
+        swing_high = df_15m['high'].rolling(20).max().iloc[-1]
+        swing_low = df_15m['low'].rolling(20).min().iloc[-1]
+        diff = swing_high - swing_low
+        curr_price_15m = df_15m.iloc[-1]['close']
         atr = df_15m.ta.atr(length=14).iloc[-1]
-        
-        if pd.isna(ema50_15m) or pd.isna(k_now) or pd.isna(mfi_now): return None
 
-        # ==========================================
-        # 🔥 فحص التوافق الزمني الكامل (Full Alignment)
-        # ==========================================
-        
-        # 1. الاتجاه العام (Bullish Alignment)
-        is_bullish_1d = price_1d > trend_1d
-        is_bullish_4h = price_4h > trend_4h
-        is_bullish_1h = price_1h > trend_1h
-        is_bullish_15m = curr_close > ema50_15m
-        
-        full_bull_trend = is_bullish_1d and is_bullish_4h and is_bullish_1h and is_bullish_15m
+        # سيولة MFI
+        mfi_15m = df_15m.ta.mfi(length=14).iloc[-1]
 
-        # 2. الاتجاه العام (Bearish Alignment)
-        is_bearish_1d = price_1d < trend_1d
-        is_bearish_4h = price_4h < trend_4h
-        is_bearish_1h = price_1h < trend_1h
-        is_bearish_15m = curr_close < ema50_15m
-        
-        full_bear_trend = is_bearish_1d and is_bearish_4h and is_bearish_1h and is_bearish_15m
-
-        if not full_bull_trend and not full_bear_trend:
-            # يمكن طباعة السبب في اللوغ لمعرفة أي فريم خذلنا
-            # print(f"🔀 {symbol}: Misaligned (1D:{is_bullish_1d} 4H:{is_bullish_4h} 1H:{is_bullish_1h})")
-            return None
-
-        # --- الفلاتر الدقيقة ---
-        if adx_now < 25: 
-            print(f"💤 {symbol}: Weak ADX ({adx_now:.1f})")
-            return None
+        # 🔥 MATRIX LONG SIGNAL
+        if is_safe_bull_1d and is_momentum_bull_4h:
+            # Entry Zone: Golden Pocket (Wait for pullback)
+            fib_0618 = swing_low + (diff * 0.382) # تراجع
+            fib_05 = swing_low + (diff * 0.5)
             
-        dist_from_ema = abs(curr_close - ema50_15m) / ema50_15m * 100
-        if dist_from_ema > 3.0: return None
-
-        # 🔥 LONG ENTRY
-        if full_bull_trend:
-            stoch_signal = (k_prev < d_prev) and (k_now > d_now) and (k_prev < 20)
-            mfi_signal = (mfi_now < 80)
-            candle_signal = (curr_close > curr_open)
-            bb_room = (curr_close < bb_upper)
-
-            if stoch_signal and mfi_signal and candle_signal and bb_room:
-                entry = curr_close
-                sl = entry - (atr * 1.5)
+            # السعر الحالي يجب أن يكون أعلى من المتوسطات (إشارة قوة بعد التصحيح)
+            # و MFI ليس متضخماً
+            if (curr_price_15m > fib_05) and (mfi_15m < 80):
+                entry = curr_price_15m
+                sl = swing_low - (atr * 0.5)
                 risk = entry - sl
-                tp = entry + (risk * 2.0)
+                tp = entry + (risk * 2.5) # 2.5R
                 return "LONG", entry, tp, sl, int(df_15m.iloc[-1]['time'])
 
-        # 🔥 SHORT ENTRY
-        if full_bear_trend:
-            stoch_signal = (k_prev > d_prev) and (k_now < d_now) and (k_prev > 80)
-            mfi_signal = (mfi_now > 20)
-            candle_signal = (curr_close < curr_open)
-            bb_room = (curr_close > bb_lower)
-
-            if stoch_signal and mfi_signal and candle_signal and bb_room:
-                entry = curr_close
-                sl = entry + (atr * 1.5)
+        # 🔥 MATRIX SHORT SIGNAL
+        if is_safe_bear_1d and is_momentum_bear_4h:
+            fib_0618 = swing_low + (diff * 0.618)
+            fib_05 = swing_low + (diff * 0.5)
+            
+            if (curr_price_15m < fib_05) and (mfi_15m > 20):
+                entry = curr_price_15m
+                sl = swing_high + (atr * 0.5)
                 risk = sl - entry
-                tp = entry - (risk * 2.0)
+                tp = entry - (risk * 2.5)
                 return "SHORT", entry, tp, sl, int(df_15m.iloc[-1]['time'])
 
         return None
     except: return None
 
 # ==========================================
-# 4. المعالجة
+# 4. المعالجة والإرسال
 # ==========================================
 sem = asyncio.Semaphore(5)
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
+    # فاصل زمني 45 دقيقة
     if time.time() - last_sig_time < (45 * 60): return
     if symbol in app_state.active_trades: return
 
@@ -222,13 +203,13 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (ULTIMATE)</b>" if side == "LONG" else "🔴 <b>SELL (ULTIMATE)</b>"
+                side_text = "🟢 <b>BUY (MATRIX)</b>" if side == "LONG" else "🔴 <b>SELL (MATRIX)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 tp_pct = abs(entry - tp) / entry * 100
                 
                 msg = (
-                    f"🌍 <code>{clean_name}</code>\n"
+                    f"🧬 <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -238,10 +219,10 @@ async def safe_check(symbol, app_state):
                     f"──────────────\n"
                     f"🛑 <b>STOP:</b> <code>{format_price(sl)}</code>\n"
                     f"<i>(Risk: {sl_pct:.2f}%)</i>\n"
-                    f"<i>(1D+4H+1H+15m Aligned ✅)</i>"
+                    f"<i>(1D Safe + 4H Mom + 1H Value)</i>"
                 )
                 
-                print(f"\n🌍 ULTIMATE SIGNAL: {clean_name} {side}")
+                print(f"\n🧬 MATRIX SIGNAL: {clean_name} {side}")
                 msg_id = await send_telegram_msg(msg)
                 
                 if msg_id:
@@ -253,7 +234,7 @@ async def safe_check(symbol, app_state):
 # 5. المراقبة
 # ==========================================
 async def monitor_trades(app_state):
-    print("👀 Ultimate Tracking...")
+    print("👀 Matrix Tracking Active...")
     while True:
         current_trades = list(app_state.active_trades.keys())
         for sym in current_trades:
@@ -300,7 +281,7 @@ async def daily_report_task(app_state):
         await asyncio.sleep(30)
 
 async def start_scanning(app_state):
-    print(f"🚀 System Online: MEXC ULTIMATE (4-Timeframes)...")
+    print(f"🚀 System Online: MEXC MATRIX (4-Dimension)...")
     try:
         await exchange.load_markets()
         while True:
@@ -312,7 +293,7 @@ async def start_scanning(app_state):
                     if t['quoteVolume'] and t['quoteVolume'] >= MIN_VOLUME_USDT:
                         new_symbols.append(s)
                 app_state.symbols = new_symbols
-                print(f"\n🔄 Filter: {len(new_symbols)} Ultimate Pairs.")
+                print(f"\n🔄 Filter: {len(new_symbols)} Matrix Pairs.")
             except: pass
             
             if not app_state.symbols: await asyncio.sleep(10); continue
@@ -321,7 +302,7 @@ async def start_scanning(app_state):
             tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
             await asyncio.gather(*tasks)
             print("--- DONE ---\n")
-            await asyncio.sleep(40)
+            await asyncio.sleep(30)
 
     except Exception as e:
         print(f"❌ Critical Error: {e}")
