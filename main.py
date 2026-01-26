@@ -12,14 +12,14 @@ import httpx
 import numpy as np
 
 # ==========================================
-# 1. إعدادات TITAN
+# 1. إعدادات TITAN ULTIMATE
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
-MIN_VOLUME_USDT = 5_000_000 
+MIN_VOLUME_USDT = 10_000_000 
 
 app = FastAPI()
 
@@ -28,9 +28,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#0f172a;color:#38bdf8;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress TITAN (Distance + BB Filter)</h1>
-            <p>Status: Surgical Precision Mode ✅</p>
+        <body style='background:#000;color:#00ff88;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🌍 Fortress TITAN ULTIMATE</h1>
+            <p>Analysis: 1D + 4H + 1H + 15m</p>
+            <p>Status: Seeking Perfection...</p>
         </body>
     </html>
     """
@@ -60,51 +61,62 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. منطق TITAN (الاستراتيجية المطورة)
+# 3. المنطق الرباعي (4 Timeframes)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # جلب البيانات
-        ohlcv_1h_task = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=210)
-        ohlcv_15m_task = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
+        # جلب البيانات لـ 4 فريمات بالتوازي
+        task_1d = exchange.fetch_ohlcv(symbol, timeframe='1d', limit=210)
+        task_4h = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=210)
+        task_1h = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=210)
+        task_15m = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
         
-        bars_1h, bars_15m = await asyncio.gather(ohlcv_1h_task, ohlcv_15m_task)
+        bars_1d, bars_4h, bars_1h, bars_15m = await asyncio.gather(task_1d, task_4h, task_1h, task_15m)
         
-        # --- تحليل 1H ---
+        # --- 1. تحليل الفريم اليومي (1D) ---
+        df_1d = pd.DataFrame(bars_1d, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        df_1d['ema200'] = df_1d.ta.ema(length=200)
+        trend_1d = df_1d.iloc[-1]['ema200']
+        price_1d = df_1d.iloc[-1]['close']
+        
+        if pd.isna(trend_1d): return None # العملة جديدة جداً ليس لها 200 يوم
+
+        # --- 2. تحليل فريم 4 ساعات (4H) ---
+        df_4h = pd.DataFrame(bars_4h, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
+        df_4h['ema200'] = df_4h.ta.ema(length=200)
+        trend_4h = df_4h.iloc[-1]['ema200']
+        price_4h = df_4h.iloc[-1]['close']
+        
+        if pd.isna(trend_4h): return None
+
+        # --- 3. تحليل فريم الساعة (1H) ---
         df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         df_1h['ema200'] = df_1h.ta.ema(length=200)
         trend_1h = df_1h.iloc[-1]['ema200']
         price_1h = df_1h.iloc[-1]['close']
-        
-        if pd.isna(trend_1h): return None
 
-        # --- تحليل 15m ---
+        # --- 4. تحليل فريم الدخول (15m) ---
         df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
         
-        # المؤشرات الأساسية
+        # المؤشرات
         df_15m['ema50'] = df_15m.ta.ema(length=50)
-        
-        # Bollinger Bands (لقياس المساحة)
         bbands = df_15m.ta.bbands(length=20, std=2)
         df_15m = pd.concat([df_15m, bbands], axis=1)
         
-        # Stoch RSI & ADX & MFI
         stoch = df_15m.ta.stochrsi(length=14, rsi_length=14, k=3, d=3)
         adx_df = df_15m.ta.adx(length=14)
-        mfi_df = df_15m.ta.mfi(length=14) # سيعمل الآن لأن عمود volume موجود
+        mfi_df = df_15m.ta.mfi(length=14)
         
         df_15m = pd.concat([df_15m, stoch, adx_df], axis=1)
         df_15m['mfi'] = mfi_df
 
-        # تعريف الأعمدة
+        # الأعمدة والقيم
         k_col = [c for c in df_15m.columns if c.startswith('STOCHRSIk')][0]
         d_col = [c for c in df_15m.columns if c.startswith('STOCHRSId')][0]
         adx_col = [c for c in df_15m.columns if c.startswith('ADX_14')][0]
-        # أعمدة البولنجر
         bb_upper_col = [c for c in df_15m.columns if c.startswith('BBU_')][0]
         bb_lower_col = [c for c in df_15m.columns if c.startswith('BBL_')][0]
         
-        # القيم الحالية
         k_now = df_15m.iloc[-1][k_col]
         d_now = df_15m.iloc[-1][d_col]
         k_prev = df_15m.iloc[-2][k_col]
@@ -122,70 +134,69 @@ async def get_signal_logic(symbol):
         
         if pd.isna(ema50_15m) or pd.isna(k_now) or pd.isna(mfi_now): return None
 
-        # --- الفلاتر الأساسية ---
-        if adx_now < 20: 
+        # ==========================================
+        # 🔥 فحص التوافق الزمني الكامل (Full Alignment)
+        # ==========================================
+        
+        # 1. الاتجاه العام (Bullish Alignment)
+        is_bullish_1d = price_1d > trend_1d
+        is_bullish_4h = price_4h > trend_4h
+        is_bullish_1h = price_1h > trend_1h
+        is_bullish_15m = curr_close > ema50_15m
+        
+        full_bull_trend = is_bullish_1d and is_bullish_4h and is_bullish_1h and is_bullish_15m
+
+        # 2. الاتجاه العام (Bearish Alignment)
+        is_bearish_1d = price_1d < trend_1d
+        is_bearish_4h = price_4h < trend_4h
+        is_bearish_1h = price_1h < trend_1h
+        is_bearish_15m = curr_close < ema50_15m
+        
+        full_bear_trend = is_bearish_1d and is_bearish_4h and is_bearish_1h and is_bearish_15m
+
+        if not full_bull_trend and not full_bear_trend:
+            # يمكن طباعة السبب في اللوغ لمعرفة أي فريم خذلنا
+            # print(f"🔀 {symbol}: Misaligned (1D:{is_bullish_1d} 4H:{is_bullish_4h} 1H:{is_bullish_1h})")
+            return None
+
+        # --- الفلاتر الدقيقة ---
+        if adx_now < 25: 
             print(f"💤 {symbol}: Weak ADX ({adx_now:.1f})")
             return None
-
-        # --- 🔥 فلتر المسافة (The Rubber Band) ---
-        # نحسب النسبة المئوية لبعد السعر عن المتوسط
+            
         dist_from_ema = abs(curr_close - ema50_15m) / ema50_15m * 100
-        if dist_from_ema > 2.5: # إذا ابتعد أكثر من 2.5% نعتبره متضخم
-            print(f"⚠️ {symbol}: Skipped (Overextended by {dist_from_ema:.2f}%)")
-            return None
+        if dist_from_ema > 3.0: return None
 
-        is_long_trend = (price_1h > trend_1h) and (curr_close > ema50_15m)
-        is_short_trend = (price_1h < trend_1h) and (curr_close < ema50_15m)
-
-        if not is_long_trend and not is_short_trend:
-            print(f"🔀 {symbol}: Trend Conflict")
-            return None
-
-        # 🔥 LONG STRATEGY
-        if is_long_trend:
-            # 1. Stoch Trigger
-            stoch_signal = (k_prev < d_prev) and (k_now > d_now) and (k_prev < 30)
-            # 2. MFI Healthy (Not extreme)
-            mfi_signal = (mfi_now < 85)
-            # 3. Candle Color
+        # 🔥 LONG ENTRY
+        if full_bull_trend:
+            stoch_signal = (k_prev < d_prev) and (k_now > d_now) and (k_prev < 20)
+            mfi_signal = (mfi_now < 80)
             candle_signal = (curr_close > curr_open)
-            # 4. 🔥 Bollinger Room: هل يوجد مسافة للحد العلوي؟
-            # نريد أن يكون السعر تحت الحد العلوي بمسافة تسمح بالربح
-            bb_room = (curr_close < bb_upper) 
+            bb_room = (curr_close < bb_upper)
 
             if stoch_signal and mfi_signal and candle_signal and bb_room:
                 entry = curr_close
-                sl = entry - (atr * 1.5) # زدنا الستوب قليلاً للأمان
+                sl = entry - (atr * 1.5)
                 risk = entry - sl
-                tp = entry + (risk * 1.5)
+                tp = entry + (risk * 2.0)
                 return "LONG", entry, tp, sl, int(df_15m.iloc[-1]['time'])
-            else:
-                print(f"⏳ {symbol}: Long Wait.. Stoch:{stoch_signal} BB_Room:{bb_room}")
 
-        # 🔥 SHORT STRATEGY
-        if is_short_trend:
-            # 1. Stoch Trigger
-            stoch_signal = (k_prev > d_prev) and (k_now < d_now) and (k_prev > 70)
-            # 2. MFI Healthy
-            mfi_signal = (mfi_now > 15)
-            # 3. Candle Color
+        # 🔥 SHORT ENTRY
+        if full_bear_trend:
+            stoch_signal = (k_prev > d_prev) and (k_now < d_now) and (k_prev > 80)
+            mfi_signal = (mfi_now > 20)
             candle_signal = (curr_close < curr_open)
-            # 4. 🔥 Bollinger Room: هل السعر فوق الحد السفلي؟
             bb_room = (curr_close > bb_lower)
 
             if stoch_signal and mfi_signal and candle_signal and bb_room:
                 entry = curr_close
                 sl = entry + (atr * 1.5)
                 risk = sl - entry
-                tp = entry - (risk * 1.5)
+                tp = entry - (risk * 2.0)
                 return "SHORT", entry, tp, sl, int(df_15m.iloc[-1]['time'])
-            else:
-                print(f"⏳ {symbol}: Short Wait.. Stoch:{stoch_signal} BB_Room:{bb_room}")
 
         return None
-    except Exception as e:
-        # print(f"⚠️ Error {symbol}: {e}")
-        return None
+    except: return None
 
 # ==========================================
 # 4. المعالجة
@@ -194,7 +205,7 @@ sem = asyncio.Semaphore(5)
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    if time.time() - last_sig_time < (30 * 60): return
+    if time.time() - last_sig_time < (45 * 60): return
     if symbol in app_state.active_trades: return
 
     async with sem:
@@ -211,13 +222,13 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (TITAN)</b>" if side == "LONG" else "🔴 <b>SELL (TITAN)</b>"
+                side_text = "🟢 <b>BUY (ULTIMATE)</b>" if side == "LONG" else "🔴 <b>SELL (ULTIMATE)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 tp_pct = abs(entry - tp) / entry * 100
                 
                 msg = (
-                    f"🛡️ <code>{clean_name}</code>\n"
+                    f"🌍 <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -227,10 +238,10 @@ async def safe_check(symbol, app_state):
                     f"──────────────\n"
                     f"🛑 <b>STOP:</b> <code>{format_price(sl)}</code>\n"
                     f"<i>(Risk: {sl_pct:.2f}%)</i>\n"
-                    f"<i>(BB Room + Safe Entry ✅)</i>"
+                    f"<i>(1D+4H+1H+15m Aligned ✅)</i>"
                 )
                 
-                print(f"\n🛡️ TITAN SIGNAL: {clean_name} {side}")
+                print(f"\n🌍 ULTIMATE SIGNAL: {clean_name} {side}")
                 msg_id = await send_telegram_msg(msg)
                 
                 if msg_id:
@@ -242,7 +253,7 @@ async def safe_check(symbol, app_state):
 # 5. المراقبة
 # ==========================================
 async def monitor_trades(app_state):
-    print("👀 TITAN Tracking Started...")
+    print("👀 Ultimate Tracking...")
     while True:
         current_trades = list(app_state.active_trades.keys())
         for sym in current_trades:
@@ -250,9 +261,6 @@ async def monitor_trades(app_state):
             try:
                 ticker = await exchange.fetch_ticker(sym)
                 current_price = ticker['last']
-                
-                clean_name = sym.split(':')[0]
-                print(f"👀 {clean_name}: Now={format_price(current_price)} | TP={format_price(trade['tp'])} | SL={format_price(trade['sl'])}")
                 
                 hit_tp = False
                 hit_sl = False
@@ -292,7 +300,7 @@ async def daily_report_task(app_state):
         await asyncio.sleep(30)
 
 async def start_scanning(app_state):
-    print(f"🚀 System Online: MEXC TITAN (Distance+BB)...")
+    print(f"🚀 System Online: MEXC ULTIMATE (4-Timeframes)...")
     try:
         await exchange.load_markets()
         while True:
@@ -304,7 +312,7 @@ async def start_scanning(app_state):
                     if t['quoteVolume'] and t['quoteVolume'] >= MIN_VOLUME_USDT:
                         new_symbols.append(s)
                 app_state.symbols = new_symbols
-                print(f"\n🔄 Filter: {len(new_symbols)} Titan Pairs.")
+                print(f"\n🔄 Filter: {len(new_symbols)} Ultimate Pairs.")
             except: pass
             
             if not app_state.symbols: await asyncio.sleep(10); continue
