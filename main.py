@@ -20,7 +20,7 @@ RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# السيولة 10 مليون (توازن مثالي)
+# السيولة 10 مليون (مناسبة للاسكالبينج)
 MIN_VOLUME_USDT = 10_000_000 
 
 app = FastAPI()
@@ -30,10 +30,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (PRO EDITION)</h1>
-            <p>Filters: Candle Color + RSI + Max Risk (4%)</p>
-            <p>Speed: Turbo Mode</p>
+        <body style='background:#1a1b26;color:#7aa2f7;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>⚡ Fortress Bot (EMA CLOUD SCALPER)</h1>
+            <p>Timeframes: 1H (Trend) + 5m (Entry)</p>
+            <p>Strategy: EMA 9/21/200 Pullback</p>
         </body>
     </html>
     """
@@ -58,26 +58,25 @@ async def reply_telegram_msg(message, reply_to_msg_id):
         try: await client.post(url, json=payload)
         except: pass
 
-# تنسيق السعر (الذكي)
 def format_price(price):
     if price is None: return "0"
-    if price >= 1000: return f"{price:.2f}"   # للكبار (BTC/ETH)
-    if price >= 1: return f"{price:.3f}"      # للمتوسطة (3 خانات)
-    if price >= 0.01: return f"{price:.5f}"   # للصغيرة
-    return f"{price:.8f}".rstrip('0').rstrip('.') # للميم كوين
+    if price >= 1000: return f"{price:.2f}"
+    if price >= 1: return f"{price:.3f}"
+    if price >= 0.01: return f"{price:.5f}"
+    return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Stoch RSI + New Filters)
+# 3. منطق الاستراتيجية (EMA Cloud Scalper)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # جلب البيانات
+        # جلب البيانات: نحتاج فريم الساعة (للتريند) وفريم 5 دقائق (للدخول)
         ohlcv_1h_task = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=210)
-        ohlcv_15m_task = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
+        ohlcv_5m_task = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
         
-        bars_1h, bars_15m = await asyncio.gather(ohlcv_1h_task, ohlcv_15m_task)
+        bars_1h, bars_5m = await asyncio.gather(ohlcv_1h_task, ohlcv_5m_task)
         
-        # --- 1H Trend ---
+        # --- 1. تحليل التريند العام (1H) ---
         df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         df_1h['ema200'] = df_1h.ta.ema(length=200)
         trend_1h = df_1h.iloc[-1]['ema200']
@@ -85,103 +84,103 @@ async def get_signal_logic(symbol):
         
         if pd.isna(trend_1h): return None
 
-        # --- 15m Analysis ---
-        df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        df_15m['ema50'] = df_15m.ta.ema(length=50)
+        # --- 2. تحليل منطقة العمليات (5m) ---
+        df_5m = pd.DataFrame(bars_5m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # Stoch RSI
-        stoch = df_15m.ta.stochrsi(length=14, rsi_length=14, k=3, d=3)
-        df_15m = pd.concat([df_15m, stoch], axis=1)
+        # المتوسطات المتحركة الاسية (EMAs)
+        df_5m['ema9'] = df_5m.ta.ema(length=9)   # السريع
+        df_5m['ema21'] = df_5m.ta.ema(length=21) # المتوسط
+        df_5m['ema200'] = df_5m.ta.ema(length=200) # التريند المحلي
         
-        # ADX
-        adx_df = df_15m.ta.adx(length=14)
-        df_15m = pd.concat([df_15m, adx_df], axis=1)
-        
-        # RSI (للفلترة الإضافية)
-        df_15m['rsi'] = df_15m.ta.rsi(length=14)
+        # المؤشرات المساعدة
+        df_5m['rsi'] = df_5m.ta.rsi(length=14)
+        df_5m['vol_sma'] = df_5m['vol'].rolling(20).mean() # متوسط الفوليوم
 
-        k_col = [c for c in df_15m.columns if c.startswith('STOCHRSIk')][0]
-        d_col = [c for c in df_15m.columns if c.startswith('STOCHRSId')][0]
-        adx_col = [c for c in df_15m.columns if c.startswith('ADX_14')][0]
+        # البيانات الحالية
+        close_now = df_5m.iloc[-1]['close']
+        open_now = df_5m.iloc[-1]['open']
+        high_now = df_5m.iloc[-1]['high']
+        low_now = df_5m.iloc[-1]['low']
         
-        k_now = df_15m.iloc[-1][k_col]
-        d_now = df_15m.iloc[-1][d_col]
-        k_prev = df_15m.iloc[-2][k_col]
-        d_prev = df_15m.iloc[-2][d_col]
-        adx_now = df_15m.iloc[-1][adx_col]
-        rsi_now = df_15m.iloc[-1]['rsi']
+        ema9_now = df_5m.iloc[-1]['ema9']
+        ema21_now = df_5m.iloc[-1]['ema21']
+        ema200_5m = df_5m.iloc[-1]['ema200']
         
-        curr_price = df_15m.iloc[-1]['close']
-        open_price = df_15m.iloc[-1]['open'] # لتحديد لون الشمعة
-        ema50_15m = df_15m.iloc[-1]['ema50']
-        atr = df_15m.ta.atr(length=14).iloc[-1]
-        
-        if pd.isna(ema50_15m) or pd.isna(k_now): return None
+        rsi_now = df_5m.iloc[-1]['rsi']
+        vol_now = df_5m.iloc[-1]['vol']
+        vol_avg = df_5m.iloc[-1]['vol_sma']
+        atr = df_5m.ta.atr(length=14).iloc[-1]
 
-        # --- الفلاتر الأساسية ---
+        # الشمعة السابقة (مهمة جداً للكشف عن الارتداد)
+        close_prev = df_5m.iloc[-2]['close']
+        open_prev = df_5m.iloc[-2]['open']
+        ema9_prev = df_5m.iloc[-2]['ema9']
+
+        if pd.isna(ema200_5m) or pd.isna(vol_avg): return None
+
+        # --- الفلاتر ---
         
-        # 1. فلتر ADX
-        if adx_now < 20:
-            print(f"💤 {symbol}: Weak ADX ({adx_now:.1f})")
-            return None 
+        # 1. فلتر الاتجاه العام والخاص (Double Trend Check)
+        is_uptrend = (price_1h > trend_1h) and (close_now > ema200_5m)
+        is_downtrend = (price_1h < trend_1h) and (close_now < ema200_5m)
 
-        # 2. فلتر الاتجاه (Trend Alignment)
-        is_long_setup = (price_1h > trend_1h) and (curr_price > ema50_15m)
-        is_short_setup = (price_1h < trend_1h) and (curr_price < ema50_15m)
-
-        if not is_long_setup and not is_short_setup:
-            print(f"🔀 {symbol}: Trend Conflict")
+        if not is_uptrend and not is_downtrend:
+            # print(f"🔀 {symbol}: Trend Conflict")
             return None
 
-        # --- إشارات الدخول (مع الفلاتر الصارمة) ---
-        
-        # 🔥 LONG STRATEGY
-        if is_long_setup:
-            # الشروط:
-            # 1. تقاطع Stoch للأعلى من منطقة التشبع
-            # 2. الشمعة الحالية خضراء (Close > Open) - هام جداً!
-            # 3. RSI فوق 45 (تأكيد العزم)
-            if (k_prev < d_prev) and (k_now > d_now) and (k_prev < 25):
-                if (curr_price > open_price) and (rsi_now > 45):
-                    
-                    entry = curr_price
-                    sl = entry - (atr * 1.5) # ستوب 1.5 ATR
-                    
-                    # 🛡️ حماية: إلغاء الصفقة لو الستوب أكبر من 4%
-                    risk_pct = (entry - sl) / entry * 100
-                    if risk_pct > 4.0:
-                        print(f"⚠️ {symbol}: Skipped (High Risk: {risk_pct:.2f}%)")
-                        return None
-                        
-                    risk = entry - sl
-                    tp = entry + (risk * 1.5)
-                    return "LONG", entry, tp, sl, int(df_15m.iloc[-1]['time'])
-                else:
-                    print(f"⏳ {symbol}: Uptrend Valid (Waiting Candle/RSI...)")
+        # --- استراتيجية الارتداد (EMA Pullback) ---
 
-        # 🔥 SHORT STRATEGY
-        if is_short_setup:
+        # 🔥 LONG SCALP
+        if is_uptrend:
             # الشروط:
-            # 1. تقاطع Stoch للأسفل
-            # 2. الشمعة الحالية حمراء (Close < Open)
-            # 3. RSI تحت 55
-            if (k_prev > d_prev) and (k_now < d_now) and (k_prev > 75):
-                if (curr_price < open_price) and (rsi_now < 55):
-                    
-                    entry = curr_price
-                    sl = entry + (atr * 1.5)
-                    
-                    # 🛡️ حماية
-                    risk_pct = (sl - entry) / entry * 100
-                    if risk_pct > 4.0:
-                        print(f"⚠️ {symbol}: Skipped (High Risk: {risk_pct:.2f}%)")
-                        return None
+            # 1. ترتيب المتوسطات: EMA 9 > EMA 21 (تريند قوي)
+            # 2. السعر الحالي أغلق فوق EMA 9
+            # 3. الشمعة السابقة كانت تحت EMA 9 أو لامسته (هذا هو الارتداد!)
+            # 4. فوليوم عالي + شمعة خضراء
+            
+            ema_aligned = ema9_now > ema21_now
+            price_breakout = (close_now > ema9_now) and (close_prev <= ema9_prev)
+            green_candle = close_now > open_now
+            momentum = rsi_now > 50
+            volume_ok = vol_now > vol_avg
 
-                    risk = sl - entry
-                    tp = entry - (risk * 1.5)
-                    return "SHORT", entry, tp, sl, int(df_15m.iloc[-1]['time'])
-                else:
-                    print(f"⏳ {symbol}: Downtrend Valid (Waiting Candle/RSI...)")
+            if ema_aligned and price_breakout and green_candle and momentum and volume_ok:
+                entry = close_now
+                sl = entry - (atr * 2.0) # ستوب 2 ATR
+                
+                # حماية 4%
+                if ((entry - sl) / entry * 100) > 4: return None
+                
+                tp = entry + ((entry - sl) * 2.0) # الهدف ضعف الستوب (سكالبينج طماع)
+                return "LONG", entry, tp, sl, int(df_5m.iloc[-1]['time'])
+            
+            elif ema_aligned and not price_breakout:
+                print(f"⏳ {symbol}: Bullish Setup (Waiting EMA9 Breakout...)")
+
+        # 🔥 SHORT SCALP
+        if is_downtrend:
+            # الشروط:
+            # 1. ترتيب المتوسطات: EMA 9 < EMA 21
+            # 2. السعر الحالي أغلق تحت EMA 9
+            # 3. الشمعة السابقة كانت فوق EMA 9 أو لامسته
+            
+            ema_aligned = ema9_now < ema21_now
+            price_breakout = (close_now < ema9_now) and (close_prev >= ema9_prev)
+            red_candle = close_now < open_now
+            momentum = rsi_now < 50
+            volume_ok = vol_now > vol_avg
+
+            if ema_aligned and price_breakout and red_candle and momentum and volume_ok:
+                entry = close_now
+                sl = entry + (atr * 2.0)
+                
+                if ((sl - entry) / entry * 100) > 4: return None
+                
+                tp = entry - ((sl - entry) * 2.0)
+                return "SHORT", entry, tp, sl, int(df_5m.iloc[-1]['time'])
+
+            elif ema_aligned and not price_breakout:
+                print(f"⏳ {symbol}: Bearish Setup (Waiting EMA9 Breakdown...)")
 
         return None
     except Exception as e:
@@ -190,11 +189,12 @@ async def get_signal_logic(symbol):
 # ==========================================
 # 4. المعالجة السريعة (Turbo)
 # ==========================================
-sem = asyncio.Semaphore(20) # فحص 20 عملة في وقت واحد
+sem = asyncio.Semaphore(20)
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    if time.time() - last_sig_time < (30 * 60): return
+    # تقليل وقت الحظر لـ 15 دقيقة فقط لأن هذا سكالبينج سريع
+    if time.time() - last_sig_time < (15 * 60): return
     if symbol in app_state.active_trades: return
 
     async with sem:
@@ -211,20 +211,21 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (Pro)</b>" if side == "LONG" else "🔴 <b>SELL (Pro)</b>"
+                side_text = "🟢 <b>SCALP BUY</b>" if side == "LONG" else "🔴 <b>SCALP SELL</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"🛡️ <code>{clean_name}</code>\n"
+                    f"⚡ <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
-                    f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
+                    f"🚀 <b>Entry:</b> <code>{format_price(entry)}</code>\n"
                     f"──────────────\n"
                     f"🏆 <b>TARGET:</b> <code>{format_price(tp)}</code>\n"
                     f"──────────────\n"
                     f"🛑 <b>STOP:</b> <code>{format_price(sl)}</code>\n"
-                    f"<i>(Risk: {sl_pct:.2f}%)</i>"
+                    f"<i>(Risk: {sl_pct:.2f}%)</i>\n"
+                    f"<i>(Strategy: EMA Cloud + Vol)</i>"
                 )
                 
                 print(f"\n🔥 SIGNAL: {clean_name} {side}")
@@ -239,7 +240,7 @@ async def safe_check(symbol, app_state):
 # 5. المراقبة
 # ==========================================
 async def monitor_trades(app_state):
-    print("👀 Monitoring Active Trades (Turbo)...")
+    print("👀 Monitoring Active Trades (Scalp Mode)...")
     while True:
         current_symbols = list(app_state.active_trades.keys())
         for sym in current_symbols:
@@ -264,13 +265,13 @@ async def monitor_trades(app_state):
                     elif price >= sl: hit_sl = True
                 
                 if hit_tp:
-                    await reply_telegram_msg(f"✅ <b>TARGET HIT!</b>\nPrice: {format_price(price)}", msg_id)
+                    await reply_telegram_msg(f"✅ <b>PROFIT SECURED!</b>\nPrice: {format_price(price)}", msg_id)
                     app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
                     del app_state.active_trades[sym]
                     print(f"✅ {sym} Win")
                     
                 elif hit_sl:
-                    await reply_telegram_msg(f"🛑 <b>STOP LOSS HIT</b>\nPrice: {format_price(price)}", msg_id)
+                    await reply_telegram_msg(f"🛑 <b>STOPPED OUT</b>\nPrice: {format_price(price)}", msg_id)
                     app_state.stats["losses"] = app_state.stats.get("losses", 0) + 1
                     del app_state.active_trades[sym]
                     print(f"🛑 {sym} Loss")
@@ -302,7 +303,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: PRO EDITION (Filtered)...")
+    print(f"🚀 System Online: EMA CLOUD SCALPER...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT:USDT' in s]
@@ -328,7 +329,6 @@ async def start_scanning(app_state):
             await asyncio.gather(*tasks)
             print("--- END SCAN ---\n")
             
-            # 10 ثوان راحة بين الفحوصات
             await asyncio.sleep(10) 
 
     except Exception as e:
