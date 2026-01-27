@@ -4,318 +4,240 @@ import time
 import gc
 from datetime import datetime
 from contextlib import asynccontextmanager
-from typing import Dict, Optional
 
 import pandas as pd
-import pandas_ta as ta
 import ccxt.async_support as ccxt
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 # ==========================================
-# 1. الإعدادات (Reactor Config)
+# 1. الإعدادات
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     
-    HTF = '1h'       # فريم الاتجاه والدعوم
-    LTF = '5m'       # فريم الدخول
-    MIN_VOLUME = 20_000_000 
+    TIMEFRAME = '5m'
+    MIN_VOLUME = 15_000_000
+    PROXIMITY_THRESHOLD = 0.002 # 0.2% مسافة
+    LOOKBACK = 50
     
-    # إدارة الصفقات
-    RISK_REWARD = 2.0
-    MAX_RISK_PCT = 3.5
-    
-    # سرعة المفاعل
-    BATCH_SIZE = 20       # عدد العملات في الدفعة الواحدة
-    SCAN_INTERVAL = 1     # ثانية واحدة فقط بين الدفعات!
+    BATCH_SIZE = 15
+    SCAN_INTERVAL = 1
 
 # ==========================================
-# 2. التنبيهات (S/R Card)
+# 2. التنسيق والرسائل (Clean & Copyable)
 # ==========================================
 class Notifier:
     @staticmethod
-    def format_card(symbol, side, entry, tp, sl, level_type, level_price):
+    def format_card(symbol, side, entry, tp, sl):
         clean_sym = symbol.split(':')[0]
         icon = "🟢" if side == "LONG" else "🔴"
+        
+        # استخدام <code> يجعل النص قابلاً للنسخ بمجرد الضغط عليه
         return (
-            f"<b>{icon} {clean_sym} | ZONE BOUNCE</b>\n"
-            f"<code>━━━━━━━━━━━━━━━━━━</code>\n"
-            f"🧱 <b>Zone:</b>   <code>{level_price}</code> ({level_type})\n"
-            f"⚡ <b>Entry:</b>  <code>{entry}</code>\n"
-            f"🎯 <b>Target:</b> <code>{tp}</code>\n"
-            f"🛡️ <b>Stop:</b>   <code>{sl}</code>\n"
-            f"<code>━━━━━━━━━━━━━━━━━━</code>\n"
-            f"📊 <b>Trend:</b> 1H Aligned ✅"
+            f"<b>{icon} {side}</b> | <code>{clean_sym}</code>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📥 Ent: <code>{entry}</code>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🎯 TP : <code>{tp}</code>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🛑 SL : <code>{sl}</code>"
         )
 
     @staticmethod
-    async def send(text):
+    async def send(text, reply_to=None):
         url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        payload = {
+            "chat_id": Config.CHAT_ID, 
+            "text": text, 
+            "parse_mode": "HTML", 
+            "disable_web_page_preview": True
+        }
+        # هنا التأكد من ربط الرسالة بالرسالة الأصلية
+        if reply_to: 
+            payload["reply_to_message_id"] = reply_to
+            
         async with httpx.AsyncClient(timeout=5.0) as client:
-            try: await client.post(url, json=payload)
+            try:
+                res = await client.post(url, json=payload)
+                if res.status_code == 200:
+                    return res.json().get('result', {}).get('message_id')
             except: pass
+        return None
 
 def fmt(price):
     if not price: return "0"
-    if price >= 1000: return f"{price:.2f}"
-    if price >= 1: return f"{price:.3f}"
-    if price >= 0.01: return f"{price:.5f}"
+    # تنسيق الأرقام بذكاء (بدون أصفار زائدة)
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. مخزن البيانات الذكي (Global State)
+# 3. محرك الرادار (Radar Engine)
 # ==========================================
-class MarketState:
-    def __init__(self):
-        # هنا نحفظ دعوم ومقاومات الفريم الكبير
-        # Structure: {'BTC/USDT': {'trend': 'BULL', 'S1': 50000, 'R1': 52000, 'updated': 123456}}
-        self.htf_data = {}
-        self.active_trades = {}
-        self.history = {}
-        self.stats = {"wins": 0, "losses": 0}
-        self.last_update = time.time()
-
-state = MarketState()
-
-# ==========================================
-# 4. محرك التحليل (Analysis Engine)
-# ==========================================
-class Analyzer:
+class RadarEngine:
     def __init__(self, exchange):
         self.exchange = exchange
 
-    async def update_htf_levels(self, symbol):
-        """
-        يحسب مستويات Pivot Points واتجاه EMA 200 لفريم الساعة.
-        يتم استدعاء هذه الدالة فقط إذا كانت البيانات قديمة.
-        """
+    async def scan(self, symbol):
         try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.HTF, limit=200)
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=Config.LOOKBACK + 5)
             if not ohlcv: return None
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            
-            # 1. الاتجاه
-            ema200 = ta.ema(df['close'], length=200).iloc[-1]
-            trend = "BULL" if df['close'].iloc[-1] > ema200 else "BEAR"
-            
-            # 2. Pivot Points (Traditional)
-            # نستخدم بيانات الشمعة المغلقة الأخيرة
-            last = df.iloc[-2]
-            pp = (last['high'] + last['low'] + last['close']) / 3
-            r1 = (2 * pp) - last['low']
-            s1 = (2 * pp) - last['high']
-            
-            state.htf_data[symbol] = {
-                'trend': trend, 'pp': pp, 'r1': r1, 's1': s1, 
-                'updated': time.time()
-            }
-        except: pass
 
-    async def process_ltf(self, symbol):
-        # 1. التأكد من وجود بيانات الفريم الكبير
-        if symbol not in state.htf_data or (time.time() - state.htf_data[symbol]['updated'] > 3600):
-            await self.update_htf_levels(symbol)
-        
-        htf = state.htf_data.get(symbol)
-        if not htf: return None
+            past_data = df.iloc[:-1]
+            support = past_data['low'].min()
+            resistance = past_data['high'].max()
+            current_price = df['close'].iloc[-1]
+            
+            # 1. LONG Check
+            dist_to_sup = abs(current_price - support) / current_price
+            if dist_to_sup <= Config.PROXIMITY_THRESHOLD:
+                entry = current_price
+                sl = support * 0.995 
+                tp = entry + (entry - sl) * 2.0
+                return "LONG", entry, sl, tp
 
-        # 2. جلب بيانات 5 دقائق
-        try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.LTF, limit=50)
-            if not ohlcv: return None
-            df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            
-            curr = df.iloc[-1]
-            prev = df.iloc[-2]
-            
-            # --- استراتيجية الارتداد (Bounce) ---
-            
-            # 🟢 LONG: تريند صاعد + السعر لمس الدعم S1 وارتد
-            if htf['trend'] == "BULL":
-                # فحص القرب من الدعم (Buffer 0.2%)
-                dist_to_s1 = abs(curr['low'] - htf['s1']) / curr['close'] * 100
-                
-                if dist_to_s1 < 0.3:
-                    # شرط الدخول: شمعة خضراء (ارتداد) بعد ملامسة الدعم
-                    if curr['close'] > curr['open']:
-                        
-                        entry = curr['close']
-                        sl = htf['s1'] * 0.995 # ستوب تحت الدعم بقليل
-                        
-                        # الهدف: البيفوت أو المقاومة التالية
-                        tp = htf['r1'] if htf['pp'] < entry else htf['pp']
-                        
-                        # إدارة المخاطر
-                        if entry >= tp or sl >= entry: return None
-                        if (entry - sl) / entry * 100 > Config.MAX_RISK_PCT: return None
-                        
-                        return "LONG", entry, tp, sl, "Support S1", fmt(htf['s1'])
-
-            # 🔴 SHORT: تريند هابط + السعر لمس المقاومة R1 وارتد
-            if htf['trend'] == "BEAR":
-                dist_to_r1 = abs(curr['high'] - htf['r1']) / curr['close'] * 100
-                
-                if dist_to_r1 < 0.3:
-                    if curr['close'] < curr['open']:
-                        
-                        entry = curr['close']
-                        sl = htf['r1'] * 1.005 # ستوب فوق المقاومة
-                        
-                        tp = htf['s1'] if htf['pp'] > entry else htf['pp']
-                        
-                        if entry <= tp or sl <= entry: return None
-                        if (sl - entry) / entry * 100 > Config.MAX_RISK_PCT: return None
-                        
-                        return "SHORT", entry, tp, sl, "Resistance R1", fmt(htf['r1'])
+            # 2. SHORT Check
+            dist_to_res = abs(current_price - resistance) / current_price
+            if dist_to_res <= Config.PROXIMITY_THRESHOLD:
+                entry = current_price
+                sl = resistance * 1.005
+                tp = entry - (sl - entry) * 2.0
+                return "SHORT", entry, sl, tp
 
         except Exception: return None
         return None
 
 # ==========================================
-# 5. المفاعل النووي (Reactor Core)
+# 4. إدارة النظام
 # ==========================================
-sem = asyncio.Semaphore(20) # توازي عالي لأننا قسمنا المهام
+state = {"active": {}, "history": {}, "last_update": time.time()}
+sem = asyncio.Semaphore(20)
 
-async def worker(symbol, analyzer):
-    # كول داون 5 دقائق
-    if time.time() - state.history.get(symbol, 0) < 300: return
-    if symbol in state.active_trades: return
+async def worker(symbol, engine):
+    # منع التكرار لمدة 5 دقائق
+    if time.time() - state['history'].get(symbol, 0) < 300: return
+    if symbol in state['active']: return # لا نرسل إشارة إذا كانت الصفقة مفتوحة
 
     async with sem:
-        res = await analyzer.process_ltf(symbol)
+        res = await engine.scan(symbol)
         if res:
-            side, entry, tp, sl, l_type, l_price = res
-            sig_key = f"{symbol}_{side}_{int(time.time()/300)}"
+            side, entry, sl, tp = res
             
-            if sig_key in state.history: return
-            state.history[symbol] = time.time()
-            state.history[sig_key] = True
+            # مفتاح لمنع التكرار اللحظي
+            sig_key = f"{symbol}_{side}_{int(time.time()/60)}"
+            if sig_key in state['history']: return
+
+            state['history'][symbol] = time.time()
+            state['history'][sig_key] = True
             
-            print(f"\n⚡ SIGNAL: {symbol} {side} @ {l_type}", flush=True)
-            msg = Notifier.format_card(symbol, side, fmt(entry), fmt(tp), fmt(sl), l_type, l_price)
-            await Notifier.send(msg)
+            # إرسال الرسالة وتخزين المعرف (msg_id)
+            print(f"\n🚀 SIGNAL: {symbol}", flush=True)
+            msg = Notifier.format_card(symbol, side, fmt(entry), fmt(tp), fmt(sl))
+            msg_id = await Notifier.send(msg)
             
-            # إضافة للصفقات النشطة (بدون msg_id لتبسيط الكود)
-            state.active_trades[symbol] = {"side": side, "tp": tp, "sl": sl}
+            if msg_id:
+                # تخزين بيانات الصفقة للمراقبة
+                state['active'][symbol] = {
+                    "side": side, 
+                    "tp": tp, 
+                    "sl": sl, 
+                    "msg_id": msg_id  # هام جداً للرد
+                }
 
 async def scanner_loop(exchange):
-    print("☢️ Reactor Engine Started...", flush=True)
-    analyzer = Analyzer(exchange)
-    
+    print("📡 Scanner Started...", flush=True)
+    engine = RadarEngine(exchange)
     while True:
         try:
-            # 1. تحديث القائمة ديناميكياً
             tickers = await exchange.fetch_tickers()
             symbols = [s for s, t in tickers.items() if '/USDT:USDT' in s and t['quoteVolume'] >= Config.MIN_VOLUME]
             
-            print(f"\n🔎 Scanning {len(symbols)} pairs (Hybrid S/R)...", flush=True)
+            print(f"\n🔎 Scanning {len(symbols)} pairs...", flush=True)
             
-            # 2. إطلاق الدفعات (Batches) بسرعة
             tasks = []
             for sym in symbols:
-                tasks.append(worker(sym, analyzer))
-                
+                tasks.append(worker(sym, engine))
                 if len(tasks) >= Config.BATCH_SIZE:
                     await asyncio.gather(*tasks)
                     tasks = []
-                    await asyncio.sleep(0.1) # راحة ميكرو ثانية
+                    await asyncio.sleep(0.1)
             
             if tasks: await asyncio.gather(*tasks)
-            
-            state.last_update = time.time()
+            state['last_update'] = time.time()
             gc.collect()
             await asyncio.sleep(Config.SCAN_INTERVAL)
-            
-        except Exception as e:
-            print(f"⚠️ Error: {e}")
-            await asyncio.sleep(5)
+        except Exception: await asyncio.sleep(5)
 
+# 🔥 حلقة المراقبة (المسؤولة عن الرد)
 async def monitor_loop(exchange):
-    print("👀 Flash Monitor Started...", flush=True)
+    print("👀 Monitor Started...", flush=True)
     while True:
-        if not state.active_trades:
-            await asyncio.sleep(0.5)
+        if not state['active']:
+            await asyncio.sleep(1)
             continue
         
-        # نسخة من القائمة لتجنب أخطاء التعديل أثناء الدوران
-        current_trades = list(state.active_trades.items())
-        
-        # سنقوم بفحص الأسعار دفعة واحدة لزيادة السرعة
-        for sym, trade in current_trades:
+        # نستخدم list() لنتمكن من الحذف أثناء الدوران
+        for sym in list(state['active'].keys()):
             try:
-                # هنا يمكن تحسين السرعة باستخدام fetch_tickers لعدة عملات لو كانت مدعومة
+                trade = state['active'][sym]
                 ticker = await exchange.fetch_ticker(sym)
                 price = ticker['last']
                 
-                win = (trade['side'] == "LONG" and price >= trade['tp']) or \
-                      (trade['side'] == "SHORT" and price <= trade['tp'])
-                loss = (trade['side'] == "LONG" and price <= trade['sl']) or \
-                       (trade['side'] == "SHORT" and price >= trade['sl'])
+                win = False
+                loss = False
+
+                if trade['side'] == "LONG":
+                    if price >= trade['tp']: win = True
+                    elif price <= trade['sl']: loss = True
+                else: # SHORT
+                    if price <= trade['tp']: win = True
+                    elif price >= trade['sl']: loss = True
                 
+                # الرد على الرسالة الأصلية
                 if win:
-                    await Notifier.send(f"✅ <b>PROFIT!</b> {sym.split(':')[0]}\nPrice: {fmt(price)}")
-                    state.stats['wins'] += 1
-                    del state.active_trades[sym]
+                    await Notifier.send(f"✅ <b>TARGET HIT</b>\nPrice: {fmt(price)}", reply_to=trade['msg_id'])
+                    del state['active'][sym]
                 elif loss:
-                    await Notifier.send(f"🛑 <b>STOP LOSS</b> {sym.split(':')[0]}\nPrice: {fmt(price)}")
-                    state.stats['losses'] += 1
-                    del state.active_trades[sym]
-            except: pass
+                    await Notifier.send(f"🛑 <b>STOP LOSS</b>\nPrice: {fmt(price)}", reply_to=trade['msg_id'])
+                    del state['active'][sym]
+
+            except Exception: pass
         
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1) # فحص كل ثانية
 
-async def report_loop():
-    while True:
-        now = datetime.now()
-        if now.hour == 23 and now.minute == 59:
-            s = state.stats
-            msg = f"📊 <b>DAILY STATS</b>\n✅ Wins: {s['wins']}\n❌ Losses: {s['losses']}"
-            await Notifier.send(msg)
-            state.stats = {"wins": 0, "losses": 0}
-            await asyncio.sleep(70)
-        await asyncio.sleep(30)
+async def keep_alive():
+    async with httpx.AsyncClient() as c:
+        while True:
+            try: await c.get("https://crypto-signals-w9wx.onrender.com"); print("💓")
+            except: pass
+            await asyncio.sleep(600)
 
 # ==========================================
-# 6. التشغيل (System Boot)
+# 5. التشغيل
 # ==========================================
-exchange = ccxt.mexc({
-    'enableRateLimit': True, 
-    'options': {'defaultType': 'swap'},
-    'timeout': 20000 
-})
+exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}, 'timeout': 20000})
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🟢 Reactor Online...", flush=True)
+    print("🟢 Booting...", flush=True)
     try: await exchange.load_markets()
     except: pass
-    
     t1 = asyncio.create_task(scanner_loop(exchange))
     t2 = asyncio.create_task(monitor_loop(exchange))
-    t3 = asyncio.create_task(report_loop())
+    t3 = asyncio.create_task(keep_alive())
     yield
     await exchange.close()
     t1.cancel(); t2.cancel(); t3.cancel()
-    print("🔴 Reactor Shutdown", flush=True)
+    print("🔴 Shutdown", flush=True)
 
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/", response_class=HTMLResponse)
 @app.head("/", response_class=HTMLResponse)
 async def root():
-    up = int(time.time() - state.last_update)
-    return f"""
-    <html><body style='background:#000;color:#0ff;text-align:center;font-family:monospace;padding:50px;'>
-    <div style='border:1px solid #0ff;padding:20px;max-width:400px;margin:auto;'>
-        <h1>FORTRESS V16</h1>
-        <p>Core: Reactor Engine (Hybrid S/R)</p>
-        <p>Latency: {up}s</p>
-    </div></body></html>
-    """
+    return f"<html><body style='background:#000;color:#0f0;text-align:center;padding:50px;'><h1>Active</h1><p>{int(time.time()-state['last_update'])}s ago</p></body></html>"
 
 if __name__ == "__main__":
     import uvicorn
