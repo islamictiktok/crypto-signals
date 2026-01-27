@@ -19,6 +19,8 @@ CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
+
+# السيولة 10 مليون (توازن مثالي)
 MIN_VOLUME_USDT = 10_000_000 
 
 app = FastAPI()
@@ -29,9 +31,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🚀 Fortress Bot (TURBO MODE)</h1>
-            <p>Logs: Full Detail (Verbose)</p>
-            <p>Speed: High Concurrency</p>
+            <h1>🛡️ Fortress Bot (PRO EDITION)</h1>
+            <p>Filters: Candle Color + RSI + Max Risk (4%)</p>
+            <p>Speed: Turbo Mode</p>
         </body>
     </html>
     """
@@ -56,16 +58,16 @@ async def reply_telegram_msg(message, reply_to_msg_id):
         try: await client.post(url, json=payload)
         except: pass
 
-# تنسيق السعر (3 أرقام للمتوسطة)
+# تنسيق السعر (الذكي)
 def format_price(price):
     if price is None: return "0"
-    if price >= 1000: return f"{price:.2f}"
-    if price >= 1: return f"{price:.3f}"
-    if price >= 0.01: return f"{price:.5f}"
-    return f"{price:.8f}".rstrip('0').rstrip('.')
+    if price >= 1000: return f"{price:.2f}"   # للكبار (BTC/ETH)
+    if price >= 1: return f"{price:.3f}"      # للمتوسطة (3 خانات)
+    if price >= 0.01: return f"{price:.5f}"   # للصغيرة
+    return f"{price:.8f}".rstrip('0').rstrip('.') # للميم كوين
 
 # ==========================================
-# 3. المنطق (Detailed Logs + Stoch RSI)
+# 3. المنطق (Stoch RSI + New Filters)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -75,7 +77,7 @@ async def get_signal_logic(symbol):
         
         bars_1h, bars_15m = await asyncio.gather(ohlcv_1h_task, ohlcv_15m_task)
         
-        # --- 1H Analysis ---
+        # --- 1H Trend ---
         df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         df_1h['ema200'] = df_1h.ta.ema(length=200)
         trend_1h = df_1h.iloc[-1]['ema200']
@@ -87,11 +89,16 @@ async def get_signal_logic(symbol):
         df_15m = pd.DataFrame(bars_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         df_15m['ema50'] = df_15m.ta.ema(length=50)
         
+        # Stoch RSI
         stoch = df_15m.ta.stochrsi(length=14, rsi_length=14, k=3, d=3)
         df_15m = pd.concat([df_15m, stoch], axis=1)
         
+        # ADX
         adx_df = df_15m.ta.adx(length=14)
         df_15m = pd.concat([df_15m, adx_df], axis=1)
+        
+        # RSI (للفلترة الإضافية)
+        df_15m['rsi'] = df_15m.ta.rsi(length=14)
 
         k_col = [c for c in df_15m.columns if c.startswith('STOCHRSIk')][0]
         d_col = [c for c in df_15m.columns if c.startswith('STOCHRSId')][0]
@@ -102,62 +109,88 @@ async def get_signal_logic(symbol):
         k_prev = df_15m.iloc[-2][k_col]
         d_prev = df_15m.iloc[-2][d_col]
         adx_now = df_15m.iloc[-1][adx_col]
+        rsi_now = df_15m.iloc[-1]['rsi']
         
         curr_price = df_15m.iloc[-1]['close']
+        open_price = df_15m.iloc[-1]['open'] # لتحديد لون الشمعة
         ema50_15m = df_15m.iloc[-1]['ema50']
         atr = df_15m.ta.atr(length=14).iloc[-1]
         
         if pd.isna(ema50_15m) or pd.isna(k_now): return None
 
-        # --- التفاصيل والطباعة (Verbose) ---
-
-        # 1. فحص ADX
+        # --- الفلاتر الأساسية ---
+        
+        # 1. فلتر ADX
         if adx_now < 20:
             print(f"💤 {symbol}: Weak ADX ({adx_now:.1f})")
             return None 
 
-        # 2. فحص الاتجاه
+        # 2. فلتر الاتجاه (Trend Alignment)
         is_long_setup = (price_1h > trend_1h) and (curr_price > ema50_15m)
         is_short_setup = (price_1h < trend_1h) and (curr_price < ema50_15m)
 
         if not is_long_setup and not is_short_setup:
-            print(f"🔀 {symbol}: Trend Conflict (1H vs 15m)")
+            print(f"🔀 {symbol}: Trend Conflict")
             return None
 
-        # 3. فحص الإشارة
+        # --- إشارات الدخول (مع الفلاتر الصارمة) ---
         
-        # 🔥 LONG
+        # 🔥 LONG STRATEGY
         if is_long_setup:
+            # الشروط:
+            # 1. تقاطع Stoch للأعلى من منطقة التشبع
+            # 2. الشمعة الحالية خضراء (Close > Open) - هام جداً!
+            # 3. RSI فوق 45 (تأكيد العزم)
             if (k_prev < d_prev) and (k_now > d_now) and (k_prev < 25):
-                entry = curr_price
-                sl = entry - (atr * 1.2)
-                risk = entry - sl
-                tp = entry + (risk * 1.5)
-                return "LONG", entry, tp, sl, int(df_15m.iloc[-1]['time'])
-            else:
-                print(f"⏳ {symbol}: Uptrend Valid (Waiting Stoch...)")
+                if (curr_price > open_price) and (rsi_now > 45):
+                    
+                    entry = curr_price
+                    sl = entry - (atr * 1.5) # ستوب 1.5 ATR
+                    
+                    # 🛡️ حماية: إلغاء الصفقة لو الستوب أكبر من 4%
+                    risk_pct = (entry - sl) / entry * 100
+                    if risk_pct > 4.0:
+                        print(f"⚠️ {symbol}: Skipped (High Risk: {risk_pct:.2f}%)")
+                        return None
+                        
+                    risk = entry - sl
+                    tp = entry + (risk * 1.5)
+                    return "LONG", entry, tp, sl, int(df_15m.iloc[-1]['time'])
+                else:
+                    print(f"⏳ {symbol}: Uptrend Valid (Waiting Candle/RSI...)")
 
-        # 🔥 SHORT
+        # 🔥 SHORT STRATEGY
         if is_short_setup:
+            # الشروط:
+            # 1. تقاطع Stoch للأسفل
+            # 2. الشمعة الحالية حمراء (Close < Open)
+            # 3. RSI تحت 55
             if (k_prev > d_prev) and (k_now < d_now) and (k_prev > 75):
-                entry = curr_price
-                sl = entry + (atr * 1.2)
-                risk = sl - entry
-                tp = entry - (risk * 1.5)
-                return "SHORT", entry, tp, sl, int(df_15m.iloc[-1]['time'])
-            else:
-                print(f"⏳ {symbol}: Downtrend Valid (Waiting Stoch...)")
+                if (curr_price < open_price) and (rsi_now < 55):
+                    
+                    entry = curr_price
+                    sl = entry + (atr * 1.5)
+                    
+                    # 🛡️ حماية
+                    risk_pct = (sl - entry) / entry * 100
+                    if risk_pct > 4.0:
+                        print(f"⚠️ {symbol}: Skipped (High Risk: {risk_pct:.2f}%)")
+                        return None
+
+                    risk = sl - entry
+                    tp = entry - (risk * 1.5)
+                    return "SHORT", entry, tp, sl, int(df_15m.iloc[-1]['time'])
+                else:
+                    print(f"⏳ {symbol}: Downtrend Valid (Waiting Candle/RSI...)")
 
         return None
     except Exception as e:
-        # print(f"⚠️ Error {symbol}: {str(e)}")
         return None
 
 # ==========================================
-# 4. المعالجة السريعة
+# 4. المعالجة السريعة (Turbo)
 # ==========================================
-# 🔥 تسريع: فحص 20 عملة في نفس الوقت بدلاً من 5
-sem = asyncio.Semaphore(20)
+sem = asyncio.Semaphore(20) # فحص 20 عملة في وقت واحد
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
@@ -178,12 +211,12 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (Stoch)</b>" if side == "LONG" else "🔴 <b>SELL (Stoch)</b>"
+                side_text = "🟢 <b>BUY (Pro)</b>" if side == "LONG" else "🔴 <b>SELL (Pro)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"🚀 <code>{clean_name}</code>\n"
+                    f"🛡️ <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -243,7 +276,6 @@ async def monitor_trades(app_state):
                     print(f"🛑 {sym} Loss")
                     
             except: pass
-        # 🔥 تسريع المراقبة لثانيتين
         await asyncio.sleep(2)
 
 async def daily_report_task(app_state):
@@ -270,7 +302,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: TURBO MODE (Detailed Logs)...")
+    print(f"🚀 System Online: PRO EDITION (Filtered)...")
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT:USDT' in s]
@@ -296,7 +328,7 @@ async def start_scanning(app_state):
             await asyncio.gather(*tasks)
             print("--- END SCAN ---\n")
             
-            # 🔥 تسريع الفحص: راحة 10 ثواني فقط بين الدورات
+            # 10 ثوان راحة بين الفحوصات
             await asyncio.sleep(10) 
 
     except Exception as e:
