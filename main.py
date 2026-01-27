@@ -12,17 +12,16 @@ import httpx
 import sys
 
 # ==========================================
-# 1. إعدادات المحرك (Engine Config)
+# 1. إعدادات النظام (System Config)
 # ==========================================
-TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
-CHAT_ID = "-1003653652451"
-RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-
-# إعدادات السرعة والأمان
-MAX_CONCURRENT_TASKS = 30  # أقصى عدد طلبات متوازية (لتجنب الحظر)
-REQUEST_TIMEOUT = 15       # مهلة الطلب
-SCAN_COOLDOWN = 3          # راحة بين دورات الفحص الكاملة
-MIN_VOLUME_USDT = 10_000_000 
+CONFIG = {
+    "TELEGRAM_TOKEN": "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg",
+    "CHAT_ID": "-1003653652451",
+    "MIN_VOLUME": 10_000_000,   # سيولة 10 مليون
+    "MAX_RISK_PCT": 3.5,        # أقصى مخاطرة مسموحة 3.5% (أكثر أماناً)
+    "CONCURRENT_REQUESTS": 10,  # سرعة متوازنة لحماية البيانات
+    "TIMEFRAMES": ['4h', '1h', '15m'] # الفريمات الثلاثة
+}
 
 app = FastAPI()
 
@@ -31,31 +30,36 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#0f0f1a;color:#00ff88;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>☢️ Fortress Bot (NUCLEAR ENGINE)</h1>
-            <p>Strategy: Smart Money Flow (MFI + EMA)</p>
-            <p>Speed: Real-time Async IO</p>
+        <body style='background:#0b0c10;color:#66fcf1;text-align:center;padding-top:50px;font-family:sans-serif;'>
+            <h1>💎 ROYAL FLUSH BOT</h1>
+            <p>Strategy: Multi-Timeframe Confluence (4H + 1H + 15m)</p>
+            <p>Tech: Async Parallel Processing</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 2. نظام الاتصال المتقدم (Advanced I/O)
+# 2. أدوات النظام (Utilities)
 # ==========================================
-async def telegram_api(method, params=None):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}"
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        try:
-            res = await client.post(url, json=params or {})
-            if res.status_code == 200: return res.json()['result']
-        except Exception: pass
-    return None
+class TelegramBot:
+    @staticmethod
+    async def send(message):
+        url = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_TOKEN']}/sendMessage"
+        payload = {"chat_id": CONFIG['CHAT_ID'], "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try:
+                res = await client.post(url, json=payload)
+                if res.status_code == 200: return res.json()['result']['message_id']
+            except: pass
+        return None
 
-async def send_msg(text):
-    return await telegram_api("sendMessage", {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"})
-
-async def reply_msg(text, msg_id):
-    return await telegram_api("sendMessage", {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "reply_to_message_id": msg_id})
+    @staticmethod
+    async def reply(message, msg_id):
+        url = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_TOKEN']}/sendMessage"
+        payload = {"chat_id": CONFIG['CHAT_ID'], "text": message, "parse_mode": "HTML", "reply_to_message_id": msg_id}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            try: await client.post(url, json=payload)
+            except: pass
 
 def fmt_price(price):
     if price is None: return "0"
@@ -65,140 +69,126 @@ def fmt_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. جلب البيانات الذكي (Smart Fetcher)
+# 3. القلب النابض (Data Engine)
 # ==========================================
-async def fetch_ohlcv_safe(symbol, timeframe, limit=300):
-    # محاولة 3 مرات مع انتظار ذكي
-    for attempt in range(3):
-        try:
-            return await exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        except (ccxt.NetworkError, ccxt.ExchangeError):
-            await asyncio.sleep(0.5 * (attempt + 1)) # Exponential Backoff
-        except Exception as e:
-            print(f"⚠️ Fetch Error {symbol}: {e}", flush=True)
-            break
+async def fetch_data_parallel(symbol):
+    """جلب 3 فريمات في نفس اللحظة بالتوازي لتقليل وقت الانتظار"""
+    try:
+        tasks = [
+            exchange.fetch_ohlcv(symbol, '4h', limit=210),  # للاتجاه الكبير
+            exchange.fetch_ohlcv(symbol, '1h', limit=100),  # للزخم
+            exchange.fetch_ohlcv(symbol, '15m', limit=100)  # للدخول
+        ]
+        # تنفيذ الطلبات دفعة واحدة
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # التأكد من سلامة البيانات
+        for res in results:
+            if isinstance(res, Exception) or not res: return None
+            
+        return results # [data_4h, data_1h, data_15m]
+    except:
+        return None
+
+# ==========================================
+# 4. استراتيجية "السلسلة الملكية" (The Strategy)
+# ==========================================
+async def analyze_market(symbol):
+    data = await fetch_data_parallel(symbol)
+    if not data: return None
+    
+    # تحويل البيانات إلى DataFrames
+    df_4h = pd.DataFrame(data[0], columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+    df_1h = pd.DataFrame(data[1], columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+    df_15m = pd.DataFrame(data[2], columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+
+    # --- 1. تحليل الأب (4H Trend) ---
+    df_4h['ema200'] = df_4h.ta.ema(length=200)
+    if pd.isna(df_4h.iloc[-1]['ema200']): return None
+    
+    price_4h = df_4h.iloc[-1]['close']
+    ema200_4h = df_4h.iloc[-1]['ema200']
+    
+    # تحديد الاتجاه العام
+    trend_major = "BULL" if price_4h > ema200_4h else "BEAR"
+
+    # --- 2. تحليل الابن (1H Momentum) ---
+    df_1h['rsi'] = df_1h.ta.rsi(length=14)
+    rsi_1h = df_1h.iloc[-1]['rsi']
+
+    # --- 3. تحليل الحفيد (15m Entry) ---
+    df_15m['ema9'] = df_15m.ta.ema(length=9)
+    df_15m['ema21'] = df_15m.ta.ema(length=21)
+    df_15m['adx'] = df_15m.ta.adx(length=14)[f"ADX_14"]
+    df_15m['atr'] = df_15m.ta.atr(length=14)
+    df_15m['vol_sma'] = df_15m['vol'].rolling(20).mean()
+
+    row = df_15m.iloc[-1]
+    prev = df_15m.iloc[-2]
+    
+    # فلاتر الجودة
+    if row['adx'] < 25: return None # التريند ضعيف
+    if row['vol'] < row['vol_sma']: return None # لا توجد سيولة لحظية
+
+    # --- التطابق (The Confluence) ---
+
+    # 🟢 سيناريو الشراء
+    if trend_major == "BULL":
+        # شرط الزخم (1H)
+        if rsi_1h > 50:
+            # شرط الدخول (15m): تقاطع إيجابي + شمعة خضراء
+            if row['ema9'] > row['ema21'] and row['close'] > row['open']:
+                # التأكد أننا لم ندخل في قمة (RSI 15m ليس متضخماً)
+                rsi_15m = ta.rsi(df_15m['close'], length=14).iloc[-1]
+                if rsi_15m < 70:
+                    entry = row['close']
+                    sl = entry - (row['atr'] * 2.5) # ستوب آمن
+                    
+                    risk = (entry - sl) / entry * 100
+                    if risk > CONFIG['MAX_RISK_PCT']: return None
+                    
+                    tp = entry + ((entry - sl) * 2.0)
+                    return "LONG", entry, tp, sl, int(row['time'])
+
+    # 🔴 سيناريو البيع
+    if trend_major == "BEAR":
+        # شرط الزخم (1H)
+        if rsi_1h < 50:
+            # شرط الدخول (15m)
+            if row['ema9'] < row['ema21'] and row['close'] < row['open']:
+                rsi_15m = ta.rsi(df_15m['close'], length=14).iloc[-1]
+                if rsi_15m > 30:
+                    entry = row['close']
+                    sl = entry + (row['atr'] * 2.5)
+                    
+                    risk = (sl - entry) / entry * 100
+                    if risk > CONFIG['MAX_RISK_PCT']: return None
+                    
+                    tp = entry - ((sl - entry) * 2.0)
+                    return "SHORT", entry, tp, sl, int(row['time'])
+
     return None
 
 # ==========================================
-# 4. قلب الاستراتيجية (The Core Logic)
+# 5. إدارة المهام (Orchestrator)
 # ==========================================
-async def analyze_symbol(symbol):
-    try:
-        # جلب البيانات بالتوازي الحقيقي
-        task_1h = fetch_ohlcv_safe(symbol, '1h', 300)
-        task_5m = fetch_ohlcv_safe(symbol, '5m', 300)
-        
-        data = await asyncio.gather(task_1h, task_5m)
-        if not data[0] or not data[1]: return None # فشل الجلب
-
-        # --- 1. تحليل التريند الكبير (1H) ---
-        df_1h = pd.DataFrame(data[0], columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        if len(df_1h) < 200: return None
-        
-        ema200_1h = ta.ema(df_1h['close'], length=200).iloc[-1]
-        trend_direction = "BULL" if df_1h.iloc[-1]['close'] > ema200_1h else "BEAR"
-
-        # --- 2. تحليل الدخول الدقيق (5m) ---
-        df_5m = pd.DataFrame(data[1], columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        if len(df_5m) < 200: return None
-
-        # المؤشرات المتقدمة
-        # EMA Cloud
-        df_5m['ema9'] = ta.ema(df_5m['close'], length=9)
-        df_5m['ema21'] = ta.ema(df_5m['close'], length=21)
-        df_5m['ema200'] = ta.ema(df_5m['close'], length=200)
-        
-        # MFI (Money Flow Index) - بديل RSI المتطور
-        # يدمج الفوليوم مع السعر لكشف السيولة الحقيقية
-        df_5m['mfi'] = ta.mfi(df_5m['high'], df_5m['low'], df_5m['close'], df_5m['vol'], length=14)
-        
-        # ATR للستوب لوس
-        df_5m['atr'] = ta.atr(df_5m['high'], df_5m['low'], df_5m['close'], length=14)
-
-        # استخراج القيم الحالية
-        row = df_5m.iloc[-1]
-        prev = df_5m.iloc[-2]
-        
-        # لا نحلل إذا كانت البيانات ناقصة
-        if pd.isna(row['ema200']) or pd.isna(row['mfi']): return None
-
-        # --- منطق القنص (Sniper Logic) ---
-
-        # 🟢 سيناريو الشراء (LONG)
-        # 1. التريند العام صاعد (1H)
-        # 2. السعر الحالي فوق EMA 200 (5m)
-        # 3. MFI > 50 (سيولة شرائية)
-        # 4. EMA 9 > EMA 21 (ترتيب إيجابي)
-        # 5. اختراق سعري: السعر أغلق فوق EMA 9 بقوة
-        
-        if trend_direction == "BULL" and row['close'] > row['ema200']:
-            if row['mfi'] > 50 and row['ema9'] > row['ema21']:
-                # شرط الاختراق: السعر الحالي فوق EMA9 والسابق كان يختبره
-                if row['close'] > row['ema9'] and row['close'] > row['open']:
-                    
-                    entry = row['close']
-                    sl = entry - (row['atr'] * 2.0)
-                    risk_pct = (entry - sl) / entry * 100
-                    
-                    # فلتر المخاطرة
-                    if risk_pct > 4.0: 
-                        print(f"🚫 {symbol}: High Risk ({risk_pct:.2f}%)", flush=True)
-                        return None
-                        
-                    tp = entry + ((entry - sl) * 2.0)
-                    return "LONG", entry, tp, sl, int(row['time'])
-                
-                else:
-                    print(f"⏳ {symbol}: Bullish Setup (Waiting Green Candle)", flush=True)
-
-        # 🔴 سيناريو البيع (SHORT)
-        if trend_direction == "BEAR" and row['close'] < row['ema200']:
-            if row['mfi'] < 50 and row['ema9'] < row['ema21']:
-                # شرط الاختراق لأسفل
-                if row['close'] < row['ema9'] and row['close'] < row['open']:
-                    
-                    entry = row['close']
-                    sl = entry + (row['atr'] * 2.0)
-                    risk_pct = (sl - entry) / entry * 100
-                    
-                    if risk_pct > 4.0:
-                        print(f"🚫 {symbol}: High Risk ({risk_pct:.2f}%)", flush=True)
-                        return None
-
-                    tp = entry - ((sl - entry) * 2.0)
-                    return "SHORT", entry, tp, sl, int(row['time'])
-                
-                else:
-                    print(f"⏳ {symbol}: Bearish Setup (Waiting Red Candle)", flush=True)
-
-        return None
-
-    except Exception as e:
-        # print(f"💥 Analysis Error {symbol}: {e}", flush=True)
-        return None
-
-# ==========================================
-# 5. إدارة المهام (Task Manager)
-# ==========================================
-sem = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+sem = asyncio.Semaphore(CONFIG['CONCURRENT_REQUESTS'])
 
 async def worker(symbol, app_state):
-    # التحقق من وقت الحظر (Cool Down)
+    # فحص وقت الحظر (30 دقيقة للعملة الواحدة لمنع التكرار)
     last_check = app_state.last_signal_time.get(symbol, 0)
-    if time.time() - last_check < (15 * 60): return # 15 دقيقة راحة للعملة
+    if time.time() - last_check < (30 * 60): return
     if symbol in app_state.active_trades: return
 
     async with sem:
-        res = await analyze_symbol(symbol)
+        res = await analyze_market(symbol)
         
         if res:
             side, entry, tp, sl, ts = res
             sig_id = f"{symbol}_{side}_{ts}"
             
-            # منع التكرار
             if sig_id in app_state.sent_signals: return
 
-            # تسجيل الإشارة
             app_state.last_signal_time[symbol] = time.time()
             app_state.sent_signals[sig_id] = True
             app_state.stats["total"] += 1
@@ -206,56 +196,51 @@ async def worker(symbol, app_state):
             clean_sym = symbol.split(':')[0]
             risk = abs(entry - sl) / entry * 100
             
-            # رسالة التنبيه
-            emoji = "🟢" if side == "LONG" else "🔴"
+            # 🔥 تصميم الرسالة (Clean & Minimalist)
+            icon = "🟢" if side == "LONG" else "🔴"
             msg = (
-                f"🚀 <b>{clean_sym}</b>\n"
-                f"{emoji} <b>{side} SCALP</b> | 20x\n"
-                f"──────────────\n"
-                f"⚡ <b>Entry:</b> <code>{fmt_price(entry)}</code>\n"
-                f"🎯 <b>Target:</b> <code>{fmt_price(tp)}</code>\n"
-                f"🛑 <b>Stop:</b> <code>{fmt_price(sl)}</code>\n"
-                f"🔥 <b>Risk:</b> {risk:.2f}%\n"
-                f"<i>(MFI Flow + EMA Cloud)</i>"
+                f"{icon} <b>{side} SETUP</b> | <b>{clean_sym}</b>\n"
+                f"➖➖➖➖➖➖➖➖\n"
+                f"📥 <b>Entry:</b> {fmt_price(entry)}\n"
+                f"🎯 <b>Target:</b> {fmt_price(tp)}\n"
+                f"🛑 <b>Stop:</b> {fmt_price(sl)}\n"
+                f"➖➖➖➖➖➖➖➖\n"
+                f"⚖️ <b>Risk:</b> {risk:.2f}% | ⏳ <b>Frame:</b> 15m\n"
+                f"📊 <b>Trend:</b> 4H Aligned ✅"
             )
             
-            print(f"\n🚨 SIGNAL: {clean_sym} {side} !!\n", flush=True)
-            msg_id = await send_msg(msg)
+            print(f"\n💎 ROYAL SIGNAL: {clean_sym} {side}\n", flush=True)
+            msg_id = await TelegramBot.send(msg)
             
             if msg_id:
                 app_state.active_trades[symbol] = {
-                    "side": side, "entry": entry, "tp": tp, "sl": sl, "msg_id": msg_id['message_id']
+                    "side": side, "entry": entry, "tp": tp, "sl": sl, "msg_id": msg_id
                 }
 
 # ==========================================
-# 6. حلقات المراقبة (Event Loops)
+# 6. الحلقات (Loops)
 # ==========================================
 async def scanner_loop(app_state):
-    print("🚀 SCANNER INITIALIZED...", flush=True)
+    print("🚀 SCANNER STARTED...", flush=True)
     await exchange.load_markets()
     
     while True:
         try:
-            # تحديث القائمة كل دورة لضمان السيولة
             tickers = await exchange.fetch_tickers()
             symbols = [s for s, t in tickers.items() 
-                       if '/USDT:USDT' in s and t['quoteVolume'] >= MIN_VOLUME_USDT]
+                       if '/USDT:USDT' in s and t['quoteVolume'] >= CONFIG['MIN_VOLUME']]
             
-            print(f"\n🔎 Scanning {len(symbols)} pairs...", flush=True)
-            
-            # إطلاق المهام دفعة واحدة
+            print(f"\n🔎 Scanning {len(symbols)} pairs (MTF Mode)...", flush=True)
             tasks = [worker(sym, app_state) for sym in symbols]
             await asyncio.gather(*tasks)
-            
-            # استراحة المحارب
-            await asyncio.sleep(SCAN_COOLDOWN)
+            await asyncio.sleep(8) # راحة 8 ثواني
 
         except Exception as e:
-            print(f"⚠️ Scanner Exception: {e}", flush=True)
+            print(f"⚠️ Scanner Loop Error: {e}", flush=True)
             await asyncio.sleep(5)
 
 async def monitor_loop(app_state):
-    print("👀 MONITOR INITIALIZED...", flush=True)
+    print("👀 MONITOR STARTED...", flush=True)
     while True:
         active = list(app_state.active_trades.items())
         if not active:
@@ -267,28 +252,25 @@ async def monitor_loop(app_state):
                 ticker = await exchange.fetch_ticker(sym)
                 price = ticker['last']
                 
-                # التحقق من الهدف أو الستوب
-                hit_tp = (trade['side'] == "LONG" and price >= trade['tp']) or \
+                # منطق التحقق
+                is_win = (trade['side'] == "LONG" and price >= trade['tp']) or \
                          (trade['side'] == "SHORT" and price <= trade['tp'])
-                         
-                hit_sl = (trade['side'] == "LONG" and price <= trade['sl']) or \
-                         (trade['side'] == "SHORT" and price >= trade['sl'])
+                is_loss = (trade['side'] == "LONG" and price <= trade['sl']) or \
+                          (trade['side'] == "SHORT" and price >= trade['sl'])
                 
-                if hit_tp:
-                    await reply_msg(f"✅ <b>PROFIT!</b> {fmt_price(price)}", trade['msg_id'])
+                if is_win:
+                    await TelegramBot.reply(f"✅ <b>PROFIT!</b> Target Smashed!\nPrice: {fmt_price(price)}", trade['msg_id'])
                     app_state.stats["wins"] += 1
                     del app_state.active_trades[sym]
                     print(f"💰 {sym} WIN", flush=True)
                     
-                elif hit_sl:
-                    await reply_msg(f"🛑 <b>STOP LOSS</b> {fmt_price(price)}", trade['msg_id'])
+                elif is_loss:
+                    await TelegramBot.reply(f"🛑 <b>STOP LOSS</b>\nPrice: {fmt_price(price)}", trade['msg_id'])
                     app_state.stats["losses"] += 1
                     del app_state.active_trades[sym]
                     print(f"💀 {sym} LOSS", flush=True)
                     
-            except Exception: pass
-            
-        # سرعة مراقبة فائقة (0.5 ثانية)
+            except: pass
         await asyncio.sleep(0.5)
 
 async def reporter_loop(app_state):
@@ -298,8 +280,8 @@ async def reporter_loop(app_state):
             s = app_state.stats
             total = s["wins"] + s["losses"]
             rate = (s["wins"]/total*100) if total else 0
-            msg = f"📊 <b>Daily Stats:</b>\nWin Rate: {rate:.1f}%\nWins: {s['wins']} | Loss: {s['losses']}"
-            await send_msg(msg)
+            msg = f"📊 <b>Daily Report:</b>\nWin Rate: {rate:.1f}%\nWins: {s['wins']} | Losses: {s['losses']}"
+            await TelegramBot.send(msg)
             app_state.stats = {"total": 0, "wins": 0, "losses": 0}
             await asyncio.sleep(70)
         await asyncio.sleep(60)
@@ -311,9 +293,6 @@ async def pinger():
             except: pass
             await asyncio.sleep(600)
 
-# ==========================================
-# 7. الإطلاق (Launch)
-# ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.sent_signals = {}
@@ -321,7 +300,6 @@ async def lifespan(app: FastAPI):
     app.state.last_signal_time = {}
     app.state.stats = {"total": 0, "wins": 0, "losses": 0}
     
-    # تشغيل كل المحركات
     asyncio.create_task(scanner_loop(app.state))
     asyncio.create_task(monitor_loop(app.state))
     asyncio.create_task(reporter_loop(app.state))
@@ -332,11 +310,10 @@ async def lifespan(app: FastAPI):
 
 app.router.lifespan_context = lifespan
 
-# إعدادات المنصة المحسنة
 exchange = ccxt.mexc({
     'enableRateLimit': True,
     'options': { 'defaultType': 'swap', 'adjustForTimeDifference': True },
-    'timeout': 15000 
+    'timeout': 20000 
 })
 
 if __name__ == "__main__":
