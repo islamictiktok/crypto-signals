@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import time
 from datetime import datetime
 import httpx
-import numpy as np
+import sys
 
 # ==========================================
 # 1. الإعدادات
@@ -18,6 +18,7 @@ TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
+# تصفية العملات المستقرة
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 MIN_VOLUME_USDT = 10_000_000 
 
@@ -28,10 +29,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#1a1b26;color:#7aa2f7;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>⚡ Fortress Bot (Extreme Speed)</h1>
-            <p>Logs: Full Detail</p>
-            <p>Speed: 50 Concurrent Checks</p>
+        <body style='background:#000;color:#0f0;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>☢️ Fortress Bot (DEBUG MODE)</h1>
+            <p>Full Logs: ENABLED</p>
+            <p>Speed: MAX</p>
         </body>
     </html>
     """
@@ -64,32 +65,46 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (EMA Cloud Scalper - Verbose)
+# 3. المنطق (Detailed Logging)
 # ==========================================
 async def get_signal_logic(symbol):
+    # طباعة بداية الفحص للتأكد أن البوت يلمس العملة
+    # print(f"🔍 Checking {symbol}...", flush=True) 
+    
     try:
-        # 1. جلب البيانات
+        # جلب البيانات
         ohlcv_1h_task = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=210)
         ohlcv_5m_task = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
         
-        bars_1h, bars_5m = await asyncio.gather(ohlcv_1h_task, ohlcv_5m_task)
+        # استخدام مهلة زمنية (Timeout) لتجنب تعليق البوت
+        bars_1h, bars_5m = await asyncio.wait_for(
+            asyncio.gather(ohlcv_1h_task, ohlcv_5m_task), 
+            timeout=10.0
+        )
         
-        # --- 1H Trend ---
+        # --- 1H Analysis ---
         df_1h = pd.DataFrame(bars_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        if len(df_1h) < 200:
+            print(f"❌ {symbol}: Not enough data (1H)", flush=True)
+            return None
+
         df_1h['ema200'] = df_1h.ta.ema(length=200)
         trend_1h = df_1h.iloc[-1]['ema200']
         price_1h = df_1h.iloc[-1]['close']
         
-        if pd.isna(trend_1h): return None
-
         # --- 5m Analysis ---
         df_5m = pd.DataFrame(bars_5m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        if len(df_5m) < 200:
+             print(f"❌ {symbol}: Not enough data (5m)", flush=True)
+             return None
+
         df_5m['ema9'] = df_5m.ta.ema(length=9)
         df_5m['ema21'] = df_5m.ta.ema(length=21)
         df_5m['ema200'] = df_5m.ta.ema(length=200)
         df_5m['rsi'] = df_5m.ta.rsi(length=14)
         df_5m['vol_sma'] = df_5m['vol'].rolling(20).mean()
 
+        # القيم الحالية
         close_now = df_5m.iloc[-1]['close']
         open_now = df_5m.iloc[-1]['open']
         ema9_now = df_5m.iloc[-1]['ema9']
@@ -100,97 +115,99 @@ async def get_signal_logic(symbol):
         vol_avg = df_5m.iloc[-1]['vol_sma']
         atr = df_5m.ta.atr(length=14).iloc[-1]
 
+        # القيم السابقة
         close_prev = df_5m.iloc[-2]['close']
-        open_prev = df_5m.iloc[-2]['open']
         ema9_prev = df_5m.iloc[-2]['ema9']
 
-        if pd.isna(ema200_5m) or pd.isna(vol_avg): return None
+        # --- الفحص والطباعة ---
 
-        # --- الفلاتر والتقارير ---
-        
-        # 1. فلتر التريند المزدوج
+        # 1. فحص الاتجاه العام (1H) والمحلي (5m)
         is_uptrend = (price_1h > trend_1h) and (close_now > ema200_5m)
         is_downtrend = (price_1h < trend_1h) and (close_now < ema200_5m)
 
         if not is_uptrend and not is_downtrend:
-            print(f"🔀 {symbol}: Trend Conflict (1H vs 5m)")
+            # طباعة سبب الرفض
+            print(f"🔀 {symbol}: Conflict (1H vs 5m)", flush=True)
             return None
 
-        # --- استراتيجية الارتداد ---
-
-        # 🔥 LONG
+        # 🔥 LONG CHECK
         if is_uptrend:
-            # سبب الرفض 1: ترتيب المتوسطات
             if not (ema9_now > ema21_now):
-                print(f"⏳ {symbol}: Uptrend (Waiting EMA alignment)")
+                print(f"⏳ {symbol}: Uptrend (Waiting EMA Cross)", flush=True)
                 return None
             
-            # سبب الرفض 2: الاختراق
-            if not ((close_now > ema9_now) and (close_prev <= ema9_prev)):
-                print(f"⏳ {symbol}: Uptrend (Waiting Breakout)")
+            # شرط الاختراق
+            breakout = (close_now > ema9_now) and (close_prev <= ema9_prev)
+            if not breakout:
+                print(f"⏳ {symbol}: Uptrend (Waiting Breakout)", flush=True)
                 return None
             
-            # سبب الرفض 3: الشمعة خضراء
-            if not (close_now > open_now):
-                 print(f"⚠️ {symbol}: Red Candle Breakout (Ignored)")
-                 return None
-                 
-            # سبب الرفض 4: الزخم والفوليوم
+            # شرط الشمعة الخضراء
+            if close_now <= open_now:
+                print(f"⚠️ {symbol}: Uptrend (Red Candle - Ignored)", flush=True)
+                return None
+                
+            # شرط الفوليوم والزخم
             if not (rsi_now > 50 and vol_now > vol_avg):
-                print(f"⚠️ {symbol}: Weak Volume/RSI")
+                print(f"⚠️ {symbol}: Uptrend (Weak Vol/RSI)", flush=True)
                 return None
 
-            # دخول
+            # ✅ دخول
             entry = close_now
             sl = entry - (atr * 2.0)
             if ((entry - sl) / entry * 100) > 4: 
-                print(f"⚠️ {symbol}: High Risk (>4%)")
+                print(f"🚫 {symbol}: Stop too wide (>4%)", flush=True)
                 return None
-            
+                
             tp = entry + ((entry - sl) * 2.0)
             return "LONG", entry, tp, sl, int(df_5m.iloc[-1]['time'])
 
-        # 🔥 SHORT
+        # 🔥 SHORT CHECK
         if is_downtrend:
             if not (ema9_now < ema21_now):
-                print(f"⏳ {symbol}: Downtrend (Waiting EMA alignment)")
-                return None
-
-            if not ((close_now < ema9_now) and (close_prev >= ema9_prev)):
-                print(f"⏳ {symbol}: Downtrend (Waiting Breakout)")
+                print(f"⏳ {symbol}: Downtrend (Waiting EMA Cross)", flush=True)
                 return None
             
-            if not (close_now < open_now):
-                print(f"⚠️ {symbol}: Green Candle Breakdown (Ignored)")
+            breakout = (close_now < ema9_now) and (close_prev >= ema9_prev)
+            if not breakout:
+                print(f"⏳ {symbol}: Downtrend (Waiting Breakout)", flush=True)
                 return None
+            
+            if close_now >= open_now:
+                 print(f"⚠️ {symbol}: Downtrend (Green Candle - Ignored)", flush=True)
+                 return None
 
             if not (rsi_now < 50 and vol_now > vol_avg):
-                print(f"⚠️ {symbol}: Weak Volume/RSI")
+                print(f"⚠️ {symbol}: Downtrend (Weak Vol/RSI)", flush=True)
                 return None
 
+            # ✅ دخول
             entry = close_now
             sl = entry + (atr * 2.0)
             if ((sl - entry) / entry * 100) > 4:
-                print(f"⚠️ {symbol}: High Risk (>4%)")
+                print(f"🚫 {symbol}: Stop too wide (>4%)", flush=True)
                 return None
-
+                
             tp = entry - ((sl - entry) * 2.0)
             return "SHORT", entry, tp, sl, int(df_5m.iloc[-1]['time'])
 
         return None
+
     except Exception as e:
+        # 🔥 هنا يظهر سبب المشكلة الحقيقية
+        print(f"💥 Error scanning {symbol}: {str(e)}", flush=True)
         return None
 
 # ==========================================
-# 4. المعالجة (Extreme Speed)
+# 4. المعالجة السريعة
 # ==========================================
-# 🔥 فحص 50 عملة في نفس اللحظة!
-sem = asyncio.Semaphore(50)
+# سيمفور 25 لضمان السرعة وعدم الضغط على API
+sem = asyncio.Semaphore(25)
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    # حظر 15 دقيقة فقط
-    if time.time() - last_sig_time < (15 * 60): return
+    # حظر 10 دقائق فقط
+    if time.time() - last_sig_time < (10 * 60): return
     if symbol in app_state.active_trades: return
 
     async with sem:
@@ -207,7 +224,7 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>SCALP BUY</b>" if side == "LONG" else "🔴 <b>SCALP SELL</b>"
+                side_text = "🟢 <b>BUY SCALP</b>" if side == "LONG" else "🔴 <b>SELL SCALP</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
@@ -220,11 +237,10 @@ async def safe_check(symbol, app_state):
                     f"🏆 <b>TARGET:</b> <code>{format_price(tp)}</code>\n"
                     f"──────────────\n"
                     f"🛑 <b>STOP:</b> <code>{format_price(sl)}</code>\n"
-                    f"<i>(Risk: {sl_pct:.2f}%)</i>\n"
-                    f"<i>(EMA Cloud + Vol)</i>"
+                    f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n🔥 SIGNAL: {clean_name} {side}")
+                print(f"\n🔥 SIGNAL FOUND: {clean_name} {side} !!!\n", flush=True)
                 msg_id = await send_telegram_msg(msg)
                 
                 if msg_id:
@@ -233,10 +249,10 @@ async def safe_check(symbol, app_state):
                     }
 
 # ==========================================
-# 5. المراقبة (Instant)
+# 5. المراقبة
 # ==========================================
 async def monitor_trades(app_state):
-    print("👀 Monitoring Active Trades (Realtime)...")
+    print("👀 Monitoring Trades Started...", flush=True)
     while True:
         current_symbols = list(app_state.active_trades.keys())
         for sym in current_symbols:
@@ -261,19 +277,18 @@ async def monitor_trades(app_state):
                     elif price >= sl: hit_sl = True
                 
                 if hit_tp:
-                    await reply_telegram_msg(f"✅ <b>PROFIT SECURED!</b>\nPrice: {format_price(price)}", msg_id)
+                    await reply_telegram_msg(f"✅ <b>TARGET HIT!</b>\nPrice: {format_price(price)}", msg_id)
                     app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
                     del app_state.active_trades[sym]
-                    print(f"✅ {sym} Win")
+                    print(f"✅ {sym} Win", flush=True)
                     
                 elif hit_sl:
-                    await reply_telegram_msg(f"🛑 <b>STOPPED OUT</b>\nPrice: {format_price(price)}", msg_id)
+                    await reply_telegram_msg(f"🛑 <b>STOP LOSS HIT</b>\nPrice: {format_price(price)}", msg_id)
                     app_state.stats["losses"] = app_state.stats.get("losses", 0) + 1
                     del app_state.active_trades[sym]
-                    print(f"🛑 {sym} Loss")
+                    print(f"🛑 {sym} Loss", flush=True)
                     
             except: pass
-        # 🔥 مراقبة كل ثانية واحدة
         await asyncio.sleep(1)
 
 async def daily_report_task(app_state):
@@ -282,13 +297,12 @@ async def daily_report_task(app_state):
         if now.hour == 23 and now.minute == 59:
             stats = app_state.stats
             total = stats.get("wins", 0) + stats.get("losses", 0)
-            wins = stats.get("wins", 0)
-            losses = stats.get("losses", 0)
-            win_rate = (wins / total * 100) if total > 0 else 0
+            
+            win_rate = (stats["wins"] / total * 100) if total > 0 else 0
             
             report = (
                 f"📊 <b>DAILY REPORT</b>\n──────────────\n"
-                f"🔢 <b>Trades:</b> {total}\n✅ <b>Wins:</b> {wins}\n❌ <b>Losses:</b> {losses}\n"
+                f"🔢 <b>Trades:</b> {total}\n✅ <b>Wins:</b> {stats['wins']}\n❌ <b>Losses:</b> {stats['losses']}\n"
                 f"🎯 <b>Win Rate:</b> {win_rate:.1f}%"
             )
             await send_telegram_msg(report)
@@ -300,7 +314,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: EXTREME SPEED MODE...")
+    print(f"🚀 System Online: Waiting for pairs...", flush=True)
     try:
         await exchange.load_markets()
         all_symbols = [s for s in exchange.symbols if '/USDT:USDT' in s]
@@ -314,29 +328,33 @@ async def start_scanning(app_state):
                         new_symbols.append(s)
                 app_state.symbols = new_symbols
                 
-                print(f"\n🔄 Filter Updated: Found {len(new_symbols)} coins (10M+).")
+                print(f"\n🔄 Filter Updated: Found {len(new_symbols)} coins (10M+).", flush=True)
                 
-            except: pass
+            except Exception as e:
+                print(f"⚠️ Error updating symbols: {e}", flush=True)
             
             if not app_state.symbols:
-                await asyncio.sleep(10); continue
+                await asyncio.sleep(5); continue
 
-            print("--- START SCAN ---")
+            print(f"--- START SCAN ({len(app_state.symbols)} Coins) ---", flush=True)
+            
+            # تنفيذ المهام
             tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
             await asyncio.gather(*tasks)
-            print("--- END SCAN ---\n")
             
-            # 🔥 راحة 5 ثواني فقط بين الفحوصات
-            await asyncio.sleep(5) 
+            print("--- END SCAN ---", flush=True)
+            
+            # راحة 3 ثواني فقط
+            await asyncio.sleep(3) 
 
     except Exception as e:
-        print(f"❌ Critical Error: {e}")
+        print(f"❌ Critical Error: {e}", flush=True)
         await asyncio.sleep(10)
 
 async def keep_alive_task():
     async with httpx.AsyncClient() as client:
         while True:
-            try: await client.get(RENDER_URL); print("💓")
+            try: await client.get(RENDER_URL); print("💓", flush=True)
             except: pass
             await asyncio.sleep(600)
 
@@ -360,7 +378,8 @@ app.router.lifespan_context = lifespan
 
 exchange = ccxt.mexc({
     'enableRateLimit': True,
-    'options': { 'defaultType': 'swap' }
+    'options': { 'defaultType': 'swap' },
+    'timeout': 10000 
 })
 
 if __name__ == "__main__":
