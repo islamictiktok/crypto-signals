@@ -1,7 +1,6 @@
 import asyncio
 import os
 import time
-import sys
 from datetime import datetime
 from contextlib import asynccontextmanager
 
@@ -14,54 +13,80 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 # ==========================================
-# 1. التكوين المركزي (Central Config)
+# 1. الإعدادات (Configuration)
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     
     # إعدادات التداول
-    TIMEFRAMES = {'major': '4h', 'entry': '15m'}
-    MIN_VOLUME_USDT = 15_000_000  # رفعنا شرط السيولة لـ 15 مليون لضمان قوة الحركة
-    MAX_RISK_PERCENT = 3.0        # أقصى مخاطرة للصفقة
-    REWARD_RATIO = 2.0            # الهدف ضعف الستوب
+    TIMEFRAMES = {'trend': '4h', 'entry': '15m'}
+    MIN_VOLUME = 15_000_000 
+    MAX_RISK_PCT = 5.0      
     
     # إعدادات النظام
-    CONCURRENT_REQUESTS = 12      # توازي متوازن
-    SCAN_INTERVAL = 4             # ثواني الانتظار بين الفحوصات
-    CACHE_TTL_4H = 3600           # مدة تخزين تحليل الـ 4 ساعات (ساعة واحدة)
+    CONCURRENT_REQUESTS = 10
+    SCAN_DELAY = 4
 
 # ==========================================
-# 2. أدوات النظام (System Utilities)
+# 2. الواجهة والرسائل (UI & Notifications)
 # ==========================================
-class Logger:
+class UI:
     @staticmethod
-    def log(message):
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}", flush=True)
+    def get_dashboard():
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Fortress Bot V7.1</title>
+            <style>
+                body { background-color: #0d1117; color: #c9d1d9; font-family: sans-serif; text-align: center; padding-top: 50px; }
+                .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 40px; max-width: 600px; margin: auto; }
+                h1 { color: #58a6ff; }
+                .status { color: #238636; font-weight: bold; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h1>🐺 Fortress Bot V7.1</h1>
+                <p class="status">● ONLINE & REPORTING</p>
+                <hr style="border-color: #30363d;">
+                <p>Strategy: Pivot Points + Strong Candle Filter</p>
+                <p>Daily Report: Active ✅</p>
+            </div>
+        </body>
+        </html>
+        """
 
 class Notifier:
     @staticmethod
-    async def send_telegram(text, reply_to=None):
+    def format_card(symbol, side, entry, tp, sl, risk, note):
+        clean_sym = symbol.split(':')[0]
+        icon = "🟢" if side == "LONG" else "🔴"
+        return (
+            f"<b>{icon} {clean_sym} | {side}</b>\n"
+            f"<code>━━━━━━━━━━━━━━━━━━</code>\n"
+            f"🧱 <b>Entry:</b>  <code>{entry}</code>\n"
+            f"🎯 <b>Target:</b> <code>{tp}</code>\n"
+            f"🛡️ <b>Stop:</b>   <code>{sl}</code>\n"
+            f"<code>━━━━━━━━━━━━━━━━━━</code>\n"
+            f"⚠️ <b>Risk:</b> {risk:.2f}% | ℹ️ {note}"
+        )
+
+    @staticmethod
+    async def send(text, reply_to=None):
         url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": Config.CHAT_ID,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }
-        if reply_to:
-            payload["reply_to_message_id"] = reply_to
+        payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        if reply_to: payload["reply_to_message_id"] = reply_to
             
         async with httpx.AsyncClient(timeout=10.0) as client:
             try:
                 res = await client.post(url, json=payload)
-                if res.status_code == 200:
-                    return res.json().get('result', {}).get('message_id')
-            except Exception as e:
-                Logger.log(f"⚠️ Telegram Error: {e}")
+                if res.status_code == 200: return res.json().get('result', {}).get('message_id')
+            except: pass
         return None
 
-def format_price(price):
+def fmt(price):
     if not price: return "0"
     if price >= 1000: return f"{price:.2f}"
     if price >= 1: return f"{price:.3f}"
@@ -69,327 +94,243 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. إدارة البيانات (Data Layer & Caching)
+# 3. محرك الاستراتيجية (Core Logic)
 # ==========================================
-class DataManager:
+class StrategyEngine:
     def __init__(self, exchange):
         self.exchange = exchange
-        self._trend_cache = {}  # تخزين اتجاه الـ 4 ساعات
+        self.trend_cache = {}
 
-    async def get_major_trend(self, symbol):
-        """جلب الاتجاه العام مع التخزين المؤقت"""
-        now = time.time()
-        
-        # فحص الكاش
-        if symbol in self._trend_cache:
-            data = self._trend_cache[symbol]
-            if now - data['time'] < Config.CACHE_TTL_4H:
-                return data['trend']
-
-        # جلب جديد
+    async def get_structure_levels(self, symbol):
+        # حساب نقاط البيفوت (الدعوم والمقاومات)
         try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAMES['major'], limit=200)
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAMES['trend'], limit=5)
             if not ohlcv: return None
             
-            df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            # الشمعة المغلقة السابقة
+            prev = ohlcv[-2] 
+            high, low, close = prev[2], prev[3], prev[4]
             
-            # استراتيجية SuperTrend للاتجاه العام
-            # نستخدم EMA 200 كفلتر أساسي
-            ema200 = ta.ema(df['close'], length=200).iloc[-1]
-            close = df['close'].iloc[-1]
+            pivot = (high + low + close) / 3
+            r1 = (2 * pivot) - low
+            s1 = (2 * pivot) - high
+            r2 = pivot + (high - low)
+            s2 = pivot - (high - low)
             
-            trend = "BULL" if close > ema200 else "BEAR"
-            
-            # تحديث الكاش
-            self._trend_cache[symbol] = {'trend': trend, 'time': now}
-            return trend
-        except Exception:
-            return None
+            return {'R1': r1, 'S1': s1, 'R2': r2, 'S2': s2}
+        except: return None
 
-    async def fetch_entry_data(self, symbol):
-        """جلب بيانات الدخول (15m)"""
+    async def analyze(self, symbol):
+        # 1. جلب مستويات الشارت
+        levels = await self.get_structure_levels(symbol)
+        if not levels: return None
+
+        # 2. جلب بيانات الدخول
         try:
             ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAMES['entry'], limit=100)
             if not ohlcv: return None
-            return pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        except Exception:
-            return None
+            df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        except: return None
 
-# ==========================================
-# 4. محرك الاستراتيجية (Strategy Engine)
-# ==========================================
-class StrategyEngine:
-    def __init__(self, data_manager):
-        self.dm = data_manager
-
-    async def analyze(self, symbol):
-        # 1. الفلتر الأول: الاتجاه العام (سريع جداً)
-        major_trend = await self.dm.get_major_trend(symbol)
-        if not major_trend: return None
-
-        # 2. جلب بيانات الدخول
-        df = await self.dm.fetch_entry_data(symbol)
-        if df is None or df.empty: return None
-
-        # 3. حساب المؤشرات الفنية (Technical Indicators)
+        # 3. المؤشرات
         try:
-            # A. المتوسطات الأسية
-            df['ema9'] = ta.ema(df['close'], length=9)
-            df['ema21'] = ta.ema(df['close'], length=21)
-            
-            # B. مؤشر السيولة الذكي (MFI) - أفضل من RSI
             df['mfi'] = ta.mfi(df['high'], df['low'], df['close'], df['vol'], length=14)
+            df['ema200'] = ta.ema(df['close'], length=200)
             
-            # C. مؤشر التقلب (ATR) للستوب لوس
-            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            
-            # D. متوسط الفوليوم
-            df['vol_sma'] = df['vol'].rolling(20).mean()
+            # Swing Points
+            df['swing_low'] = df['low'].rolling(15).min()
+            df['swing_high'] = df['high'].rolling(15).max()
 
-            # القيم الحالية
             row = df.iloc[-1]
-            prev = df.iloc[-2]
-
-            # --- فلاتر الجودة (Quality Filters) ---
-            if pd.isna(row['ema9']) or pd.isna(row['mfi']): return None
+            if pd.isna(row['ema200']) or pd.isna(row['mfi']): return None
             
-            # شرط السيولة: الفوليوم الحالي أعلى من المتوسط
-            if row['vol'] < row['vol_sma']: return None
+            # 🔥 فلتر الشمعة القوية (NEW)
+            candle_len = row['high'] - row['low']
+            body_len = abs(row['close'] - row['open'])
+            is_strong_candle = body_len > (candle_len * 0.5) # الجسم أكبر من 50%
 
-            # --- منطق الدخول (Entry Logic) ---
+            # 🟢 LONG
+            if row['close'] > row['ema200'] and 50 < row['mfi'] < 80:
+                if row['close'] > row['open'] and is_strong_candle:
+                    
+                    entry = row['close']
+                    
+                    # اختيار الهدف (R1 أو R2)
+                    if entry < levels['R1'] * 0.995: # هل المسافة لـ R1 تستحق؟
+                        tp = levels['R1']
+                        note = "Target: R1 (Res)"
+                    else:
+                        tp = levels['R2']
+                        note = "Target: R2 (Res)"
+                    
+                    sl = df['swing_low'].iloc[-2] * 0.998
+                    
+                    # التحقق النهائي
+                    if entry >= tp or sl >= entry: return None
+                    risk_pct = ((entry - sl) / entry) * 100
+                    if risk_pct > Config.MAX_RISK_PCT: return None
+                    
+                    reward_risk = (tp - entry) / (entry - sl)
+                    if reward_risk < 1.5: return None 
 
-            # 🟢 شراء (LONG)
-            if major_trend == "BULL":
-                # 1. السيولة تدعم الشراء (MFI > 50) ولكن ليست متضخمة جداً (>80)
-                if 50 < row['mfi'] < 80:
-                    # 2. تقاطع إيجابي للمتوسطات
-                    if row['ema9'] > row['ema21']:
-                        # 3. السعر فوق المتوسطات (تأكيد قوة)
-                        if row['close'] > row['ema9']:
-                            # 4. شمعة خضراء قوية
-                            if row['close'] > row['open']:
-                                
-                                # حساب الأهداف
-                                entry = row['close']
-                                stop_loss = entry - (row['atr'] * 2.0) # ستوب 2 ATR
-                                
-                                # فلتر المخاطرة
-                                risk_pct = ((entry - stop_loss) / entry) * 100
-                                if risk_pct > Config.MAX_RISK_PERCENT: return None
-                                
-                                take_profit = entry + ((entry - stop_loss) * Config.REWARD_RATIO)
-                                return "LONG", entry, take_profit, stop_loss, int(row['time'])
+                    return "LONG", entry, tp, sl, int(row['time']), note
 
-            # 🔴 بيع (SHORT)
-            if major_trend == "BEAR":
-                if 20 < row['mfi'] < 50:
-                    if row['ema9'] < row['ema21']:
-                        if row['close'] < row['ema9']:
-                            if row['close'] < row['open']:
-                                
-                                entry = row['close']
-                                stop_loss = entry + (row['atr'] * 2.0)
-                                
-                                risk_pct = ((stop_loss - entry) / entry) * 100
-                                if risk_pct > Config.MAX_RISK_PERCENT: return None
-                                
-                                take_profit = entry - ((stop_loss - entry) * Config.REWARD_RATIO)
-                                return "SHORT", entry, take_profit, stop_loss, int(row['time'])
+            # 🔴 SHORT
+            if row['close'] < row['ema200'] and 20 < row['mfi'] < 50:
+                if row['close'] < row['open'] and is_strong_candle:
+                    
+                    entry = row['close']
+                    
+                    if entry > levels['S1'] * 1.005:
+                        tp = levels['S1']
+                        note = "Target: S1 (Sup)"
+                    else:
+                        tp = levels['S2']
+                        note = "Target: S2 (Sup)"
+                    
+                    sl = df['swing_high'].iloc[-2] * 1.002
+                    
+                    if entry <= tp or sl <= entry: return None
+                    risk_pct = ((sl - entry) / entry) * 100
+                    if risk_pct > Config.MAX_RISK_PCT: return None
+                    
+                    reward_risk = (entry - tp) / (sl - entry)
+                    if reward_risk < 1.5: return None
 
-        except Exception as e:
-            # Logger.log(f"Analysis Error {symbol}: {e}")
-            pass
-        
+                    return "SHORT", entry, tp, sl, int(row['time']), note
+
+        except Exception: return None
         return None
 
 # ==========================================
-# 5. مدير الحالة والمهام (State & Tasks)
+# 4. المحركات (Loops)
 # ==========================================
-class BotState:
-    def __init__(self):
-        self.sent_signals = {}      # لمنع التكرار
-        self.active_trades = {}     # الصفقات المفتوحة
-        self.last_check = {}        # توقيت آخر فحص لكل عملة
-        self.stats = {"wins": 0, "losses": 0}
-
-state = BotState()
+state = {"active": {}, "history": {}, "stats": {"wins": 0, "losses": 0}}
 sem = asyncio.Semaphore(Config.CONCURRENT_REQUESTS)
 
-async def scan_worker(symbol, engine):
-    # نظام الكوول داون (Cooldown)
-    now = time.time()
-    if now - state.last_check.get(symbol, 0) < 900: # 15 دقيقة راحة للعملة
-        return
-    if symbol in state.active_trades:
-        return
+async def scan_task(symbol, engine):
+    if time.time() - state['history'].get(symbol, 0) < 900: return
+    if symbol in state['active']: return
 
     async with sem:
-        result = await engine.analyze(symbol)
-        
-        if result:
-            side, entry, tp, sl, ts = result
-            sig_id = f"{symbol}_{side}_{ts}"
-            
-            if sig_id in state.sent_signals: return
+        res = await engine.analyze(symbol)
+        if res:
+            side, entry, tp, sl, ts, note = res
+            sig_key = f"{symbol}_{ts}"
+            if sig_key in state['history']: return
 
-            # تسجيل الإشارة
-            state.last_check[symbol] = now
-            state.sent_signals[sig_id] = True
+            state['history'][symbol] = time.time()
+            state['history'][sig_key] = True
             
-            # إرسال التنبيه
-            clean_sym = symbol.split(':')[0]
             risk = abs(entry - sl) / entry * 100
-            icon = "🟢" if side == "LONG" else "🔴"
+            msg = Notifier.format_card(symbol, side, fmt(entry), fmt(tp), fmt(sl), risk, note)
             
-            msg = (
-                f"{icon} <b>{clean_sym}</b> | <b>{side}</b>\n"
-                f"──────────────\n"
-                f"⚡ <b>Entry:</b> {format_price(entry)}\n"
-                f"🏆 <b>Target:</b> {format_price(tp)}\n"
-                f"🛑 <b>Stop:</b> {format_price(sl)}\n"
-                f"──────────────\n"
-                f"⚖️ <b>Risk:</b> {risk:.2f}% | 📊 <b>MFI Flow</b>"
-            )
-            
-            Logger.log(f"🔥 SIGNAL: {clean_sym} {side}")
-            msg_id = await Notifier.send_telegram(msg)
+            print(f"\n🔥 SIGNAL: {symbol} {side}")
+            msg_id = await Notifier.send(msg)
             
             if msg_id:
-                state.active_trades[symbol] = {
-                    "side": side, "entry": entry, "tp": tp, "sl": sl, "msg_id": msg_id
-                }
+                state['active'][symbol] = {"side": side, "tp": tp, "sl": sl, "msg_id": msg_id}
 
 async def scanner_loop(exchange):
-    Logger.log("🚀 Scanner Initialized (High Performance Mode)")
-    dm = DataManager(exchange)
-    engine = StrategyEngine(dm)
-    
+    print("🚀 Scanner Started...")
+    engine = StrategyEngine(exchange)
     while True:
         try:
-            # تحديث القائمة في كل دورة
             tickers = await exchange.fetch_tickers()
-            symbols = [
-                s for s, t in tickers.items() 
-                if '/USDT:USDT' in s and t['quoteVolume'] >= Config.MIN_VOLUME_USDT
-            ]
-            
-            Logger.log(f"🔎 Scanning {len(symbols)} pairs...")
-            
-            tasks = [scan_worker(sym, engine) for sym in symbols]
-            await asyncio.gather(*tasks)
-            
-            await asyncio.sleep(Config.SCAN_INTERVAL)
-            
+            symbols = [s for s, t in tickers.items() if '/USDT:USDT' in s and t['quoteVolume'] >= Config.MIN_VOLUME]
+            print(f"\n🔎 Scanning {len(symbols)} pairs...", flush=True)
+            await asyncio.gather(*[scan_task(s, engine) for s in symbols])
+            await asyncio.sleep(Config.SCAN_DELAY)
         except Exception as e:
-            Logger.log(f"⚠️ Scanner Loop Error: {e}")
+            print(f"⚠️ Error: {e}")
             await asyncio.sleep(5)
 
 async def monitor_loop(exchange):
-    Logger.log("👀 Monitor Initialized (Fixed Target/Stop)")
+    print("👀 Monitor Started...")
     while True:
-        active_symbols = list(state.active_trades.keys())
-        
-        if not active_symbols:
+        if not state['active']:
             await asyncio.sleep(1)
-            continue
-            
-        for sym in active_symbols:
-            trade = state.active_trades[sym]
+            continue 
+        for sym in list(state['active'].keys()):
             try:
+                trade = state['active'][sym]
                 ticker = await exchange.fetch_ticker(sym)
                 price = ticker['last']
                 
-                is_win = False
-                is_loss = False
+                win = (trade['side'] == "LONG" and price >= trade['tp']) or \
+                      (trade['side'] == "SHORT" and price <= trade['tp'])
+                loss = (trade['side'] == "LONG" and price <= trade['sl']) or \
+                       (trade['side'] == "SHORT" and price >= trade['sl'])
                 
-                # فحص الهدف والستوب (كلاسيكي)
-                if trade['side'] == "LONG":
-                    if price >= trade['tp']: is_win = True
-                    elif price <= trade['sl']: is_loss = True
-                else:
-                    if price <= trade['tp']: is_win = True
-                    elif price >= trade['sl']: is_loss = True
-                
-                if is_win:
-                    await Notifier.send_telegram(
-                        f"✅ <b>TARGET HIT!</b>\nPrice: {format_price(price)}", 
-                        reply_to=trade['msg_id']
-                    )
-                    state.stats['wins'] += 1
-                    del state.active_trades[sym]
-                    Logger.log(f"💰 {sym} WIN")
-                    
-                elif is_loss:
-                    await Notifier.send_telegram(
-                        f"🛑 <b>STOP LOSS HIT</b>\nPrice: {format_price(price)}", 
-                        reply_to=trade['msg_id']
-                    )
-                    state.stats['losses'] += 1
-                    del state.active_trades[sym]
-                    Logger.log(f"💀 {sym} LOSS")
-                    
-            except Exception:
-                pass
-        
-        # سرعة مراقبة عالية
-        await asyncio.sleep(0.5)
+                if win:
+                    await Notifier.send(f"✅ <b>TARGET SMASHED!</b>\nPrice: {fmt(price)}", trade['msg_id'])
+                    state['stats']['wins'] += 1
+                    del state['active'][sym]
+                elif loss:
+                    await Notifier.send(f"🛑 <b>STOP LOSS HIT</b>\nPrice: {fmt(price)}", trade['msg_id'])
+                    state['stats']['losses'] += 1
+                    del state['active'][sym]
+            except: pass
+        await asyncio.sleep(1)
 
+# 🔥 دالة التقرير اليومي (تمت إعادتها)
 async def report_loop():
+    print("📊 Reporter Started...")
     while True:
         now = datetime.now()
+        # الساعة 23:59 (نهاية اليوم)
         if now.hour == 23 and now.minute == 59:
-            s = state.stats
+            s = state['stats']
             total = s['wins'] + s['losses']
             rate = (s['wins'] / total * 100) if total > 0 else 0
             
-            msg = f"📊 <b>Daily Summary</b>\nWins: {s['wins']}\nLosses: {s['losses']}\nRate: {rate:.1f}%"
-            await Notifier.send_telegram(msg)
+            msg = (
+                f"📊 <b>DAILY REPORT</b>\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"✅ Wins: {s['wins']}\n"
+                f"❌ Losses: {s['losses']}\n"
+                f"🎯 Win Rate: {rate:.1f}%\n"
+                f"━━━━━━━━━━━━━━"
+            )
+            await Notifier.send(msg)
             
-            # تصفير العدادات
-            state.stats = {"wins": 0, "losses": 0}
-            await asyncio.sleep(70)
-        await asyncio.sleep(60)
+            # تصفير العدادات لليوم الجديد
+            state['stats'] = {"wins": 0, "losses": 0}
+            await asyncio.sleep(70) # ننتظر دقيقة حتى لا يرسل مرتين
+        await asyncio.sleep(30)
 
 async def keep_alive():
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient() as c:
         while True:
-            try: 
-                await client.get("https://crypto-signals-w9wx.onrender.com")
-                Logger.log("💓 Ping")
+            try: await c.get("https://crypto-signals-w9wx.onrender.com"); print("💓")
             except: pass
             await asyncio.sleep(600)
 
 # ==========================================
-# 6. نقطة الدخول (Entry Point)
+# 5. تشغيل التطبيق
 # ==========================================
 app = FastAPI()
 
 @app.on_event("startup")
-async def startup_event():
-    # إعداد المنصة
-    exchange = ccxt.mexc({
-        'enableRateLimit': True,
-        'options': { 'defaultType': 'swap', 'adjustForTimeDifference': True },
-        'timeout': 20000
-    })
+async def start():
+    exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
     await exchange.load_markets()
     
-    # تشغيل المهام في الخلفية
+    # تشغيل جميع المهام
     asyncio.create_task(scanner_loop(exchange))
     asyncio.create_task(monitor_loop(exchange))
-    asyncio.create_task(report_loop())
+    asyncio.create_task(report_loop())  # ✅ تمت الإضافة
     asyncio.create_task(keep_alive())
     
     app.state.exchange = exchange
 
 @app.on_event("shutdown")
-async def shutdown_event():
-    if hasattr(app.state, 'exchange'):
-        await app.state.exchange.close()
+async def stop():
+    await app.state.exchange.close()
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def home():
-    return "🐺 Fortress Bot V5 is Running..."
+    return UI.get_dashboard()
 
 if __name__ == "__main__":
     import uvicorn
