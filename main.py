@@ -6,48 +6,56 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 
 import pandas as pd
+import pandas_ta as ta
 import ccxt.async_support as ccxt
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 # ==========================================
-# 1. الإعدادات (Config)
+# 1. إعدادات "البنتاغون" (Strict Config)
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     
-    TIMEFRAME = '15m'       # الفريم
-    MIN_VOLUME = 15_000_000 # السيولة
+    # الفريمات
+    TREND_FRAME = '1h'      # شرط 1
+    ENTRY_FRAME = '5m'      # شروط 2,3,4,5
     
-    # إعدادات إعادة الاختبار
-    RETEST_BUFFER = 0.003   # السماح بفارق 0.3% عند إعادة الاختبار (Zone)
-    LOOKBACK_CANDLES = 50   # البحث في آخر 50 شمعة عن الكسر
-
+    MIN_VOLUME = 15_000_000 # فلتر سيولة أساسي
+    
+    # إدارة المخاطر
+    RISK_REWARD = 2.0
+    MAX_RISK_PCT = 2.5      # ستوب ضيق للصفقات عالية الجودة
+    
     # النظام
-    CONCURRENT_REQUESTS = 5
-    SCAN_DELAY = 5 
+    CONCURRENT_REQUESTS = 10
+    SCAN_DELAY = 2
 
 # ==========================================
-# 2. الواجهة والرسائل
+# 2. التنبيهات (Detailed Card)
 # ==========================================
 class Notifier:
     @staticmethod
-    def format_card(symbol, side, entry, tp, sl, broken_level):
+    def format_card(symbol, side, entry, tp, sl, risk):
         clean_sym = symbol.split(':')[0]
         icon = "🟢" if side == "LONG" else "🔴"
-        title = "RETEST ENTRY"
         
         return (
-            f"<b>{icon} {clean_sym} | {title}</b>\n"
+            f"<b>{icon} {clean_sym} | 5-STAR SIGNAL</b>\n"
             f"<code>━━━━━━━━━━━━━━━━━━</code>\n"
-            f"⚡ <b>Zone:</b>   <code>{broken_level}</code> (Retested)\n"
-            f"💣 <b>Entry:</b>  <code>{entry}</code>\n"
+            f"⚡ <b>Entry:</b>  <code>{entry}</code>\n"
             f"🎯 <b>Target:</b> <code>{tp}</code>\n"
             f"🛡️ <b>Stop:</b>   <code>{sl}</code>\n"
             f"<code>━━━━━━━━━━━━━━━━━━</code>\n"
-            f"🔥 <b>Setup:</b> Breakout & Retest Confirmed"
+            f"✅ 1. Trend 1H Aligned\n"
+            f"✅ 2. Price > EMA 50\n"
+            f"✅ 3. ADX > 20 (Strong)\n"
+            f"✅ 4. MFI Inflow\n"
+            f"✅ 5. MACD Cross\n"
+            f"<code>━━━━━━━━━━━━━━━━━━</code>\n"
+            f"⚠️ <b>Risk:</b> {risk:.2f}%"
         )
 
     @staticmethod
@@ -55,7 +63,7 @@ class Notifier:
         url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
         payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         if reply_to: payload["reply_to_message_id"] = reply_to
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             try: await client.post(url, json=payload)
             except: pass
 
@@ -67,90 +75,125 @@ def fmt(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. محرك إعادة الاختبار (Retest Engine)
+# 3. إدارة الكاش (Trend Memory)
 # ==========================================
-class StrategyEngine:
+class TrendCache:
+    def __init__(self):
+        self._cache = {}
+        self._ttl = 1800 # 30 دقيقة
+
+    def get(self, symbol):
+        if symbol in self._cache:
+            if time.time() - self._cache[symbol]['time'] < self._ttl:
+                return self._cache[symbol]['trend']
+        return None
+
+    def set(self, symbol, trend):
+        self._cache[symbol] = {'trend': trend, 'time': time.time()}
+
+# ==========================================
+# 4. محرك البنتاغون (The 5 Conditions)
+# ==========================================
+class PentagonEngine:
     def __init__(self, exchange):
         self.exchange = exchange
+        self.cache = TrendCache()
 
-    async def analyze(self, symbol):
+    async def get_major_trend(self, symbol):
+        # الشرط 1: الاتجاه العام (من الذاكرة أو المنصة)
+        cached = self.cache.get(symbol)
+        if cached: return cached
+
         try:
-            # نحتاج تاريخ طويل قليلاً لاكتشاف الكسر القديم
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=Config.LOOKBACK_CANDLES)
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TREND_FRAME, limit=200)
             if not ohlcv: return None
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            
+            ema200 = ta.ema(df['close'], length=200).iloc[-1]
+            trend = "BULL" if df['close'].iloc[-1] > ema200 else "BEAR"
+            
+            self.cache.set(symbol, trend)
+            return trend
+        except: return None
 
-            # 1. تحديد القمم والقيعان السابقة (Fractals)
-            # هذه هي المناطق التي نتوقع إعادة اختبارها
-            df['is_high'] = df['high'].rolling(5, center=True).max() == df['high']
-            df['is_low'] = df['low'].rolling(5, center=True).min() == df['low']
+    async def analyze(self, symbol):
+        # 1. فحص الشرط الأول (الأصعب): الاتجاه العام
+        # 
+        major_trend = await self.get_major_trend(symbol)
+        if not major_trend: return None
+
+        # جلب بيانات 5 دقائق
+        try:
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.ENTRY_FRAME, limit=100)
+            if not ohlcv: return None
+            df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            
+            # حساب المؤشرات
+            df['ema50'] = ta.ema(df['close'], length=50)
+            df['adx'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
+            df['mfi'] = ta.mfi(df['high'], df['low'], df['close'], df['vol'], length=14)
+            
+            macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+            df['macd'] = macd['MACD_12_26_9']
+            df['macds'] = macd['MACDs_12_26_9']
+            
+            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
 
             curr = df.iloc[-1]
-            
-            # --- البحث عن فرصة شراء (Long Retest) ---
-            # السيناريو: كان هناك مقاومة، تم كسرها، والآن السعر عاد إليها
-            
-            # نبحث في الشموع السابقة عن قمة تم كسرها
-            for i in range(len(df)-5, len(df)-30, -1):
-                if df['is_high'].iloc[i]:
-                    resistance_level = df['high'].iloc[i]
-                    
-                    # هل تم كسر هذه المقاومة لاحقاً؟
-                    # نبحث عن شمعة بعد المقاومة أغلقت فوقها بوضوح
-                    breakout_confirmed = False
-                    for j in range(i+1, len(df)-1):
-                        if df['close'].iloc[j] > resistance_level:
-                            breakout_confirmed = True
-                            break
-                    
-                    if breakout_confirmed:
-                        # هل السعر الحالي عاد لملامسة هذه المنطقة؟ (Retest)
-                        # السعر الحالي (Low) يجب أن يكون قريباً من المقاومة المكسورة
-                        dist = abs(curr['low'] - resistance_level) / resistance_level
-                        
-                        if dist <= Config.RETEST_BUFFER and curr['close'] > resistance_level:
-                            # تأكيد الارتداد: الشمعة الحالية خضراء (بدأ الصعود)
-                            if curr['close'] > curr['open']:
-                                
-                                entry = curr['close']
-                                sl = resistance_level * 0.995 # ستوب تحت المنطقة المكسورة
-                                tp = entry + (entry - sl) * 2.0
-                                
-                                return "LONG", entry, tp, sl, fmt(resistance_level)
+            prev = df.iloc[-2]
 
-            # --- البحث عن فرصة بيع (Short Retest) ---
-            # السيناريو: كان هناك دعم، تم كسره، والآن السعر عاد إليه
-            for i in range(len(df)-5, len(df)-30, -1):
-                if df['is_low'].iloc[i]:
-                    support_level = df['low'].iloc[i]
-                    
-                    breakout_confirmed = False
-                    for j in range(i+1, len(df)-1):
-                        if df['close'].iloc[j] < support_level:
-                            breakout_confirmed = True
-                            break
-                    
-                    if breakout_confirmed:
-                        # إعادة اختبار الدعم المكسور (يتحول لمقاومة)
-                        dist = abs(curr['high'] - support_level) / support_level
-                        
-                        if dist <= Config.RETEST_BUFFER and curr['close'] < support_level:
-                            # تأكيد الهبوط: الشمعة الحالية حمراء
-                            if curr['close'] < curr['open']:
+            if pd.isna(curr['ema50']) or pd.isna(curr['adx']): return None
+
+            # --- تطبيق الشروط الخمسة (Pentagon Logic) ---
+
+            # 🟢 LONG (شراء)
+            if major_trend == "BULL":
+                # الشرط 2: السعر فوق EMA 50 (تريند محلي صاعد)
+                if curr['close'] > curr['ema50']:
+                    # الشرط 3: قوة التريند ADX > 20 (ليس سوق عرضي)
+                    if curr['adx'] > 20:
+                        # الشرط 4: سيولة شرائية MFI > 50
+                        if curr['mfi'] > 50:
+                            # الشرط 5: تقاطع MACD إيجابي (إشارة الدخول)
+                            # 
+                            if curr['macd'] > curr['macds'] and prev['macd'] <= prev['macds']:
                                 
                                 entry = curr['close']
-                                sl = support_level * 1.005 # ستوب فوق المنطقة
-                                tp = entry - (sl - entry) * 2.0
+                                sl = entry - (curr['atr'] * 2.0) # ستوب ATR
                                 
-                                return "SHORT", entry, tp, sl, fmt(support_level)
+                                risk_pct = (entry - sl) / entry * 100
+                                if risk_pct > Config.MAX_RISK_PCT: return None
+                                
+                                tp = entry + (entry - sl) * Config.RISK_REWARD
+                                return "LONG", entry, tp, sl, risk_pct
+
+            # 🔴 SHORT (بيع)
+            if major_trend == "BEAR":
+                # الشرط 2: السعر تحت EMA 50
+                if curr['close'] < curr['ema50']:
+                    # الشرط 3: قوة التريند
+                    if curr['adx'] > 20:
+                        # الشرط 4: سيولة بيعية MFI < 50
+                        if curr['mfi'] < 50:
+                            # الشرط 5: تقاطع MACD سلبي
+                            if curr['macd'] < curr['macds'] and prev['macd'] >= prev['macds']:
+                                
+                                entry = curr['close']
+                                sl = entry + (curr['atr'] * 2.0)
+                                
+                                risk_pct = (sl - entry) / entry * 100
+                                if risk_pct > Config.MAX_RISK_PCT: return None
+                                
+                                tp = entry - (sl - entry) * Config.RISK_REWARD
+                                return "SHORT", entry, tp, sl, risk_pct
 
         except Exception: return None
         return None
 
 # ==========================================
-# 4. إدارة المهام
+# 5. الحلقات والتشغيل
 # ==========================================
-state = {"active": {}, "history": {}, "stats": {"wins": 0, "losses": 0}, "last_up": time.time()}
+state = {"active": {}, "history": {}, "stats": {"wins": 0, "losses": 0}, "last_pulse": time.time()}
 sem = asyncio.Semaphore(Config.CONCURRENT_REQUESTS)
 
 async def scan_task(symbol, engine):
@@ -160,43 +203,45 @@ async def scan_task(symbol, engine):
     async with sem:
         res = await engine.analyze(symbol)
         if res:
-            side, entry, tp, sl, level = res
-            sig_key = f"{symbol}_{level}_{int(time.time())}"
+            side, entry, tp, sl, risk = res
+            sig_key = f"{symbol}_{side}_{int(time.time()/60)}" # مفتاح بالدقيقة
+            
             if sig_key in state['history']: return
 
             state['history'][symbol] = time.time()
             state['history'][sig_key] = True
             
-            print(f"\n🔄 RETEST SIGNAL: {symbol} {side}")
-            msg = Notifier.format_card(symbol, side, fmt(entry), fmt(tp), fmt(sl), level)
+            print(f"\n🌟 5-STAR SIGNAL: {symbol} {side}", flush=True)
+            msg = Notifier.format_card(symbol, side, fmt(entry), fmt(tp), fmt(sl), risk)
             msg_id = await Notifier.send(msg)
             
             if msg_id:
                 state['active'][symbol] = {"side": side, "tp": tp, "sl": sl, "msg_id": msg_id}
 
 async def scanner_loop(exchange):
-    print("🚀 Retest Engine Started...", flush=True)
-    engine = StrategyEngine(exchange)
+    print("🚀 Pentagon Engine Started...", flush=True)
+    engine = PentagonEngine(exchange)
+    
     while True:
         try:
             tickers = await exchange.fetch_tickers()
             symbols = [s for s, t in tickers.items() if '/USDT:USDT' in s and t['quoteVolume'] >= Config.MIN_VOLUME]
             
-            print(f"\n🔎 Scanning {len(symbols)} pairs...", flush=True)
+            print(f"\n🔎 Checking {len(symbols)} pairs (5 Conditions)...", flush=True)
             
-            # Chunking for stability
+            # Chunking 
             chunk_size = 10
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
                 await asyncio.gather(*[scan_task(s, engine) for s in chunk])
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
             
-            state['last_up'] = time.time()
-            gc.collect() # تنظيف الذاكرة
+            state['last_pulse'] = time.time()
+            gc.collect() 
             await asyncio.sleep(Config.SCAN_DELAY)
             
         except Exception as e:
-            print(f"⚠️ Loop Error: {e}")
+            print(f"⚠️ Error: {e}")
             await asyncio.sleep(5)
 
 async def monitor_loop(exchange):
@@ -212,33 +257,35 @@ async def monitor_loop(exchange):
                 ticker = await exchange.fetch_ticker(sym)
                 price = ticker['last']
                 
-                if (trade['side'] == "LONG" and price >= trade['tp']) or \
-                   (trade['side'] == "SHORT" and price <= trade['tp']):
+                win = (trade['side'] == "LONG" and price >= trade['tp']) or \
+                      (trade['side'] == "SHORT" and price <= trade['tp'])
+                loss = (trade['side'] == "LONG" and price <= trade['sl']) or \
+                       (trade['side'] == "SHORT" and price >= trade['sl'])
+                
+                if win:
                     await Notifier.send(f"✅ <b>PROFIT!</b>\nPrice: {fmt(price)}", trade['msg_id'])
                     state['stats']['wins'] += 1
                     del state['active'][sym]
-                    
-                elif (trade['side'] == "LONG" and price <= trade['sl']) or \
-                     (trade['side'] == "SHORT" and price >= trade['sl']):
+                elif loss:
                     await Notifier.send(f"🛑 <b>STOP LOSS</b>\nPrice: {fmt(price)}", trade['msg_id'])
                     state['stats']['losses'] += 1
                     del state['active'][sym]
             except: pass
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
 
 async def report_loop():
     while True:
         now = datetime.now()
         if now.hour == 23 and now.minute == 59:
             s = state['stats']
-            msg = (f"📊 <b>DAILY REPORT</b>\n✅ Wins: {s['wins']}\n❌ Losses: {s['losses']}")
+            msg = f"📊 <b>DAILY REPORT</b>\n✅ Wins: {s['wins']}\n❌ Losses: {s['losses']}"
             await Notifier.send(msg)
             state['stats'] = {"wins": 0, "losses": 0}
             await asyncio.sleep(70)
         await asyncio.sleep(30)
 
 # ==========================================
-# 5. التشغيل (Fixing 405 Error)
+# 6. التشغيل (Lifespan & HEAD support)
 # ==========================================
 exchange = ccxt.mexc({
     'enableRateLimit': True, 
@@ -262,27 +309,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# 🔥 الحل هنا: إضافة دعم HEAD و GET معاً
 @app.get("/", response_class=HTMLResponse)
 @app.head("/", response_class=HTMLResponse)
 async def root():
-    uptime = int(time.time() - state['last_up'])
-    color = "#00ff00" if uptime < 60 else "#ff0000"
+    up = int(time.time() - state['last_pulse'])
     return f"""
-    <html>
-    <body style='background:#111;color:#fff;text-align:center;font-family:monospace;padding-top:50px;'>
-        <div style='border:1px solid #444;padding:20px;max-width:400px;margin:auto;border-radius:10px;'>
-            <h1 style='color:{color};'>FORTRESS V12</h1>
-            <p>Strategy: Breakout & Retest</p>
-            <p>Status: HTTP 200 OK</p>
-            <p>Last Pulse: {uptime}s ago</p>
-        </div>
-    </body>
-    </html>
+    <html><body style='background:#111;color:#0f0;text-align:center;font-family:monospace;padding:50px;'>
+    <div style='border:1px solid #0f0;padding:20px;max-width:400px;margin:auto;'>
+        <h1>FORTRESS V15</h1>
+        <p>Strategy: 5-Condition Pentagon</p>
+        <p>Status: Active ({up}s ago)</p>
+    </div></body></html>
     """
 
 if __name__ == "__main__":
     import uvicorn
-    # استخدام المنفذ الصحيح
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
