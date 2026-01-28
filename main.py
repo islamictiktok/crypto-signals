@@ -20,59 +20,55 @@ class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     
-    # الفريم: 5 دقائق (Sniper)
-    TIMEFRAME = '5m'
+    # الفريم الأساسي للداتا (نسحب 5 دقائق لنبني منها 65 دقيقة)
+    BASE_TF = '5m'
     
-    # سيولة عالية ضرورية لأننا نلعب مع الحيتان
     MIN_VOLUME = 15_000_000 
     
-    # إعدادات الكنس
-    # نبحث عن قاع في آخر 20 شمعة
-    SWING_LOOKBACK = 20
+    # إعدادات SNR
+    SNR_LOOKBACK = 50       # البحث في آخر 50 شمعة (65 دقيقة) عن مستويات
+    ZONE_BUFFER = 0.002     # سماحية 0.2% عند لمس المستوى
     
-    # إدارة المخاطر (مكافأة عالية جداً)
-    RISK_REWARD = 3.0   # 3 أضعاف الستوب
+    # إدارة المخاطر
+    RISK_REWARD = 2.5       # الهدف 2.5 ضعف
+    SPREAD_BUFFER = 0.0005  # إضافة 0.05% للستوب عشان الإسبريد
     
-    # ملف البيانات
-    DB_FILE = "v27_trap.json"
-    
+    DB_FILE = "v30_elkhouly.json"
     REPORT_HOUR = 23
     REPORT_MINUTE = 59
 
 # ==========================================
-# 2. التنسيق (Grid Layout)
+# 2. التنسيق (Clean Card)
 # ==========================================
 class Notifier:
     @staticmethod
-    def format_signal(symbol, side, entry, tp, sl, note):
+    def format_signal(symbol, side, entry, tp, sl, level_price, pattern):
         clean_sym = symbol.split(':')[0]
         icon = "🟢" if side == "LONG" else "🔴"
-        
         return (
             f"<code>{clean_sym}</code> | <b>{side} {icon}</b>\n"
             f"──────────────\n"
+            f"🧱 Level (65m): <code>{level_price}</code>\n"
+            f"🕯️ Pattern (5m): {pattern}\n"
+            f"──────────────\n"
             f"📥 Entry: <code>{entry}</code>\n"
-            f"──────────────\n"
             f"🎯 Target: <code>{tp}</code>\n"
-            f"──────────────\n"
-            f"🛑 Stop  : <code>{sl}</code>\n"
-            f"──────────────\n"
-            f"🩸 <b>Setup:</b> {note}"
+            f"🛑 Stop  : <code>{sl}</code>"
         )
 
     @staticmethod
-    def format_alert(type_str, price, profit_pct):
+    def format_alert(type_str, profit_pct):
         if type_str == "WIN":
-            return f"✅ <b>TARGET SMASHED</b>\nPrice: <code>{price}</code>\nProfit: +{profit_pct:.2f}%"
+            return f"✅ <b>TARGET HIT</b>\nProfit: +{profit_pct:.2f}%"
         else:
-            return f"🛑 <b>STOP LOSS</b>\nPrice: <code>{price}</code>\nLoss: -{profit_pct:.2f}%"
+            return f"🛑 <b>STOP LOSS</b>\nLoss: -{profit_pct:.2f}%"
 
     @staticmethod
     def format_daily_report(stats):
         total = stats['wins'] + stats['losses']
         win_rate = (stats['wins'] / total * 100) if total > 0 else 0
         return (
-            f"📊 <b>DAILY TRAP REPORT</b>\n"
+            f"📊 <b>ELKHOULY REPORT</b>\n"
             f"──────────────\n"
             f"✅ Wins: <b>{stats['wins']}</b>\n"
             f"❌ Losses: <b>{stats['losses']}</b>\n"
@@ -87,11 +83,8 @@ class Notifier:
         payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         if reply_to: payload["reply_to_message_id"] = reply_to
         async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                res = await client.post(url, json=payload)
-                if res.status_code == 200: return res.json().get('result', {}).get('message_id')
+            try: await client.post(url, json=payload)
             except: pass
-        return None
 
 def fmt(price):
     if not price: return "0"
@@ -152,89 +145,154 @@ class TradeManager:
 store = TradeManager()
 
 # ==========================================
-# 4. محرك المصيدة (Trap Engine)
+# 4. محرك الخولي (Elkhouly Engine 65m)
 # ==========================================
-class TrapEngine:
+class ElkhoulyEngine:
     def __init__(self, exchange):
         self.exchange = exchange
+        self.levels_cache = {} # لتخزين مستويات الـ 65 دقيقة
+
+    def resample_to_65m(self, df_5m):
+        """
+        دالة سحرية تحول شموع الـ 5 دقائق إلى 65 دقيقة
+        13 شمعة 5 دقائق = شمعة واحدة 65 دقيقة
+        """
+        # نحتاج لترتيب البيانات وعمل Grouping كل 13 صف
+        df_5m = df_5m.sort_values('time').reset_index(drop=True)
+        
+        # إنشاء معرف المجموعة
+        df_5m['group_id'] = df_5m.index // 13
+        
+        # التجميع
+        df_65m = df_5m.groupby('group_id').agg({
+            'time': 'first',      # وقت الشمعة هو وقت البداية
+            'open': 'first',      # الافتتاح هو افتتاح الأولى
+            'high': 'max',        # الأعلى هو ماكس الـ 13 شمعة
+            'low': 'min',         # الأدنى هو مينيمم الـ 13 شمعة
+            'close': 'last',      # الإغلاق هو إغلاق الأخيرة
+            'vol': 'sum'          # الحجم هو المجموع
+        })
+        
+        return df_65m
+
+    async def get_snr_levels(self, symbol):
+        # نستخدم الكاش لمدة ساعة (لأن مستويات 65 دقيقة لا تتغير بسرعة)
+        now = time.time()
+        if symbol in self.levels_cache:
+            if now - self.levels_cache[symbol]['time'] < 3600:
+                return self.levels_cache[symbol]
+
+        try:
+            # نسحب 700 شمعة 5 دقائق لنضمن تكوين عدد كافي من شموع 65 دقيقة
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.BASE_TF, limit=700)
+            if not ohlcv: return None
+            df_5m = pd.DataFrame(ohlcv, columns=['time','open','high','low','close','vol'])
+            
+            # 1. بناء فريم 65 دقيقة
+            df_65m = self.resample_to_65m(df_5m)
+            
+            # 2. تحديد الدعوم والمقاومات (Swing Points)
+            # نستخدم نافذة 5 شموع يمين ويسار لتحديد قمة/قاع قوي
+            supports = []
+            resistances = []
+            
+            for i in range(5, len(df_65m)-5):
+                # شرط القاع (Support)
+                if df_65m['low'].iloc[i] == df_65m['low'].iloc[i-5:i+6].min():
+                    supports.append(df_65m['low'].iloc[i])
+                
+                # شرط القمة (Resistance)
+                if df_65m['high'].iloc[i] == df_65m['high'].iloc[i-5:i+6].max():
+                    resistances.append(df_65m['high'].iloc[i])
+
+            # نأخذ فقط آخر وأقوى المستويات (لعدم تشتيت البوت)
+            # نأخذ آخر دعمين وآخر مقاومتين
+            levels = {
+                'supports': sorted(supports)[-2:] if supports else [],
+                'resistances': sorted(resistances)[:2] if resistances else []
+            }
+            
+            self.levels_cache[symbol] = {'data': levels, 'time': now}
+            return self.levels_cache[symbol]
+        except: return None
 
     async def analyze(self, symbol):
+        # 1. جلب مستويات 65 دقيقة
+        snr_data = await self.get_snr_levels(symbol)
+        if not snr_data: return None
+        levels = snr_data['data']
+
         try:
-            # نحتاج 50 شمعة لتحديد القيعان السابقة بدقة
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=50)
+            # 2. جلب بيانات 5 دقائق الحالية (للتأكيد)
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.BASE_TF, limit=10)
             if not ohlcv: return None
-            df = pd.DataFrame(ohlcv, columns=['time','o','h','l','c','v'])
+            df_5m = pd.DataFrame(ohlcv, columns=['time','open','high','low','close','vol'])
+            
+            curr = df_5m.iloc[-1]
+            prev = df_5m.iloc[-2]
+            
+            # --- منطق الشراء (LONG) ---
+            # هل السعر قريب من أي دعم 65m ؟
+            for sup in levels['supports']:
+                dist = abs(curr['low'] - sup) / curr['close']
+                
+                if dist <= Config.ZONE_BUFFER: # السعر يلمس الدعم
+                    # البحث عن نموذج انعكاسي على 5 دقائق
+                    
+                    # نموذج 1: Engulfing Bullish (ابتلاعي)
+                    is_engulfing = (prev['close'] < prev['open']) and \
+                                   (curr['close'] > curr['open']) and \
+                                   (curr['close'] > prev['open']) and \
+                                   (curr['open'] < prev['close'])
+                                   
+                    # نموذج 2: Hammer (مطرقة)
+                    body = abs(curr['close'] - curr['open'])
+                    lower_wick = min(curr['close'], curr['open']) - curr['low']
+                    upper_wick = curr['high'] - max(curr['close'], curr['open'])
+                    is_hammer = (lower_wick > 2 * body) and (upper_wick < body)
 
-            curr = df.iloc[-1]   # الشمعة الحالية
-            prev = df.iloc[-2]   # الشمعة السابقة
+                    if is_engulfing or is_hammer:
+                        pattern_name = "Bullish Engulfing" if is_engulfing else "Hammer"
+                        
+                        entry = curr['close']
+                        # الستوب: تحت الدعم + الإسبريد
+                        sl = sup * (1 - Config.SPREAD_BUFFER)
+                        
+                        risk = entry - sl
+                        if risk <= 0: return None
+                        tp = entry + (risk * Config.RISK_REWARD)
+                        
+                        return "LONG", entry, tp, sl, fmt(sup), pattern_name
 
-            # -----------------------------------------------
-            # 🟢 LONG TRAP (مصيدة الدببة)
-            # -----------------------------------------------
-            # 1. تحديد قاع سابق (Support) في الـ 20 شمعة الماضية (باستثناء آخر شمعتين)
-            # نحن نبحث عن قاع واضح كان السعر يحترمه
-            past_lows = df['l'].iloc[-Config.SWING_LOOKBACK:-2]
-            swing_low = past_lows.min()
-            
-            # 2. شرط الكنس (Sweep):
-            # الشمعة السابقة (أو الحالية) نزلت بذيها تحت هذا القاع
-            # لكن جسم الشمعة أغلق فوقه! (رفض السعر للهبوط)
-            
-            # هل تم كسر القاع بالذيل؟
-            swept_low = (prev['l'] < swing_low) or (curr['l'] < swing_low)
-            
-            # هل السعر الحالي عاد فوق القاع؟ (استعادة المستوى)
-            reclaimed = curr['c'] > swing_low
-            
-            # هل الشمعة الحالية خضراء وقوية؟
-            bullish_candle = curr['c'] > curr['o']
-            
-            # فلتر الفوليوم: هل هناك سيولة دخلت؟
-            avg_vol = df['v'].rolling(20).mean().iloc[-1]
-            high_volume = curr['v'] > avg_vol
-            
-            if swept_low and reclaimed and bullish_candle and high_volume:
+            # --- منطق البيع (SHORT) ---
+            # هل السعر قريب من أي مقاومة 65m ؟
+            for res in levels['resistances']:
+                dist = abs(curr['high'] - res) / curr['close']
                 
-                entry = curr['c']
-                # الستوب: تحت ذيل الكنس (أدنى نقطة وصل لها السعر)
-                stop_loss = min(prev['l'], curr['l']) * 0.999
-                
-                # التأكد من أن الستوب ليس بعيداً جداً (سكالبينج)
-                risk_pct = (entry - stop_loss) / entry * 100
-                if risk_pct > 2.5: return None 
-                
-                tp = entry + (entry - stop_loss) * Config.RISK_REWARD
-                
-                return "LONG", entry, tp, stop_loss, "Liquidity Sweep & Reclaim"
+                if dist <= Config.ZONE_BUFFER:
+                    # نموذج 1: Bearish Engulfing
+                    is_engulfing = (prev['close'] > prev['open']) and \
+                                   (curr['close'] < curr['open']) and \
+                                   (curr['close'] < prev['open']) and \
+                                   (curr['open'] > prev['close'])
+                                   
+                    # نموذج 2: Shooting Star
+                    body = abs(curr['close'] - curr['open'])
+                    upper_wick = curr['high'] - max(curr['close'], curr['open'])
+                    lower_wick = min(curr['close'], curr['open']) - curr['low']
+                    is_shooting_star = (upper_wick > 2 * body) and (lower_wick < body)
 
-            # -----------------------------------------------
-            # 🔴 SHORT TRAP (مصيدة الثيران)
-            # -----------------------------------------------
-            # 1. تحديد قمة سابقة (Resistance)
-            past_highs = df['h'].iloc[-Config.SWING_LOOKBACK:-2]
-            swing_high = past_highs.max()
-            
-            # 2. شرط الكنس
-            swept_high = (prev['h'] > swing_high) or (curr['h'] > swing_high)
-            
-            # 3. هل عاد السعر تحت القمة؟
-            rejected = curr['c'] < swing_high
-            
-            # 4. شمعة حمراء
-            bearish_candle = curr['c'] < curr['o']
-            high_volume = curr['v'] > avg_vol
-            
-            if swept_high and rejected and bearish_candle and high_volume:
-                
-                entry = curr['c']
-                stop_loss = max(prev['h'], curr['h']) * 1.001
-                
-                risk_pct = (stop_loss - entry) / entry * 100
-                if risk_pct > 2.5: return None
-                
-                tp = entry - (stop_loss - entry) * Config.RISK_REWARD
-                
-                return "SHORT", entry, tp, stop_loss, "Liquidity Grab & Rejection"
+                    if is_engulfing or is_shooting_star:
+                        pattern_name = "Bearish Engulfing" if is_engulfing else "Shooting Star"
+                        
+                        entry = curr['close']
+                        sl = res * (1 + Config.SPREAD_BUFFER)
+                        
+                        risk = sl - entry
+                        if risk <= 0: return None
+                        tp = entry - (risk * Config.RISK_REWARD)
+                        
+                        return "SHORT", entry, tp, sl, fmt(res), pattern_name
 
         except Exception: return None
         return None
@@ -243,45 +301,47 @@ class TrapEngine:
 # 5. الحلقات (System Loops)
 # ==========================================
 state = {"history": {}, "last_scan": time.time()}
-sem = asyncio.Semaphore(15) # سرعة عالية
+sem = asyncio.Semaphore(10)
 
 async def scan_task(symbol, engine):
-    # كول داون 5 دقائق
     if time.time() - state['history'].get(symbol, 0) < 300: return
     if symbol in store.active_trades: return
 
     async with sem:
         res = await engine.analyze(symbol)
         if res:
-            side, entry, tp, sl, note = res
+            side, entry, tp, sl, level, pattern = res
             
-            # مفتاح فريد
             sig_key = f"{symbol}_{int(time.time()/300)}"
             if sig_key in state['history']: return
             
             state['history'][symbol] = time.time()
             state['history'][sig_key] = True
             
-            print(f"\n🩸 TRAP SIGNAL: {symbol}", flush=True)
-            msg = Notifier.format_signal(symbol, side, fmt(entry), fmt(tp), fmt(sl), note)
+            print(f"\n🧱 SIGNAL: {symbol} {side} ({pattern})", flush=True)
+            msg = Notifier.format_signal(symbol, side, fmt(entry), fmt(tp), fmt(sl), level, pattern)
             msg_id = await Notifier.send(msg)
             
             if msg_id:
                 store.add_trade(symbol, {
-                    "entry": entry, "tp": tp, "sl": sl, "msg_id": msg_id
+                    "side": side,
+                    "entry": entry, 
+                    "tp": tp, 
+                    "sl": sl, 
+                    "msg_id": msg_id
                 })
 
 async def scanner_loop(exchange):
-    print("🩸 Fortress V27 (Trap Master) Started...", flush=True)
-    engine = TrapEngine(exchange)
+    print("🧱 Fortress V30 (65m Engine) Started...", flush=True)
+    engine = ElkhoulyEngine(exchange)
     
     while True:
         try:
             tickers = await exchange.fetch_tickers()
             symbols = [s for s, t in tickers.items() if '/USDT:USDT' in s and t['quoteVolume'] >= Config.MIN_VOLUME]
-            print(f"\n🔎 Hunting Stops in {len(symbols)} pairs...", flush=True)
+            print(f"\n🔎 Scanning {len(symbols)} pairs...", flush=True)
             
-            chunk_size = 20
+            chunk_size = 10
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
                 await asyncio.gather(*[scan_task(s, engine) for s in chunk])
@@ -289,7 +349,7 @@ async def scanner_loop(exchange):
             
             state['last_scan'] = time.time()
             gc.collect()
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
         except: await asyncio.sleep(5)
 
 async def monitor_loop(exchange):
@@ -303,31 +363,24 @@ async def monitor_loop(exchange):
             try:
                 ticker = await exchange.fetch_ticker(sym)
                 price = ticker['last']
+                side = trade.get('side', 'LONG') 
                 entry = trade['entry']
-                pnl = (price - entry) / entry * 100
                 
-                if trade.get('side') == 'SHORT':
-                    pnl = -pnl # عكس الإشارة للشورت
-
-                # فحص الفوز والخسارة
-                win = False
-                loss = False
-                
-                # LONG logic
-                if trade.get('side', 'LONG') == 'LONG': # Default to LONG if key missing
-                     if price >= trade['tp']: win = True
-                     elif price <= trade['sl']: loss = True
-                # SHORT logic
+                if side == 'LONG':
+                    pnl = (price - entry) / entry * 100
+                    win = price >= trade['tp']
+                    loss = price <= trade['sl']
                 else: 
-                     if price <= trade['tp']: win = True
-                     elif price >= trade['sl']: loss = True
+                    pnl = (entry - price) / entry * 100
+                    win = price <= trade['tp']
+                    loss = price >= trade['sl']
 
                 if win:
-                    msg = Notifier.format_alert("WIN", fmt(price), abs(pnl))
+                    msg = Notifier.format_alert("WIN", pnl)
                     await Notifier.send(msg, reply_to=trade.get('msg_id'))
                     store.close_trade(sym, "WIN", pnl)
                 elif loss:
-                    msg = Notifier.format_alert("LOSS", fmt(price), abs(pnl))
+                    msg = Notifier.format_alert("LOSS", abs(pnl))
                     await Notifier.send(msg, reply_to=trade.get('msg_id'))
                     store.close_trade(sym, "LOSS", pnl)
             except: pass
@@ -376,10 +429,10 @@ app = FastAPI(lifespan=lifespan)
 @app.head("/", response_class=HTMLResponse)
 async def root():
     return f"""
-    <html><body style='background:#111;color:#ff0055;text-align:center;padding:50px;font-family:sans-serif;'>
+    <html><body style='background:#111;color:#ffab00;text-align:center;padding:50px;font-family:sans-serif;'>
     <div style='border:1px solid #333;padding:20px;margin:auto;max-width:400px;border-radius:10px;'>
-        <h1>FORTRESS V27</h1>
-        <p>Strategy: Liquidity Sweep (SMC)</p>
+        <h1>FORTRESS V30</h1>
+        <p>Strategy: Elkhouly SNR (65m + 5m)</p>
         <p>Active Trades: {len(store.active_trades)}</p>
     </div></body></html>
     """
