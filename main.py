@@ -20,18 +20,21 @@ class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     
-    # الفريمات المستخدمة
-    TF_TREND = '1h'    # لتحديد الاتجاه العام
-    TF_VWAP = '15m'    # لتحديد مناطق المؤسسات
-    TF_ENTRY = '5m'    # للدخول الدقيق
+    # الفريم: 5 دقائق (Sniper)
+    TIMEFRAME = '5m'
     
-    MIN_VOLUME = 10_000_000 # خفضنا الحد قليلاً لزيادة الفرص مع الحفاظ على الأمان
+    # سيولة عالية ضرورية لأننا نلعب مع الحيتان
+    MIN_VOLUME = 15_000_000 
     
-    # إدارة المخاطر (Scalping سريع)
-    RISK_REWARD = 2.0   # هدف ضعف الستوب (مناسب للتكرار العالي)
+    # إعدادات الكنس
+    # نبحث عن قاع في آخر 20 شمعة
+    SWING_LOOKBACK = 20
+    
+    # إدارة المخاطر (مكافأة عالية جداً)
+    RISK_REWARD = 3.0   # 3 أضعاف الستوب
     
     # ملف البيانات
-    DB_FILE = "v26_flow.json"
+    DB_FILE = "v27_trap.json"
     
     REPORT_HOUR = 23
     REPORT_MINUTE = 59
@@ -41,9 +44,9 @@ class Config:
 # ==========================================
 class Notifier:
     @staticmethod
-    def format_signal(symbol, side, entry, tp, sl):
+    def format_signal(symbol, side, entry, tp, sl, note):
         clean_sym = symbol.split(':')[0]
-        icon = "🌊" if side == "LONG" else "🔻"
+        icon = "🟢" if side == "LONG" else "🔴"
         
         return (
             f"<code>{clean_sym}</code> | <b>{side} {icon}</b>\n"
@@ -52,13 +55,15 @@ class Notifier:
             f"──────────────\n"
             f"🎯 Target: <code>{tp}</code>\n"
             f"──────────────\n"
-            f"🛑 Stop  : <code>{sl}</code>"
+            f"🛑 Stop  : <code>{sl}</code>\n"
+            f"──────────────\n"
+            f"🩸 <b>Setup:</b> {note}"
         )
 
     @staticmethod
     def format_alert(type_str, price, profit_pct):
         if type_str == "WIN":
-            return f"✅ <b>TARGET HIT</b>\nPrice: <code>{price}</code>\nProfit: +{profit_pct:.2f}%"
+            return f"✅ <b>TARGET SMASHED</b>\nPrice: <code>{price}</code>\nProfit: +{profit_pct:.2f}%"
         else:
             return f"🛑 <b>STOP LOSS</b>\nPrice: <code>{price}</code>\nLoss: -{profit_pct:.2f}%"
 
@@ -67,7 +72,7 @@ class Notifier:
         total = stats['wins'] + stats['losses']
         win_rate = (stats['wins'] / total * 100) if total > 0 else 0
         return (
-            f"📊 <b>DAILY FLOW REPORT</b>\n"
+            f"📊 <b>DAILY TRAP REPORT</b>\n"
             f"──────────────\n"
             f"✅ Wins: <b>{stats['wins']}</b>\n"
             f"❌ Losses: <b>{stats['losses']}</b>\n"
@@ -147,89 +152,89 @@ class TradeManager:
 store = TradeManager()
 
 # ==========================================
-# 4. محرك التدفق (Flow Engine)
+# 4. محرك المصيدة (Trap Engine)
 # ==========================================
-class FlowEngine:
+class TrapEngine:
     def __init__(self, exchange):
         self.exchange = exchange
-        self.trend_cache = {}
-
-    async def check_trend(self, symbol):
-        """
-        فحص الاتجاه العام (1H). يتم تخزينه لمدة 30 دقيقة.
-        """
-        now = time.time()
-        if symbol in self.trend_cache:
-            if now - self.trend_cache[symbol]['time'] < 1800: # 30 دقيقة
-                return self.trend_cache[symbol]['valid']
-
-        try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TF_TREND, limit=210)
-            if not ohlcv: return False
-            df = pd.DataFrame(ohlcv, columns=['time','o','h','l','c','v'])
-            
-            # EMA Golden Cross Condition
-            ema50 = ta.ema(df['c'], length=50).iloc[-1]
-            ema200 = ta.ema(df['c'], length=200).iloc[-1]
-            
-            # شرط الاتجاه: 50 فوق 200 (تريند صاعد قوي)
-            is_uptrend = ema50 > ema200 and df['c'].iloc[-1] > ema200
-            
-            self.trend_cache[symbol] = {'valid': is_uptrend, 'time': now}
-            return is_uptrend
-        except: return False
 
     async def analyze(self, symbol):
-        # 1. فلتر الاتجاه العام
-        if not await self.check_trend(symbol): return None
-
         try:
-            # 2. جلب بيانات VWAP (15m) و Entry (5m) بالتوازي
-            t_vwap = self.exchange.fetch_ohlcv(symbol, Config.TF_VWAP, limit=100)
-            t_entry = self.exchange.fetch_ohlcv(symbol, Config.TF_ENTRY, limit=50)
-            
-            res_vwap, res_entry = await asyncio.gather(t_vwap, t_entry)
-            if not res_vwap or not res_entry: return None
-            
-            df_vwap = pd.DataFrame(res_vwap, columns=['time','o','h','l','c','v'])
-            df_entry = pd.DataFrame(res_entry, columns=['time','o','h','l','c','v'])
-            
-            # --- شرط VWAP (مؤسسات) ---
-            # حساب VWAP يدوياً للدقة إذا لم تتوفر المكتبة
-            # VWAP = Cumulative(Volume * Price) / Cumulative(Volume)
-            df_vwap['tp'] = (df_vwap['h'] + df_vwap['l'] + df_vwap['c']) / 3
-            df_vwap['vol_price'] = df_vwap['tp'] * df_vwap['v']
-            vwap_val = df_vwap['vol_price'].rolling(20).sum() / df_vwap['v'].rolling(20).sum()
-            
-            current_vwap = vwap_val.iloc[-1]
-            current_price_15m = df_vwap['c'].iloc[-1]
-            
-            # السعر يجب أن يكون فوق VWAP (سيطرة المشترين)
-            if current_price_15m < current_vwap: return None
+            # نحتاج 50 شمعة لتحديد القيعان السابقة بدقة
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=50)
+            if not ohlcv: return None
+            df = pd.DataFrame(ohlcv, columns=['time','o','h','l','c','v'])
 
-            # --- شرط الدخول (RSI Momentum) ---
-            df_entry['rsi'] = ta.rsi(df_entry['c'], length=14)
-            curr = df_entry.iloc[-1]
-            prev = df_entry.iloc[-2]
+            curr = df.iloc[-1]   # الشمعة الحالية
+            prev = df.iloc[-2]   # الشمعة السابقة
+
+            # -----------------------------------------------
+            # 🟢 LONG TRAP (مصيدة الدببة)
+            # -----------------------------------------------
+            # 1. تحديد قاع سابق (Support) في الـ 20 شمعة الماضية (باستثناء آخر شمعتين)
+            # نحن نبحث عن قاع واضح كان السعر يحترمه
+            past_lows = df['l'].iloc[-Config.SWING_LOOKBACK:-2]
+            swing_low = past_lows.min()
             
-            # الشرط: RSI يكسر مستوى 50 للأعلى (بداية زخم)
-            # ويكون أقل من 70 (ليس متشبعاً جداً)
-            if prev['rsi'] <= 50 and curr['rsi'] > 50 and curr['rsi'] < 70:
+            # 2. شرط الكنس (Sweep):
+            # الشمعة السابقة (أو الحالية) نزلت بذيها تحت هذا القاع
+            # لكن جسم الشمعة أغلق فوقه! (رفض السعر للهبوط)
+            
+            # هل تم كسر القاع بالذيل؟
+            swept_low = (prev['l'] < swing_low) or (curr['l'] < swing_low)
+            
+            # هل السعر الحالي عاد فوق القاع؟ (استعادة المستوى)
+            reclaimed = curr['c'] > swing_low
+            
+            # هل الشمعة الحالية خضراء وقوية؟
+            bullish_candle = curr['c'] > curr['o']
+            
+            # فلتر الفوليوم: هل هناك سيولة دخلت؟
+            avg_vol = df['v'].rolling(20).mean().iloc[-1]
+            high_volume = curr['v'] > avg_vol
+            
+            if swept_low and reclaimed and bullish_candle and high_volume:
                 
                 entry = curr['c']
+                # الستوب: تحت ذيل الكنس (أدنى نقطة وصل لها السعر)
+                stop_loss = min(prev['l'], curr['l']) * 0.999
                 
-                # الستوب: أدنى قاع في آخر 5 شمعات (سكالبينج سريع)
-                swing_low = df_entry['l'].iloc[-6:-1].min()
-                sl = swing_low * 0.999 # مسافة بسيطة جداً
+                # التأكد من أن الستوب ليس بعيداً جداً (سكالبينج)
+                risk_pct = (entry - stop_loss) / entry * 100
+                if risk_pct > 2.5: return None 
                 
-                risk = entry - sl
-                # حماية: إذا الستوب قريب جداً أو بعيد جداً، نرفض الصفقة
-                risk_pct = (entry - sl) / entry * 100
-                if risk_pct < 0.2 or risk_pct > 2.0: return None
+                tp = entry + (entry - stop_loss) * Config.RISK_REWARD
                 
-                tp = entry + (risk * Config.RISK_REWARD)
+                return "LONG", entry, tp, stop_loss, "Liquidity Sweep & Reclaim"
+
+            # -----------------------------------------------
+            # 🔴 SHORT TRAP (مصيدة الثيران)
+            # -----------------------------------------------
+            # 1. تحديد قمة سابقة (Resistance)
+            past_highs = df['h'].iloc[-Config.SWING_LOOKBACK:-2]
+            swing_high = past_highs.max()
+            
+            # 2. شرط الكنس
+            swept_high = (prev['h'] > swing_high) or (curr['h'] > swing_high)
+            
+            # 3. هل عاد السعر تحت القمة؟
+            rejected = curr['c'] < swing_high
+            
+            # 4. شمعة حمراء
+            bearish_candle = curr['c'] < curr['o']
+            high_volume = curr['v'] > avg_vol
+            
+            if swept_high and rejected and bearish_candle and high_volume:
                 
-                return entry, tp, sl
+                entry = curr['c']
+                stop_loss = max(prev['h'], curr['h']) * 1.001
+                
+                risk_pct = (stop_loss - entry) / entry * 100
+                if risk_pct > 2.5: return None
+                
+                tp = entry - (stop_loss - entry) * Config.RISK_REWARD
+                
+                return "SHORT", entry, tp, stop_loss, "Liquidity Grab & Rejection"
 
         except Exception: return None
         return None
@@ -238,27 +243,27 @@ class FlowEngine:
 # 5. الحلقات (System Loops)
 # ==========================================
 state = {"history": {}, "last_scan": time.time()}
-sem = asyncio.Semaphore(10) # زدنا التوازي قليلاً لأن العمليات أخف
+sem = asyncio.Semaphore(15) # سرعة عالية
 
 async def scan_task(symbol, engine):
-    # كول داون 15 دقيقة فقط (للسماح بدخول صفقات جديدة على نفس العملة)
-    if time.time() - state['history'].get(symbol, 0) < 900: return
+    # كول داون 5 دقائق
+    if time.time() - state['history'].get(symbol, 0) < 300: return
     if symbol in store.active_trades: return
 
     async with sem:
         res = await engine.analyze(symbol)
         if res:
-            entry, tp, sl = res
+            side, entry, tp, sl, note = res
             
-            # مفتاح يمنع التكرار كل 15 دقيقة
-            sig_key = f"{symbol}_{int(time.time()/900)}"
+            # مفتاح فريد
+            sig_key = f"{symbol}_{int(time.time()/300)}"
             if sig_key in state['history']: return
             
             state['history'][symbol] = time.time()
             state['history'][sig_key] = True
             
-            print(f"\n🌊 FLOW SIGNAL: {symbol}", flush=True)
-            msg = Notifier.format_signal(symbol, "LONG", fmt(entry), fmt(tp), fmt(sl))
+            print(f"\n🩸 TRAP SIGNAL: {symbol}", flush=True)
+            msg = Notifier.format_signal(symbol, side, fmt(entry), fmt(tp), fmt(sl), note)
             msg_id = await Notifier.send(msg)
             
             if msg_id:
@@ -267,17 +272,16 @@ async def scan_task(symbol, engine):
                 })
 
 async def scanner_loop(exchange):
-    print("🌊 Fortress V26 (Flow Edition) Started...", flush=True)
-    engine = FlowEngine(exchange)
+    print("🩸 Fortress V27 (Trap Master) Started...", flush=True)
+    engine = TrapEngine(exchange)
     
     while True:
         try:
             tickers = await exchange.fetch_tickers()
-            # نختار العملات النشطة جداً
             symbols = [s for s, t in tickers.items() if '/USDT:USDT' in s and t['quoteVolume'] >= Config.MIN_VOLUME]
-            print(f"\n🔎 Scanning {len(symbols)} pairs (Institutional Flow)...", flush=True)
+            print(f"\n🔎 Hunting Stops in {len(symbols)} pairs...", flush=True)
             
-            chunk_size = 15 # دفعة أكبر قليلاً للسرعة
+            chunk_size = 20
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
                 await asyncio.gather(*[scan_task(s, engine) for s in chunk])
@@ -285,7 +289,7 @@ async def scanner_loop(exchange):
             
             state['last_scan'] = time.time()
             gc.collect()
-            await asyncio.sleep(2) # راحة قصيرة (سكالبينج)
+            await asyncio.sleep(1)
         except: await asyncio.sleep(5)
 
 async def monitor_loop(exchange):
@@ -302,12 +306,27 @@ async def monitor_loop(exchange):
                 entry = trade['entry']
                 pnl = (price - entry) / entry * 100
                 
-                if price >= trade['tp']:
-                    msg = Notifier.format_alert("WIN", fmt(price), pnl)
+                if trade.get('side') == 'SHORT':
+                    pnl = -pnl # عكس الإشارة للشورت
+
+                # فحص الفوز والخسارة
+                win = False
+                loss = False
+                
+                # LONG logic
+                if trade.get('side', 'LONG') == 'LONG': # Default to LONG if key missing
+                     if price >= trade['tp']: win = True
+                     elif price <= trade['sl']: loss = True
+                # SHORT logic
+                else: 
+                     if price <= trade['tp']: win = True
+                     elif price >= trade['sl']: loss = True
+
+                if win:
+                    msg = Notifier.format_alert("WIN", fmt(price), abs(pnl))
                     await Notifier.send(msg, reply_to=trade.get('msg_id'))
                     store.close_trade(sym, "WIN", pnl)
-                    
-                elif price <= trade['sl']:
+                elif loss:
                     msg = Notifier.format_alert("LOSS", fmt(price), abs(pnl))
                     await Notifier.send(msg, reply_to=trade.get('msg_id'))
                     store.close_trade(sym, "LOSS", pnl)
@@ -357,10 +376,10 @@ app = FastAPI(lifespan=lifespan)
 @app.head("/", response_class=HTMLResponse)
 async def root():
     return f"""
-    <html><body style='background:#111;color:#00b0ff;text-align:center;padding:50px;font-family:sans-serif;'>
+    <html><body style='background:#111;color:#ff0055;text-align:center;padding:50px;font-family:sans-serif;'>
     <div style='border:1px solid #333;padding:20px;margin:auto;max-width:400px;border-radius:10px;'>
-        <h1>FORTRESS V26</h1>
-        <p>Strategy: VWAP + RSI Flow</p>
+        <h1>FORTRESS V27</h1>
+        <p>Strategy: Liquidity Sweep (SMC)</p>
         <p>Active Trades: {len(store.active_trades)}</p>
     </div></body></html>
     """
