@@ -23,8 +23,8 @@ BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 # السيولة 10 مليون
 MIN_VOLUME_USDT = 10_000_000 
 
-# الفريم 15 دقيقة (الأفضل لتحليل فيبوناتشي)
-TIMEFRAME = '15m'
+# الفريم الأساسي للدخول هو 5 دقائق (لكننا سنجلب ساعة أيضاً داخلياً)
+TIMEFRAME = '5m'
 
 app = FastAPI()
 
@@ -33,9 +33,9 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#0d1117;color:#ffd700;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (FIBONACCI GOLD)</h1>
-            <p>Strategy: 4-TF Trend + Fib 0.618 Retracement</p>
+        <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🛡️ Fortress Bot (MTF LIQUIDITY PRO)</h1>
+            <p>Strategy: 1H Trend + 5M Structure + Engulfing</p>
             <p>Status: Active 🟢</p>
         </body>
     </html>
@@ -69,104 +69,115 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Fibonacci + 4-Trend Filters) 🔥
+# 3. المنطق (MTF Liquidity Strategy) 🔥 التعديل الاحترافي 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # جلب 200 شمعة لحساب الترندات الطويلة بدقة
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=200)
-        if not ohlcv: return None, "No Data"
+        # -----------------------------------------
+        # الخطوة 1: تحديد الاتجاه العام (فريم 1 ساعة)
+        # -----------------------------------------
+        # نجلب بيانات الساعة أولاً
+        ohlcv_1h = await exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+        if not ohlcv_1h: return None, "No 1H Data"
         
-        df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        df_1h = pd.DataFrame(ohlcv_1h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        df_1h['ema50'] = df_1h.ta.ema(close='close', length=50)
+        df_1h['ema200'] = df_1h.ta.ema(close='close', length=200)
         
-        # 1. محاكاة الـ 4 فريمات (Trend Alignment)
-        # EMA 200 = اتجاه 4 ساعات تقريبي
-        # EMA 50 = اتجاه 1 ساعة تقريبي
-        df['ema200'] = df.ta.ema(close='close', length=200)
-        df['ema50'] = df.ta.ema(close='close', length=50)
-        
-        # 2. حساب فيبوناتشي (Fibonacci Retracement)
-        # نحدد القمة والقاع في آخر 100 شمعة
-        lookback = 100
-        recent_high = df['high'].rolling(lookback).max()
-        recent_low = df['low'].rolling(lookback).min()
-        
-        # مستوى 61.8% (النسبة الذهبية)
-        # للصعود: القاع + (الفرق * 0.618) .. لا، الارتداد يكون لأسفل، يعني مستوى الدعم عند 0.618 من الهبوط
-        # FIB LEVEL CALCULATION:
-        # Uptrend Retracement Level (Support): High - ((High - Low) * 0.618) -> مستوى شراء
-        df['fib_buy_level'] = recent_high - ((recent_high - recent_low) * 0.382) # تصحيح 61.8% من القمة
-        
-        # Downtrend Retracement Level (Resistance): Low + ((High - Low) * 0.382) -> مستوى بيع
-        df['fib_sell_level'] = recent_low + ((recent_high - recent_low) * 0.382)
+        if pd.isna(df_1h['ema200'].iloc[-1]): return None, "Calc 1H..."
 
-        # 3. مؤشرات الزخم
+        curr_1h = df_1h.iloc[-1]
+        
+        # قواعد الاتجاه الصارمة (1H Trend)
+        trend_bullish = (curr_1h['close'] > curr_1h['ema200']) and (curr_1h['ema50'] > curr_1h['ema200'])
+        trend_bearish = (curr_1h['close'] < curr_1h['ema200']) and (curr_1h['ema50'] < curr_1h['ema200'])
+        
+        # إذا لم يكن هناك اتجاه واضح، نرفض العملة فوراً لعدم تضييع الوقت
+        if not trend_bullish and not trend_bearish:
+            return None, "No Clear 1H Trend"
+
+        # -----------------------------------------
+        # الخطوة 2: الدخول الدقيق (فريم 5 دقائق)
+        # -----------------------------------------
+        ohlcv_5m = await exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)
+        if not ohlcv_5m: return None, "No 5m Data"
+        
+        df = pd.DataFrame(ohlcv_5m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        
+        # مؤشرات الدخول (5m)
+        df['ema50'] = df.ta.ema(close='close', length=50) # منطقة السيولة الديناميكية
+        df['adx'] = df.ta.adx(high='high', low='low', close='close', length=14)['ADX_14']
         df['rsi'] = df.ta.rsi(close='close', length=14)
+        df['atr'] = df.ta.atr(high='high', low='low', close='close', length=14)
+        df['vol_sma'] = df.ta.sma(close='vol', length=20)
         
-        # 4. الهايكن آشي (للتأكيد النهائي)
-        ha = df.ta.ha()
-        df['ha_close'] = ha['HA_close']
-        df['ha_open'] = ha['HA_open']
-
-        df['atr'] = df.ta.atr(length=14)
-        
-        if pd.isna(df['ema200'].iloc[-1]): return None, "Calc Indicators..."
+        if pd.isna(df['ema50'].iloc[-1]): return None, "Calc 5m..."
 
         curr = df.iloc[-1]
+        prev = df.iloc[-2]
         
         entry = curr['close']
         atr = curr['atr']
-        
-        # === تحليل الاتجاه العام (4-TF Filter) ===
-        # ترند صاعد قوي: السعر فوق EMA 200 و EMA 50
-        uptrend_strong = (curr['close'] > curr['ema200']) and (curr['close'] > curr['ema50'])
-        # ترند هابط قوي: السعر تحت EMA 200 و EMA 50
-        downtrend_strong = (curr['close'] < curr['ema200']) and (curr['close'] < curr['ema50'])
 
-        # === تحليل الهايكن آشي ===
-        ha_green = curr['ha_close'] > curr['ha_open']
-        ha_red = curr['ha_close'] < curr['ha_open']
+        # === الفلاتر الأساسية ===
+        # 1. فلتر القوة (ADX)
+        strong_trend_local = curr['adx'] > 20
+        # 2. فلتر السيولة (Volume)
+        good_volume = curr['vol'] > curr['vol_sma']
 
-        # 🟢 LONG STRATEGY (شراء من المنطقة الذهبية)
-        # 1. الاتجاه العام صاعد (فوق EMA 200)
-        # 2. السعر صحح (نزل) حتى لمس أو اقترب من مستوى فيبوناتشي
-        # 3. ظهرت شمعة هايكن آشي خضراء (بداية الارتداد)
-        # 4. RSI ليس متشبعاً شرائياً (تحت 70)
-        
-        dist_to_fib_buy = abs(curr['close'] - curr['fib_buy_level']) / curr['close'] * 100
-        in_golden_zone_buy = dist_to_fib_buy < 1.5 # السعر قريب 1.5% من مستوى الفيبو
-        
-        if uptrend_strong and in_golden_zone_buy and ha_green and (curr['rsi'] < 70):
-            sl = entry - (atr * 2.0)
-            risk = entry - sl
-            tp = entry + (risk * 3.0) # هدف فيبوناتشي عادة كبير
+        # =======================================
+        # 🟢 LONG STRATEGY (شراء مع الاتجاه)
+        # =======================================
+        if trend_bullish:
+            # 1. السعر قريب من منطقة السيولة (EMA 50) - يعني حصل تصحيح
+            # نسمح بمسافة 0.5% حول المتوسط كمنطقة دخول
+            dist_to_ema = (curr['close'] - curr['ema50']) / curr['ema50'] * 100
+            in_liquidity_zone = dist_to_ema > -0.5 and dist_to_ema < 1.0 # قريب من المتوسط
             
-            return ("LONG", entry, tp, sl, int(curr['time'])), f"FIBO GOLDEN BOUNCE (Trend: UP)"
-
-        # 🔴 SHORT STRATEGY (بيع من المنطقة الذهبية)
-        # 1. الاتجاه العام هابط (تحت EMA 200)
-        # 2. السعر صحح (صعد) حتى لمس مستوى المقاومة فيبوناتشي
-        # 3. ظهرت شمعة حمراء
-        
-        dist_to_fib_sell = abs(curr['close'] - curr['fib_sell_level']) / curr['close'] * 100
-        in_golden_zone_sell = dist_to_fib_sell < 1.5
-        
-        if downtrend_strong and in_golden_zone_sell and ha_red and (curr['rsi'] > 30):
-            sl = entry + (atr * 2.0)
-            risk = sl - entry
-            tp = entry - (risk * 3.0)
+            # 2. شمعة ابتلاعية صاعدة (Bullish Engulfing)
+            # الشمعة الحالية خضراء وتبتلع جسم الشمعة الحمراء السابقة
+            is_green = curr['close'] > curr['open']
+            prev_red = prev['close'] < prev['open']
+            engulfing = is_green and prev_red and (curr['close'] > prev['open']) and (curr['open'] < prev['close'])
             
-            return ("SHORT", entry, tp, sl, int(curr['time'])), f"FIBO GOLDEN REJECTION (Trend: DOWN)"
+            # 3. RSI يرتد (بين 40 و 60) - منطقة صحية ليست تشبع
+            rsi_valid = curr['rsi'] > 40 and curr['rsi'] < 65
 
-        # تقارير الرفض للوغز
-        if uptrend_strong and not in_golden_zone_buy: 
-            return None, f"Uptrend but far from Fib ({dist_to_fib_buy:.1f}%)"
-        if downtrend_strong and not in_golden_zone_sell: 
-            return None, f"Downtrend but far from Fib ({dist_to_fib_sell:.1f}%)"
-        if not uptrend_strong and not downtrend_strong:
-            return None, "Choppy Market (Between EMAs)"
+            if in_liquidity_zone and engulfing and rsi_valid and strong_trend_local and good_volume:
+                sl = prev['low'] - (atr * 1.0) # ستوب تحت ذيل الشمعة السابقة
+                risk = entry - sl
+                tp = entry + (risk * 2.0) # هدف 2R
+                
+                return ("LONG", entry, tp, sl, int(curr['time'])), f"MTF BUY (1H Trend + 5m Structure)"
             
-        return None, "Waiting Setup..."
+            if not in_liquidity_zone: return None, "Uptrend but Price Far from Liquidity"
+
+        # =======================================
+        # 🔴 SHORT STRATEGY (بيع مع الاتجاه)
+        # =======================================
+        if trend_bearish:
+            # 1. السعر قريب من منطقة السيولة
+            dist_to_ema = (curr['ema50'] - curr['close']) / curr['ema50'] * 100
+            in_liquidity_zone = dist_to_ema > -0.5 and dist_to_ema < 1.0
+            
+            # 2. شمعة ابتلاعية هابطة (Bearish Engulfing)
+            is_red = curr['close'] < curr['open']
+            prev_green = prev['close'] > prev['open']
+            engulfing = is_red and prev_green and (curr['close'] < prev['open']) and (curr['open'] > prev['close'])
+            
+            # 3. RSI يرتد
+            rsi_valid = curr['rsi'] < 60 and curr['rsi'] > 35
+
+            if in_liquidity_zone and engulfing and rsi_valid and strong_trend_local and good_volume:
+                sl = prev['high'] + (atr * 1.0) # ستوب فوق ذيل الشمعة السابقة
+                risk = sl - entry
+                tp = entry - (risk * 2.0)
+                
+                return ("SHORT", entry, tp, sl, int(curr['time'])), f"MTF SELL (1H Trend + 5m Structure)"
+
+            if not in_liquidity_zone: return None, "Downtrend but Price Far from Liquidity"
+
+        return None, "Waiting for Setup..."
 
     except Exception as e:
         return None, f"Error: {str(e)}"
@@ -203,16 +214,12 @@ db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    # فاصل زمني 30 دقيقة
+    # انتظار 30 دقيقة (لأننا نستخدم فريم 5 دقائق للدخول)
     if time.time() - last_sig_time < 1800: return 
     if symbol in app_state.active_trades: return
 
     async with sem:
-        # 🔥 تم إصلاح المتغيرات هنا لاستلام السبب وعرضه 🔥
-        result = await get_signal_logic(symbol)
-        if not result: return # حماية من الخطأ
-        
-        logic_res, reason = result
+        logic_res, reason = await get_signal_logic(symbol)
         
         if logic_res:
             side, entry, tp, sl, ts = logic_res
@@ -225,17 +232,19 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (Fibo)</b>" if side == "LONG" else "🔴 <b>SELL (Fibo)</b>"
+                # أيقونات احترافية
+                icon = "💎" if side == "LONG" else "🔻"
+                side_text = f"{icon} <b>{side} (Pro MTF)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"✨ <code>{clean_name}</code>\n"
+                    f"🛡️ <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
                     f"──────────────\n"
-                    f"🏆 <b>TARGET:</b> <code>{format_price(tp)}</code>\n"
+                    f"🏆 <b>TARGET (2R):</b> <code>{format_price(tp)}</code>\n"
                     f"──────────────\n"
                     f"🛑 <b>STOP:</b> <code>{format_price(sl)}</code>\n"
                     f"<i>(Risk: {sl_pct:.2f}%)</i>"
@@ -280,7 +289,7 @@ async def monitor_trades(app_state):
                     elif price >= sl: hit_sl = True
                 
                 if hit_tp:
-                    await reply_telegram_msg(f"✅ <b>TARGET HIT!</b>\nPrice: {format_price(price)}", msg_id)
+                    await reply_telegram_msg(f"✅ <b>TARGET HIT (2R)</b>\nPrice: {format_price(price)}", msg_id)
                     app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
                     del app_state.active_trades[sym]
                     print(f"✅ {sym} Win")
@@ -318,7 +327,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: FIBONACCI FORTRESS (V140)...")
+    print(f"🚀 System Online: MTF LIQUIDITY PRO (1H Trend + 5m Entry)...")
     try:
         await exchange.load_markets()
         
