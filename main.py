@@ -20,10 +20,10 @@ RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# 🔥 تم رفع السيولة لـ 20 مليون لزيادة القوة 🔥
-MIN_VOLUME_USDT = 20_000_000 
+# السيولة 10 مليون (مناسبة جداً للهايكن آشي)
+MIN_VOLUME_USDT = 10_000_000 
 
-# الفريم 5 دقائق (سكالب سريع)
+# الفريم 5 دقائق (الأسرع والأدق لهذه الاستراتيجية)
 TIMEFRAME = '5m'
 
 app = FastAPI()
@@ -34,9 +34,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (TITANIUM EDITION)</h1>
-            <p>Strategy: Rocket Reversal + EMA 50 Trend + ADX Power</p>
-            <p>Liquidity Filter: > 20M USDT</p>
+            <h1>🛡️ Fortress Bot (GHOST SNIPER)</h1>
+            <p>Strategy: Heiken Ashi Smoothed + EMA 9 + StochRSI</p>
+            <p>Target: ZERO LAG ENTRY</p>
         </body>
     </html>
     """
@@ -69,7 +69,7 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Rocket + Trend + ADX) 🔥 أقوى نسخة 🔥
+# 3. المنطق (Heiken Ashi Sniper) 🔥 الاستراتيجية الجديدة 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -79,86 +79,86 @@ async def get_signal_logic(symbol):
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. EMA 10 (للاختراق)
-        df['ema10'] = df.ta.ema(close='close', length=10)
+        # 1. حساب شموع الهايكن آشي (Heiken Ashi)
+        # هذه الشموع تنقي الشارت من التذبذب وتعطي الاتجاه الصافي
+        ha = df.ta.ha()
+        df['ha_open'] = ha['HA_open']
+        df['ha_close'] = ha['HA_close']
+        df['ha_high'] = ha['HA_high']
+        df['ha_low'] = ha['HA_low']
         
-        # 2. EMA 50 (للاتجاه العام) - جديد
-        df['ema50'] = df.ta.ema(close='close', length=50)
+        # 2. EMA 9 (المتوسط السريع جداً)
+        df['ema9'] = df.ta.ema(close='close', length=9)
         
-        # 3. ADX (لقوة الحركة) - جديد
-        adx_df = df.ta.adx(high='high', low='low', close='close', length=14)
-        df['adx'] = adx_df['ADX_14']
+        # 3. Stochastic RSI (للتوقيت الدقيق جداً)
+        stoch_rsi = df.ta.stochrsi(close='close', length=14, rsi_length=14, k=3, d=3)
+        # تصحيح أسماء الأعمدة حسب مكتبة pandas_ta
+        k_col = [c for c in stoch_rsi.columns if c.startswith('STOCHRSIk')][0]
+        d_col = [c for c in stoch_rsi.columns if c.startswith('STOCHRSId')][0]
+        df['k'] = stoch_rsi[k_col]
+        df['d'] = stoch_rsi[d_col]
         
-        # 4. RSI (للتشبع)
-        df['rsi'] = df.ta.rsi(close='close', length=14)
-        
-        # 5. ATR (للستوب)
+        # 4. ATR (للستوب)
         df['atr'] = df.ta.atr(high='high', low='low', close='close', length=14)
         
-        if pd.isna(df['ema50'].iloc[-1]) or pd.isna(df['adx'].iloc[-1]): return None, "Calc Indicators..."
+        if pd.isna(df['ema9'].iloc[-1]): return None, "Calc Indicators..."
 
         curr = df.iloc[-1]
         prev = df.iloc[-2]
-        last_3_rsi = df['rsi'].iloc[-4:-1]
         
         entry = curr['close']
         atr = curr['atr']
 
-        # === الفلاتر الصلبة (Hard Filters) ===
-        # 1. هل السوق يتحرك؟ (ADX > 20)
-        strong_market = curr['adx'] > 20
+        # === تحليل الهايكن آشي (HA Analysis) ===
+        # شمعة HA خضراء: الإغلاق أعلى من الافتتاح
+        ha_green = curr['ha_close'] > curr['ha_open']
+        # شمعة HA حمراء: الإغلاق أقل من الافتتاح
+        ha_red = curr['ha_close'] < curr['ha_open']
         
-        # 2. هل الشمعة قوية؟ (جسم الشمعة > 0.4%)
-        body_pct = abs(curr['close'] - curr['open']) / curr['open'] * 100
-        strong_candle = body_pct > 0.4
+        # === شروط الدخول الصارمة (Sniper Logic) ===
 
-        # =======================================
         # 🟢 LONG (شراء)
-        # =======================================
-        # 1. السعر يخترق EMA 10
-        breakout_up = (curr['close'] > curr['ema10']) and (curr['close'] > curr['open'])
-        
-        # 2. السعر فوق EMA 50 (مع الاتجاه العام) 🔥
-        trend_up = curr['close'] > curr['ema50']
-        
-        # 3. ارتداد من تشبع
-        was_oversold = (last_3_rsi < 40).any() # رفعناها لـ 40 لزيادة الفرص مع الترند
-        rsi_rising = curr['rsi'] > prev['rsi']
-
-        if breakout_up and trend_up and strong_market and strong_candle and was_oversold and rsi_rising:
-            sl = entry - (atr * 2.0)
-            risk = entry - sl
-            tp = entry + (risk * 3.0)
+        # 1. شمعة هايكن آشي خضراء (اتجاه صافي)
+        # 2. السعر أغلق فوق EMA 9 (اختراق)
+        # 3. StochRSI في صعود (K يقطع D لأعلى)
+        # 4. لسنا في قمة خطرة (K < 90)
+        if ha_green and (curr['close'] > curr['ema9']) and (curr['k'] > curr['d']) and (curr['k'] < 90):
             
-            return ("LONG", entry, tp, sl, int(curr['time'])), f"TITANIUM BUY (ADX: {curr['adx']:.1f})"
+            # التأكد أن الحركة بدأت للتو (الشمعة السابقة كانت تحت أو قريبة من EMA)
+            fresh_move = prev['close'] <= prev['ema9'] or (prev['k'] < prev['d'])
+            
+            if fresh_move:
+                sl = entry - (atr * 2.0)
+                risk = entry - sl
+                tp = entry + (risk * 3.0)
+                
+                return ("LONG", entry, tp, sl, int(curr['time'])), f"GHOST BUY (HA Green + EMA Break)"
 
-        # =======================================
         # 🔴 SHORT (بيع)
-        # =======================================
-        # 1. السعر يكسر EMA 10
-        breakout_down = (curr['close'] < curr['ema10']) and (curr['close'] < curr['open'])
-        
-        # 2. السعر تحت EMA 50 (مع الاتجاه العام) 🔥
-        trend_down = curr['close'] < curr['ema50']
-        
-        # 3. ارتداد من تشبع
-        was_overbought = (last_3_rsi > 60).any()
-        rsi_falling = curr['rsi'] < prev['rsi']
-
-        if breakout_down and trend_down and strong_market and strong_candle and was_overbought and rsi_falling:
-            sl = entry + (atr * 2.0)
-            risk = sl - entry
-            tp = entry - (risk * 3.0)
+        # 1. شمعة هايكن آشي حمراء
+        # 2. السعر أغلق تحت EMA 9
+        # 3. StochRSI في هبوط (K يقطع D لأسفل)
+        # 4. لسنا في قاع خطر (K > 10)
+        if ha_red and (curr['close'] < curr['ema9']) and (curr['k'] < curr['d']) and (curr['k'] > 10):
             
-            return ("SHORT", entry, tp, sl, int(curr['time'])), f"TITANIUM SELL (ADX: {curr['adx']:.1f})"
+            # التأكد أن الحركة بدأت للتو
+            fresh_move = prev['close'] >= prev['ema9'] or (prev['k'] > prev['d'])
+            
+            if fresh_move:
+                sl = entry + (atr * 2.0)
+                risk = sl - entry
+                tp = entry - (risk * 3.0)
+                
+                return ("SHORT", entry, tp, sl, int(curr['time'])), f"GHOST SELL (HA Red + EMA Break)"
 
-        # تقارير الرفض
-        if not strong_market: return None, f"Weak Market (ADX {curr['adx']:.1f})"
-        if breakout_up and not trend_up: return None, "Breakout against Trend (Below EMA50)"
-        if breakout_down and not trend_down: return None, "Breakout against Trend (Above EMA50)"
+        # تقارير الرفض للوغز
+        dist = (curr['close'] - curr['ema9']) / curr['ema9'] * 100
         
-        dist = (curr['close'] - curr['ema10']) / curr['ema10'] * 100
-        return None, f"No Signal (Dist: {dist:.2f}%)"
+        if ha_green and not (curr['close'] > curr['ema9']): return None, f"HA Green but Below EMA9"
+        if ha_red and not (curr['close'] < curr['ema9']): return None, f"HA Red but Above EMA9"
+        if not (curr['k'] > curr['d']) and side == "LONG": return None, "StochRSI not crossing up"
+        
+        return None, f"No Signal (HA Trend: {'Green' if ha_green else 'Red'})"
 
     except Exception as e:
         return None, f"Error: {str(e)}"
@@ -195,8 +195,8 @@ db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    # تقليل الحظر لـ 30 دقيقة لأن الفلاتر قوية وتمنع التكرار العشوائي
-    if time.time() - last_sig_time < 1800: return 
+    # تقليل الحظر لـ 20 دقيقة فقط لضمان عدم تفويت الموجات المتتالية السريعة
+    if time.time() - last_sig_time < 1200: return 
     if symbol in app_state.active_trades: return
 
     async with sem:
@@ -213,12 +213,12 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (Titanium)</b>" if side == "LONG" else "🔴 <b>SELL (Titanium)</b>"
+                side_text = "🟢 <b>BUY (Ghost)</b>" if side == "LONG" else "🔴 <b>SELL (Ghost)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"🚀 <code>{clean_name}</code>\n"
+                    f"👻 <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -306,7 +306,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: TITANIUM EDITION (20M+ Vol)...")
+    print(f"🚀 System Online: GHOST SNIPER (Heiken Ashi + EMA9)...")
     try:
         await exchange.load_markets()
         
@@ -320,7 +320,7 @@ async def start_scanning(app_state):
                             active_symbols.append(s)
                 
                 app_state.symbols = active_symbols
-                print(f"\n🔎 Scan Cycle: Found {len(active_symbols)} coins (Vol > 20M)...", flush=True)
+                print(f"\n🔎 Scan Cycle: Found {len(active_symbols)} coins...", flush=True)
                 
             except Exception as e:
                 print(f"⚠️ Market Update Error: {e}")
