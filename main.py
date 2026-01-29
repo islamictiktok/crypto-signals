@@ -13,14 +13,14 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 # ==========================================
-# 0. إعدادات السجلات (Logs)
+# 0. إعدادات السجلات
 # ==========================================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
     datefmt='%H:%M:%S'
 )
-logger = logging.getLogger("FortressV71")
+logger = logging.getLogger("FortressV72")
 
 # ==========================================
 # 1. الإعدادات (Config)
@@ -32,20 +32,20 @@ class Config:
     
     # إعدادات السوق
     TIMEFRAME = '5m'
-    MIN_VOLUME = 10_000_000  # 10 مليون سيولة
+    MIN_VOLUME = 10_000_000
     
     # إعدادات الاستراتيجية
     RSI_PERIOD = 14
-    EMA_PERIOD = 200
+    EMA_PERIOD = 200  # نحتاج بيانات أكثر من 200 شمعة
     
     # إدارة الصفقات
     RISK_REWARD = 1.8
     ATR_SL_MULT = 1.0
     
-    DB_FILE = "v71_trades.json"
+    DB_FILE = "v72_trades.json"
 
 # ==========================================
-# 2. إدارة البيانات (Data)
+# 2. إدارة البيانات
 # ==========================================
 class DataManager:
     def __init__(self):
@@ -84,7 +84,7 @@ class DataManager:
 db = DataManager()
 
 # ==========================================
-# 3. التليجرام (Telegram)
+# 3. التليجرام
 # ==========================================
 class TelegramBot:
     @staticmethod
@@ -135,24 +135,29 @@ def fmt(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 4. الاستراتيجية (Detailed Logic)
+# 4. الاستراتيجية (The Logic - Fixed Data Length)
 # ==========================================
 class Strategy:
     @staticmethod
     def analyze(df):
-        """
-        تعيد: (الإشارة، الدخول، الهدف، الستوب، السبب)
-        """
         try:
+            # التأكد من وجود بيانات كافية لحساب EMA 200
+            if len(df) < Config.EMA_PERIOD:
+                return None, "Not enough data for EMA"
+
             # الحسابات
             df['rsi'] = ta.rsi(df['c'], length=Config.RSI_PERIOD)
             df['atr'] = ta.atr(df['h'], df['l'], df['c'], length=14)
             df['ema200'] = ta.ema(df['c'], length=Config.EMA_PERIOD)
             
+            # التأكد من أن الحسابات لم ترجع NaN
+            if pd.isna(df['ema200'].iloc[-1]) or pd.isna(df['atr'].iloc[-1]):
+                return None, "Indicators calculating..."
+
             last_rows = df.iloc[-30:] 
             curr = df.iloc[-1]
             
-            # 1. تحديد الفراكتلز
+            # تحديد الفراكتلز
             pivots_low = []
             pivots_high = []
             
@@ -165,74 +170,63 @@ class Strategy:
                    (last_rows.iloc[i-1]['h'] > last_rows.iloc[i-2]['h']):
                     pivots_high.append(last_rows.iloc[i-1])
             
-            # --- تحليل الشراء LONG ---
+            # --- LONG ---
             if curr['c'] > curr['ema200']:
-                if len(pivots_low) < 2:
-                    return None, "Uptrend / Not enough pivots"
+                if len(pivots_low) < 2: return None, "Uptrend / Waiting Pivots"
                 
                 p1 = pivots_low[-2]
                 p2 = pivots_low[-1]
                 
-                # فحص الدايفرجنس
-                price_lower = p2['l'] < p1['l']
-                rsi_higher = p2['rsi'] > p1['rsi']
-                
-                if not (price_lower and rsi_higher):
-                    return None, "Uptrend / No Divergence"
-                
-                # فحص الكسر
-                start_idx = int(p1.name)
-                end_idx = int(p2.name)
-                interim_high = df.loc[start_idx:end_idx]['h'].max()
-                
-                if curr['c'] <= interim_high:
+                if (p2['l'] < p1['l']) and (p2['rsi'] > p1['rsi']):
+                    # Breakout Check
+                    start_idx = int(p1.name)
+                    end_idx = int(p2.name)
+                    # حماية من خطأ الفراغ
+                    if start_idx >= end_idx: return None, "Pivot Error"
+                    
+                    interim_high = df.loc[start_idx:end_idx]['h'].max()
+                    
+                    if curr['c'] > interim_high:
+                        entry = curr['c']
+                        sl = p2['l'] - (curr['atr'] * Config.ATR_SL_MULT)
+                        risk = entry - sl
+                        tp = entry + (risk * Config.RISK_REWARD)
+                        return ("LONG", entry, tp, sl), "Signal Found"
                     return None, "Uptrend / Waiting Breakout"
-                
-                # ✅ نجاح الشراء
-                entry = curr['c']
-                sl = p2['l'] - (curr['atr'] * Config.ATR_SL_MULT)
-                risk = entry - sl
-                tp = entry + (risk * Config.RISK_REWARD)
-                return ("LONG", entry, tp, sl), "Signal Found"
+                return None, "Uptrend / No Divergence"
 
-            # --- تحليل البيع SHORT ---
+            # --- SHORT ---
             elif curr['c'] < curr['ema200']:
-                if len(pivots_high) < 2:
-                    return None, "Downtrend / Not enough pivots"
+                if len(pivots_high) < 2: return None, "Downtrend / Waiting Pivots"
                 
                 p1 = pivots_high[-2]
                 p2 = pivots_high[-1]
                 
-                # فحص الدايفرجنس
-                price_higher = p2['h'] > p1['h']
-                rsi_lower = p2['rsi'] < p1['rsi']
-                
-                if not (price_higher and rsi_lower):
-                    return None, "Downtrend / No Divergence"
-                
-                # فحص الكسر
-                start_idx = int(p1.name)
-                end_idx = int(p2.name)
-                interim_low = df.loc[start_idx:end_idx]['l'].min()
-                
-                if curr['c'] >= interim_low:
+                if (p2['h'] > p1['h']) and (p2['rsi'] < p1['rsi']):
+                    # Breakout Check
+                    start_idx = int(p1.name)
+                    end_idx = int(p2.name)
+                    if start_idx >= end_idx: return None, "Pivot Error"
+                    
+                    interim_low = df.loc[start_idx:end_idx]['l'].min()
+                    
+                    if curr['c'] < interim_low:
+                        entry = curr['c']
+                        sl = p2['h'] + (curr['atr'] * Config.ATR_SL_MULT)
+                        risk = sl - entry
+                        tp = entry - (risk * Config.RISK_REWARD)
+                        return ("SHORT", entry, tp, sl), "Signal Found"
                     return None, "Downtrend / Waiting Breakout"
-                
-                # ✅ نجاح البيع
-                entry = curr['c']
-                sl = p2['h'] + (curr['atr'] * Config.ATR_SL_MULT)
-                risk = sl - entry
-                tp = entry - (risk * Config.RISK_REWARD)
-                return ("SHORT", entry, tp, sl), "Signal Found"
+                return None, "Downtrend / No Divergence"
             
             else:
-                return None, "Consolidation (At EMA)"
+                return None, "Consolidation"
 
         except Exception as e:
             return None, f"Error: {str(e)}"
 
 # ==========================================
-# 5. المحرك (Engine)
+# 5. المحرك (Engine - Fixed Limits)
 # ==========================================
 class Engine:
     def __init__(self):
@@ -241,7 +235,6 @@ class Engine:
 
     async def get_top_pairs(self):
         try:
-            # 🔄 تحديث العملات في كل دورة
             await self.exchange.load_markets()
             tickers = await self.exchange.fetch_tickers()
             pairs = [s for s, t in tickers.items() if '/USDT:USDT' in s and t['quoteVolume'] >= Config.MIN_VOLUME]
@@ -252,27 +245,25 @@ class Engine:
         logger.info("🚀 Scanner Started...")
         while True:
             try:
-                # 1. تحديث القائمة
                 symbols = await self.get_top_pairs()
-                logger.info(f"🔎 Found {len(symbols)} active pairs matching criteria.")
+                logger.info(f"🔎 Found {len(symbols)} active pairs.")
                 
                 for symbol in symbols:
                     if symbol in db.trades: 
-                        print(f"  > {symbol}: Active Trade (Skipped)", flush=True)
+                        print(f"  > {symbol}: Active Trade", flush=True)
                         continue
                     
-                    ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=100)
-                    if not ohlcv: 
-                        print(f"  > {symbol}: No Data", flush=True)
+                    # 🔥 التعديل الهام هنا: limit=300 🔥
+                    # نحتاج 300 شمعة لحساب EMA 200 بدقة
+                    ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=300)
+                    if not ohlcv or len(ohlcv) < 200: 
+                        print(f"  > {symbol}: Loading Data...", flush=True)
                         continue
                     
                     df = pd.DataFrame(ohlcv, columns=['time','o','h','l','c','v'])
-                    
-                    # 2. التحليل مع استلام السبب
                     signal_data, reason = Strategy.analyze(df)
                     
                     if signal_data:
-                        # نجاح
                         side, entry, tp, sl = signal_data
                         logger.info(f"🔥 SIGNAL: {symbol} {side}")
                         
@@ -284,12 +275,11 @@ class Engine:
                                 "side": side, "entry": entry, "tp": tp, "sl": sl, "msg_id": msg_id
                             })
                     else:
-                        # طباعة سبب الرفض
                         print(f"  > {symbol}: {reason}", flush=True)
                     
-                    await asyncio.sleep(0.05) # راحة قصيرة جداً
+                    await asyncio.sleep(0.05)
                 
-                print("--- Scan Cycle Finished (Resting 5s) ---", flush=True)
+                print("--- Scan Cycle Finished ---", flush=True)
                 await asyncio.sleep(5)
                 
             except Exception as e:
@@ -337,7 +327,7 @@ class Engine:
     async def report_loop(self):
         while True:
             now = datetime.now()
-            if now.hour == Config.REPORT_HOUR and now.minute == Config.REPORT_MINUTE:
+            if now.hour == 23 and now.minute == 59:
                 msg = TelegramBot.format_report(db.stats)
                 await TelegramBot.send(msg)
                 db.stats = {"wins": 0, "losses": 0}
@@ -349,7 +339,7 @@ class Engine:
         await self.exchange.close()
 
 # ==========================================
-# 6. التشغيل (Lifespan)
+# 6. التشغيل
 # ==========================================
 engine = Engine()
 
@@ -380,8 +370,8 @@ async def root():
     return f"""
     <html>
         <body style='background:#000;color:#0f0;font-family:monospace;text-align:center;padding:50px;'>
-            <h1>FORTRESS V71 (VERBOSE)</h1>
-            <p>Scanning {Config.MIN_VOLUME // 1000000}M+ Liquidity</p>
+            <h1>FORTRESS V72 ACTIVE</h1>
+            <p>Limit Increased to 300 Candles</p>
             <p>Active Trades: {len(db.trades)}</p>
         </body>
     </html>
