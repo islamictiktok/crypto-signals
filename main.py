@@ -20,12 +20,11 @@ RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# السيولة 10 مليون
-MIN_VOLUME_USDT = 10_000_000 
+# 🔥 تم رفع السيولة لـ 20 مليون لزيادة القوة 🔥
+MIN_VOLUME_USDT = 20_000_000 
 
-# إعدادات الاستراتيجية (Fast Breakout)
-EMA_TRIGGER = 9        # متوسط سريع جداً لالتقاط الحركة من بدايتها
-TIMEFRAME = '15m'      # الفريم
+# الفريم 5 دقائق (سكالب سريع)
+TIMEFRAME = '5m'
 
 app = FastAPI()
 
@@ -35,9 +34,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (SNIPER ENTRY)</h1>
-            <p>Strategy: Price Breakout EMA 9 + Stoch</p>
-            <p>Target: Early Entry</p>
+            <h1>🛡️ Fortress Bot (TITANIUM EDITION)</h1>
+            <p>Strategy: Rocket Reversal + EMA 50 Trend + ADX Power</p>
+            <p>Liquidity Filter: > 20M USDT</p>
         </body>
     </html>
     """
@@ -70,7 +69,7 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Sniper Logic: Price > EMA 9) 🔥 تعديل جذري 🔥
+# 3. المنطق (Rocket + Trend + ADX) 🔥 أقوى نسخة 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -80,78 +79,86 @@ async def get_signal_logic(symbol):
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. المؤشر السريع (EMA 9)
-        df['ema_fast'] = df.ta.ema(close='close', length=EMA_TRIGGER)
+        # 1. EMA 10 (للاختراق)
+        df['ema10'] = df.ta.ema(close='close', length=10)
         
-        # 2. الستوكاستيك (للتأكد من الزخم)
-        stoch = df.ta.stoch(high='high', low='low', close='close', k=14, d=3, smooth_k=3)
-        k_col = [c for c in stoch.columns if c.startswith('STOCHk')][0]
-        d_col = [c for c in stoch.columns if c.startswith('STOCHd')][0]
-        df['k'] = stoch[k_col]
-        df['d'] = stoch[d_col]
+        # 2. EMA 50 (للاتجاه العام) - جديد
+        df['ema50'] = df.ta.ema(close='close', length=50)
         
-        # 3. RSI (فلتر إضافي)
+        # 3. ADX (لقوة الحركة) - جديد
+        adx_df = df.ta.adx(high='high', low='low', close='close', length=14)
+        df['adx'] = adx_df['ADX_14']
+        
+        # 4. RSI (للتشبع)
         df['rsi'] = df.ta.rsi(close='close', length=14)
         
-        # 4. ATR (للستوب)
+        # 5. ATR (للستوب)
         df['atr'] = df.ta.atr(high='high', low='low', close='close', length=14)
         
-        if pd.isna(df['ema_fast'].iloc[-1]): return None, "Calc Indicators..."
+        if pd.isna(df['ema50'].iloc[-1]) or pd.isna(df['adx'].iloc[-1]): return None, "Calc Indicators..."
 
         curr = df.iloc[-1]
         prev = df.iloc[-2]
+        last_3_rsi = df['rsi'].iloc[-4:-1]
         
         entry = curr['close']
         atr = curr['atr']
 
-        # =======================================
-        # 🟢 LONG: السعر يخترق EMA 9 لأعلى
-        # =======================================
-        # الشرط 1: السعر الحالي أغلق فوق EMA 9 والسابق كان تحته (اختراق)
-        price_cross_up = (prev['close'] < prev['ema_fast']) and (curr['close'] > curr['ema_fast'])
+        # === الفلاتر الصلبة (Hard Filters) ===
+        # 1. هل السوق يتحرك؟ (ADX > 20)
+        strong_market = curr['adx'] > 20
         
-        # الشرط 2: الستوكاستيك إيجابي (K > D) وليس متشبعاً جداً (< 85)
-        stoch_bull = (curr['k'] > curr['d']) and (curr['k'] < 85)
-        
-        # الشرط 3: RSI فوق 40 (ليس ميتاً)
-        rsi_ok = curr['rsi'] > 40
+        # 2. هل الشمعة قوية؟ (جسم الشمعة > 0.4%)
+        body_pct = abs(curr['close'] - curr['open']) / curr['open'] * 100
+        strong_candle = body_pct > 0.4
 
-        if price_cross_up and stoch_bull and rsi_ok:
-            sl = entry - (atr * 2.0) # ستوب واسع قليلاً لحماية التذبذب
+        # =======================================
+        # 🟢 LONG (شراء)
+        # =======================================
+        # 1. السعر يخترق EMA 10
+        breakout_up = (curr['close'] > curr['ema10']) and (curr['close'] > curr['open'])
+        
+        # 2. السعر فوق EMA 50 (مع الاتجاه العام) 🔥
+        trend_up = curr['close'] > curr['ema50']
+        
+        # 3. ارتداد من تشبع
+        was_oversold = (last_3_rsi < 40).any() # رفعناها لـ 40 لزيادة الفرص مع الترند
+        rsi_rising = curr['rsi'] > prev['rsi']
+
+        if breakout_up and trend_up and strong_market and strong_candle and was_oversold and rsi_rising:
+            sl = entry - (atr * 2.0)
             risk = entry - sl
-            tp = entry + (risk * 2.5) # هدف طموح
+            tp = entry + (risk * 3.0)
             
-            return ("LONG", entry, tp, sl, int(curr['time'])), "SNIPER ENTRY (EMA 9 Break)"
+            return ("LONG", entry, tp, sl, int(curr['time'])), f"TITANIUM BUY (ADX: {curr['adx']:.1f})"
 
         # =======================================
-        # 🔴 SHORT: السعر يكسر EMA 9 لأسفل
+        # 🔴 SHORT (بيع)
         # =======================================
-        # الشرط 1: السعر الحالي أغلق تحت EMA 9 والسابق كان فوقه
-        price_cross_down = (prev['close'] > prev['ema_fast']) and (curr['close'] < curr['ema_fast'])
+        # 1. السعر يكسر EMA 10
+        breakout_down = (curr['close'] < curr['ema10']) and (curr['close'] < curr['open'])
         
-        # الشرط 2: الستوكاستيك سلبي (K < D) وليس متشبعاً بيعياً جداً (> 15)
-        stoch_bear = (curr['k'] < curr['d']) and (curr['k'] > 15)
+        # 2. السعر تحت EMA 50 (مع الاتجاه العام) 🔥
+        trend_down = curr['close'] < curr['ema50']
         
-        # الشرط 3: RSI تحت 60
-        rsi_ok_bear = curr['rsi'] < 60
+        # 3. ارتداد من تشبع
+        was_overbought = (last_3_rsi > 60).any()
+        rsi_falling = curr['rsi'] < prev['rsi']
 
-        if price_cross_down and stoch_bear and rsi_ok_bear:
+        if breakout_down and trend_down and strong_market and strong_candle and was_overbought and rsi_falling:
             sl = entry + (atr * 2.0)
             risk = sl - entry
-            tp = entry - (risk * 2.5)
+            tp = entry - (risk * 3.0)
             
-            return ("SHORT", entry, tp, sl, int(curr['time'])), "SNIPER ENTRY (EMA 9 Break)"
+            return ("SHORT", entry, tp, sl, int(curr['time'])), f"TITANIUM SELL (ADX: {curr['adx']:.1f})"
 
-        # أسباب الرفض للوغز
-        if not price_cross_up and not price_cross_down:
-            dist = (curr['close'] - curr['ema_fast']) / curr['ema_fast'] * 100
-            status = "Above" if curr['close'] > curr['ema_fast'] else "Below"
-            return None, f"No Breakout ({status} EMA9 by {abs(dist):.2f}%)"
+        # تقارير الرفض
+        if not strong_market: return None, f"Weak Market (ADX {curr['adx']:.1f})"
+        if breakout_up and not trend_up: return None, "Breakout against Trend (Below EMA50)"
+        if breakout_down and not trend_down: return None, "Breakout against Trend (Above EMA50)"
         
-        if price_cross_up and not stoch_bull: return None, "Breakout but Bad Stoch"
-        if price_cross_down and not stoch_bear: return None, "Breakout but Bad Stoch"
-
-        return None, "Waiting Setup..."
+        dist = (curr['close'] - curr['ema10']) / curr['ema10'] * 100
+        return None, f"No Signal (Dist: {dist:.2f}%)"
 
     except Exception as e:
         return None, f"Error: {str(e)}"
@@ -188,7 +195,8 @@ db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    if time.time() - last_sig_time < (60 * 30): return # 30 دقيقة انتظار فقط للتسريع
+    # تقليل الحظر لـ 30 دقيقة لأن الفلاتر قوية وتمنع التكرار العشوائي
+    if time.time() - last_sig_time < 1800: return 
     if symbol in app_state.active_trades: return
 
     async with sem:
@@ -205,12 +213,12 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (Sniper)</b>" if side == "LONG" else "🔴 <b>SELL (Sniper)</b>"
+                side_text = "🟢 <b>BUY (Titanium)</b>" if side == "LONG" else "🔴 <b>SELL (Titanium)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"🛡️ <code>{clean_name}</code>\n"
+                    f"🚀 <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -298,7 +306,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: SNIPER EDITION (EMA 9 Break)...")
+    print(f"🚀 System Online: TITANIUM EDITION (20M+ Vol)...")
     try:
         await exchange.load_markets()
         
@@ -312,7 +320,7 @@ async def start_scanning(app_state):
                             active_symbols.append(s)
                 
                 app_state.symbols = active_symbols
-                print(f"\n🔎 Scan Cycle: Found {len(active_symbols)} coins...", flush=True)
+                print(f"\n🔎 Scan Cycle: Found {len(active_symbols)} coins (Vol > 20M)...", flush=True)
                 
             except Exception as e:
                 print(f"⚠️ Market Update Error: {e}")
