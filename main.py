@@ -20,11 +20,11 @@ RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# السيولة 20 مليون (لضمان قوة الحركة)
+# السيولة 20 مليون
 MIN_VOLUME_USDT = 20_000_000 
 
-# الفريم 5 دقائق (سكالبينج دقيق)
-TIMEFRAME = '5m'
+# الفريم الأساسي (الساعة)
+TIMEFRAME = '1h'
 
 app = FastAPI()
 
@@ -34,9 +34,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (MACD SNIPER V170)</h1>
-            <p>Strategy: Trend (EMA200) + Momentum (MACD)</p>
-            <p>Status: Active (High Precision) 🟢</p>
+            <h1>💣 Fortress Bot (4-TF SNIPER)</h1>
+            <p>Strategy: TTM Squeeze (1H) + Momentum Align (15m, 5m, 1m)</p>
+            <p>Status: Active 🟢</p>
         </body>
     </html>
     """
@@ -69,93 +69,108 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (MACD Trend Sniper) 🔥 الاستراتيجية الجديدة 🔥
+# 3. المنطق (4-Timeframe Alignment) 🔥 التعديل الجذري 🔥
 # ==========================================
+async def get_momentum(symbol, tf):
+    """دالة مساعدة لجلب الزخم لفريم معين"""
+    try:
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=tf, limit=30)
+        if not ohlcv: return 0
+        df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        # استخدام Linear Regression Momentum (نفس منطق TTM)
+        # أو نستخدم المومنتوم البسيط للسرعة
+        mom = df.ta.mom(close='close', length=12)
+        if mom is None or pd.isna(mom.iloc[-1]): return 0
+        return mom.iloc[-1]
+    except:
+        return 0
+
 async def get_signal_logic(symbol):
     try:
-        # جلب 200 شمعة (ضروري لحساب EMA 200 بدقة)
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=200)
+        # ----------------------------------------------------
+        # المرحلة 1: الفريم الرئيسي (1H) - البحث عن TTM Squeeze
+        # ----------------------------------------------------
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
         if not ohlcv: return None, "No Data"
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. EMA 200 (فلتر الاتجاه العام)
-        df['ema200'] = df.ta.ema(close='close', length=200)
+        # Bollinger Bands & Keltner Channels
+        bb = df.ta.bbands(close='close', length=20, std=2.0)
+        kc = df.ta.kc(high='high', low='low', close='close', length=20, scalar=1.5)
         
-        # 2. MACD (مؤشر الزخم)
-        # fast=12, slow=26, signal=9
-        macd = df.ta.macd(close='close', fast=12, slow=26, signal=9)
+        if bb is None or kc is None: return None, "Ind Error"
         
-        if macd is None or df['ema200'].iloc[-1] is None: return None, "Ind. Error"
-        
-        # استخراج أعمدة MACD بشكل صحيح
-        # الأسماء عادة: MACD_12_26_9, MACDs_12_26_9, MACDh_12_26_9
-        macd_col = [c for c in macd.columns if c.startswith('MACD_')][0]
-        sig_col = [c for c in macd.columns if c.startswith('MACDs_')][0]
-        hist_col = [c for c in macd.columns if c.startswith('MACDh_')][0]
-        
-        df['macd'] = macd[macd_col]
-        df['signal'] = macd[sig_col]
-        df['hist'] = macd[hist_col]
-        
-        # 3. ATR (للستوب لوس)
+        df['bb_upper'] = bb[f'BBU_20_2.0']
+        df['bb_lower'] = bb[f'BBL_20_2.0']
+        df['kc_upper'] = kc[f'KCUe_20_1.5']
+        df['kc_lower'] = kc[f'KCLe_20_1.5']
+        df['mom'] = df.ta.mom(close='close', length=12)
         df['atr'] = df.ta.atr(length=14)
         
-        if pd.isna(df['ema200'].iloc[-1]): return None, "Calc Indicators..."
+        if pd.isna(df['mom'].iloc[-1]): return None, "Calc..."
 
         curr = df.iloc[-1]
         prev = df.iloc[-2]
-        
         entry = curr['close']
         atr = curr['atr']
-        
-        # === المنطق الصارم (Sniper Logic) ===
-        
-        # 🟢 LONG STRATEGY (شراء مع الترند)
-        # 1. السعر فوق EMA 200 (ترند صاعد)
-        trend_up = curr['close'] > curr['ema200']
-        
-        # 2. تقاطع MACD إيجابي (الخط الأزرق يقطع البرتقالي لأعلى)
-        macd_cross_up = (prev['macd'] < prev['signal']) and (curr['macd'] > curr['signal'])
-        
-        # 3. الشرط الذهبي: التقاطع يحدث تحت خط الصفر (Buying the Dip)
-        # هذا يضمن أننا نشتري تصحيحاً وليس قمة
-        good_value_buy = curr['macd'] < 0
-        
-        if trend_up and macd_cross_up and good_value_buy:
-            sl = entry - (atr * 2.0) # ستوب واسع قليلاً لتحمل التذبذب
-            risk = entry - sl
-            tp = entry + (risk * 2.5) # هدف 2.5 ضعف المخاطرة
-            
-            return ("LONG", entry, tp, sl, int(curr['time'])), f"MACD SNIPER (Dip Buy)"
 
-        # 🔴 SHORT STRATEGY (بيع مع الترند)
-        # 1. السعر تحت EMA 200 (ترند هابط)
-        trend_down = curr['close'] < curr['ema200']
+        # فحص إشارة الانفجار (TTM Fire)
+        mom_bullish = (curr['mom'] > 0) and (curr['mom'] > prev['mom'])
+        breakout_up = curr['close'] > curr['bb_upper']
         
-        # 2. تقاطع MACD سلبي
-        macd_cross_down = (prev['macd'] > prev['signal']) and (curr['macd'] < curr['signal'])
+        mom_bearish = (curr['mom'] < 0) and (curr['mom'] < prev['mom'])
+        breakout_down = curr['close'] < curr['bb_lower']
         
-        # 3. الشرط الذهبي: التقاطع يحدث فوق خط الصفر (Selling the Rally)
-        good_value_sell = curr['macd'] > 0
-        
-        if trend_down and macd_cross_down and good_value_sell:
-            sl = entry + (atr * 2.0)
-            risk = sl - entry
-            tp = entry - (risk * 2.5)
-            
-            return ("SHORT", entry, tp, sl, int(curr['time'])), f"MACD SNIPER (Rally Sell)"
+        # إذا لم تكن هناك إشارة على الساعة، نتوقف فوراً (لتوفير الطلبات)
+        if not (mom_bullish and breakout_up) and not (mom_bearish and breakout_down):
+            return None, "No 1H Signal"
 
-        # تقارير الرفض للوغز (لتفهم لماذا لم يدخل)
-        if trend_up and macd_cross_up and not good_value_buy:
-            return None, "Bullish Cross but MACD too High (Risk of Top)"
-        if trend_down and macd_cross_down and not good_value_sell:
-            return None, "Bearish Cross but MACD too Low (Risk of Bottom)"
-        if not trend_up and not trend_down:
-            return None, "Choppy around EMA200"
-            
-        dist = (curr['close'] - curr['ema200']) / curr['ema200'] * 100
-        return None, f"No Setup (Dist EMA200: {dist:.2f}%)"
+        # ----------------------------------------------------
+        # المرحلة 2، 3، 4: تأكيد الفريمات الصغيرة (Waterfall)
+        # ----------------------------------------------------
+        # إذا وجدنا إشارة، نفحص الفريمات الأصغر للتأكد من الدقة
+        
+        # فحص فريم 15 دقيقة
+        mom_15m = await get_momentum(symbol, '15m')
+        
+        # فحص فريم 5 دقائق
+        mom_5m = await get_momentum(symbol, '5m')
+        
+        # فحص فريم 1 دقيقة
+        mom_1m = await get_momentum(symbol, '1m')
+        
+        # === التحقق من التطابق (Alignment) ===
+        
+        # 🟢 LONG SIGNAL
+        if mom_bullish and breakout_up:
+            # يجب أن يكون الزخم إيجابياً في كل الفريمات الصغيرة
+            if (mom_15m > 0) and (mom_5m > 0) and (mom_1m > 0):
+                sl = curr['bb_lower']
+                dist_sl = (entry - sl) / entry * 100
+                if dist_sl > 5.0: sl = entry - (atr * 2.0)
+                risk = entry - sl
+                tp = entry + (risk * 2.0)
+                
+                return ("LONG", entry, tp, sl, int(curr['time'])), f"4-TF SNIPER (All Moms Positive) 🟢"
+            else:
+                return None, f"1H Buy but Lower TFs Mixed (15m:{mom_15m:.2f}, 5m:{mom_5m:.2f})"
+
+        # 🔴 SHORT SIGNAL
+        if mom_bearish and breakout_down:
+            # يجب أن يكون الزخم سلبياً في كل الفريمات الصغيرة
+            if (mom_15m < 0) and (mom_5m < 0) and (mom_1m < 0):
+                sl = curr['bb_upper']
+                dist_sl = (sl - entry) / entry * 100
+                if dist_sl > 5.0: sl = entry + (atr * 2.0)
+                risk = sl - entry
+                tp = entry - (risk * 2.0)
+                
+                return ("SHORT", entry, tp, sl, int(curr['time'])), f"4-TF SNIPER (All Moms Negative) 🔴"
+            else:
+                return None, f"1H Sell but Lower TFs Mixed"
+
+        return None, "Logic Error"
 
     except Exception as e:
         return None, f"Error: {str(e)}"
@@ -192,14 +207,11 @@ db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    # انتظار 20 دقيقة (استراتيجية دقيقة لا تحتاج انتظار طويل جداً)
-    if time.time() - last_sig_time < 1200: return 
+    if time.time() - last_sig_time < 7200: return 
     if symbol in app_state.active_trades: return
 
     async with sem:
-        # تأخير خفيف لمنع الحظر
         await asyncio.sleep(0.1)
-        
         result = await get_signal_logic(symbol)
         if not result: return 
         
@@ -216,12 +228,12 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (Sniper)</b>" if side == "LONG" else "🔴 <b>SELL (Sniper)</b>"
+                side_text = "💣 <b>BUY (4-TF Sniper)</b>" if side == "LONG" else "💣 <b>SELL (4-TF Sniper)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"🎯 <code>{clean_name}</code>\n"
+                    f"🔥 <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -309,7 +321,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: MACD SNIPER (V170)...")
+    print(f"🚀 System Online: TTM SQUEEZE 4-TF SNIPER (1h, 15m, 5m, 1m)...")
     try:
         await exchange.load_markets()
         
