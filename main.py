@@ -20,10 +20,10 @@ RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# السيولة 10 مليون (كافية للسكالبينج السريع)
-MIN_VOLUME_USDT = 10_000_000 
+# السيولة 20 مليون (لضمان قوة الحركة)
+MIN_VOLUME_USDT = 20_000_000 
 
-# الفريم 5 دقائق (أفضل فريم للبولينجر)
+# الفريم 5 دقائق (سكالبينج دقيق)
 TIMEFRAME = '5m'
 
 app = FastAPI()
@@ -33,10 +33,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#0d1117;color:#00ffff;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>⚡ Fortress Bot (BOLLINGER SCALPER) ⚡</h1>
-            <p>Strategy: BB Reversion + RSI</p>
-            <p>Status: Active (High Frequency) 🟢</p>
+        <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🛡️ Fortress Bot (MACD SNIPER V170)</h1>
+            <p>Strategy: Trend (EMA200) + Momentum (MACD)</p>
+            <p>Status: Active (High Precision) 🟢</p>
         </body>
     </html>
     """
@@ -69,85 +69,93 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Bollinger Bands Scalping) 🔥 استراتيجية سريعة 🔥
+# 3. المنطق (MACD Trend Sniper) 🔥 الاستراتيجية الجديدة 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # جلب البيانات (100 شمعة تكفي)
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
+        # جلب 200 شمعة (ضروري لحساب EMA 200 بدقة)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=200)
         if not ohlcv: return None, "No Data"
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. حساب Bollinger Bands
-        # length=20, std=2.0 (الإعدادات القياسية)
-        bb = df.ta.bbands(close='close', length=20, std=2.0)
+        # 1. EMA 200 (فلتر الاتجاه العام)
+        df['ema200'] = df.ta.ema(close='close', length=200)
         
-        if bb is None: return None, "BB Error"
-
-        # استخراج الأعمدة (Lower, Middle, Upper)
-        # الأسماء عادة تكون: BBL_20_2.0, BBM_20_2.0, BBU_20_2.0
-        lower_col = [c for c in bb.columns if c.startswith('BBL')][0]
-        mid_col = [c for c in bb.columns if c.startswith('BBM')][0]
-        upper_col = [c for c in bb.columns if c.startswith('BBU')][0]
+        # 2. MACD (مؤشر الزخم)
+        # fast=12, slow=26, signal=9
+        macd = df.ta.macd(close='close', fast=12, slow=26, signal=9)
         
-        df['lower'] = bb[lower_col]
-        df['mid'] = bb[mid_col]
-        df['upper'] = bb[upper_col]
+        if macd is None or df['ema200'].iloc[-1] is None: return None, "Ind. Error"
         
-        # 2. RSI
-        df['rsi'] = df.ta.rsi(close='close', length=14)
+        # استخراج أعمدة MACD بشكل صحيح
+        # الأسماء عادة: MACD_12_26_9, MACDs_12_26_9, MACDh_12_26_9
+        macd_col = [c for c in macd.columns if c.startswith('MACD_')][0]
+        sig_col = [c for c in macd.columns if c.startswith('MACDs_')][0]
+        hist_col = [c for c in macd.columns if c.startswith('MACDh_')][0]
         
-        # 3. ATR للستوب
+        df['macd'] = macd[macd_col]
+        df['signal'] = macd[sig_col]
+        df['hist'] = macd[hist_col]
+        
+        # 3. ATR (للستوب لوس)
         df['atr'] = df.ta.atr(length=14)
         
-        if pd.isna(df['lower'].iloc[-1]): return None, "Calc Indicators..."
+        if pd.isna(df['ema200'].iloc[-1]): return None, "Calc Indicators..."
 
         curr = df.iloc[-1]
+        prev = df.iloc[-2]
         
         entry = curr['close']
         atr = curr['atr']
         
-        # === منطق السكالبينج (The Logic) ===
+        # === المنطق الصارم (Sniper Logic) ===
         
-        # 🟢 LONG STRATEGY (شراء من القاع)
-        # 1. السعر كسر الخط السفلي (Lower Band) أو لمسه
-        # 2. RSI في منطقة تشبع بيعي (أقل من 35) لضمان الارتداد
+        # 🟢 LONG STRATEGY (شراء مع الترند)
+        # 1. السعر فوق EMA 200 (ترند صاعد)
+        trend_up = curr['close'] > curr['ema200']
         
-        price_below_bb = curr['low'] <= curr['lower']
-        rsi_oversold = curr['rsi'] < 35
+        # 2. تقاطع MACD إيجابي (الخط الأزرق يقطع البرتقالي لأعلى)
+        macd_cross_up = (prev['macd'] < prev['signal']) and (curr['macd'] > curr['signal'])
         
-        if price_below_bb and rsi_oversold:
-            # ستوب ضيق تحت أدنى قاع
-            sl = entry - (atr * 1.5)
+        # 3. الشرط الذهبي: التقاطع يحدث تحت خط الصفر (Buying the Dip)
+        # هذا يضمن أننا نشتري تصحيحاً وليس قمة
+        good_value_buy = curr['macd'] < 0
+        
+        if trend_up and macd_cross_up and good_value_buy:
+            sl = entry - (atr * 2.0) # ستوب واسع قليلاً لتحمل التذبذب
             risk = entry - sl
-            tp = entry + (risk * 2.0) # الهدف هو العودة للمنتصف أو الخط العلوي
+            tp = entry + (risk * 2.5) # هدف 2.5 ضعف المخاطرة
             
-            return ("LONG", entry, tp, sl, int(curr['time'])), f"BB SCALP BUY (RSI: {curr['rsi']:.1f})"
+            return ("LONG", entry, tp, sl, int(curr['time'])), f"MACD SNIPER (Dip Buy)"
 
-        # 🔴 SHORT STRATEGY (بيع من القمة)
-        # 1. السعر كسر الخط العلوي (Upper Band) أو لمسه
-        # 2. RSI في منطقة تشبع شرائي (فوق 65)
+        # 🔴 SHORT STRATEGY (بيع مع الترند)
+        # 1. السعر تحت EMA 200 (ترند هابط)
+        trend_down = curr['close'] < curr['ema200']
         
-        price_above_bb = curr['high'] >= curr['upper']
-        rsi_overbought = curr['rsi'] > 65
+        # 2. تقاطع MACD سلبي
+        macd_cross_down = (prev['macd'] > prev['signal']) and (curr['macd'] < curr['signal'])
         
-        if price_above_bb and rsi_overbought:
-            sl = entry + (atr * 1.5)
+        # 3. الشرط الذهبي: التقاطع يحدث فوق خط الصفر (Selling the Rally)
+        good_value_sell = curr['macd'] > 0
+        
+        if trend_down and macd_cross_down and good_value_sell:
+            sl = entry + (atr * 2.0)
             risk = sl - entry
-            tp = entry - (risk * 2.0)
+            tp = entry - (risk * 2.5)
             
-            return ("SHORT", entry, tp, sl, int(curr['time'])), f"BB SCALP SELL (RSI: {curr['rsi']:.1f})"
+            return ("SHORT", entry, tp, sl, int(curr['time'])), f"MACD SNIPER (Rally Sell)"
 
-        # تقارير الرفض
-        # حساب موقع السعر بالنسبة للخطوط (Percent B)
-        # 0 = الخط السفلي، 1 = الخط العلوي
-        pb = (curr['close'] - curr['lower']) / (curr['upper'] - curr['lower'])
-        
-        if price_below_bb and not rsi_oversold: return None, f"Price Low but RSI High ({curr['rsi']:.1f})"
-        if price_above_bb and not rsi_overbought: return None, f"Price High but RSI Low ({curr['rsi']:.1f})"
-        
-        return None, f"Inside Bands (Pos: {pb:.2f})"
+        # تقارير الرفض للوغز (لتفهم لماذا لم يدخل)
+        if trend_up and macd_cross_up and not good_value_buy:
+            return None, "Bullish Cross but MACD too High (Risk of Top)"
+        if trend_down and macd_cross_down and not good_value_sell:
+            return None, "Bearish Cross but MACD too Low (Risk of Bottom)"
+        if not trend_up and not trend_down:
+            return None, "Choppy around EMA200"
+            
+        dist = (curr['close'] - curr['ema200']) / curr['ema200'] * 100
+        return None, f"No Setup (Dist EMA200: {dist:.2f}%)"
 
     except Exception as e:
         return None, f"Error: {str(e)}"
@@ -184,12 +192,12 @@ db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    # تقليل وقت الانتظار لـ 15 دقيقة فقط لأنها استراتيجية سكالب سريعة
-    if time.time() - last_sig_time < 900: return 
+    # انتظار 20 دقيقة (استراتيجية دقيقة لا تحتاج انتظار طويل جداً)
+    if time.time() - last_sig_time < 1200: return 
     if symbol in app_state.active_trades: return
 
     async with sem:
-        # تأخير بسيط جداً
+        # تأخير خفيف لمنع الحظر
         await asyncio.sleep(0.1)
         
         result = await get_signal_logic(symbol)
@@ -208,7 +216,7 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "⚡ <b>BUY (Scalp)</b>" if side == "LONG" else "⚡ <b>SELL (Scalp)</b>"
+                side_text = "🟢 <b>BUY (Sniper)</b>" if side == "LONG" else "🔴 <b>SELL (Sniper)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
@@ -301,7 +309,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: BOLLINGER SCALPER (5m)...")
+    print(f"🚀 System Online: MACD SNIPER (V170)...")
     try:
         await exchange.load_markets()
         
@@ -315,7 +323,7 @@ async def start_scanning(app_state):
                             active_symbols.append(s)
                 
                 app_state.symbols = active_symbols
-                print(f"\n🔎 Scan Cycle: Found {len(active_symbols)} coins...", flush=True)
+                print(f"\n🔎 Scan Cycle: Found {len(active_symbols)} coins (Vol > 20M)...", flush=True)
                 
             except Exception as e:
                 print(f"⚠️ Market Update Error: {e}")
