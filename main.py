@@ -20,10 +20,10 @@ RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# السيولة 20 مليون (لضمان احترام قواعد الإيشيموكو)
+# السيولة 20 مليون
 MIN_VOLUME_USDT = 20_000_000 
 
-# الفريم 15 دقيقة (المعيار الذهبي للإيشيموكو)
+# الفريم 15 دقيقة
 TIMEFRAME = '15m'
 
 app = FastAPI()
@@ -34,7 +34,7 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#ff4d4d;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>⛩️ Fortress Bot (ICHIMOKU CLOUD) ⛩️</h1>
+            <h1>⛩️ Fortress Bot (ICHIMOKU FIXED) ⛩️</h1>
             <p>Strategy: TK Cross + Kumo Breakout</p>
             <p>Status: Active 🟢</p>
         </body>
@@ -69,36 +69,38 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Ichimoku Strategy) 🔥 الاستراتيجية اليابانية 🔥
+# 3. المنطق (Ichimoku Strategy) 🔥 تم الإصلاح 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # نحتاج بيانات كافية لحساب Senkou Span B (52 شمعة) + إزاحة (26 شمعة)
+        # نحتاج بيانات كافية (150 شمعة)
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
         if not ohlcv: return None, "No Data"
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # --- حساب مؤشرات الإيشيموكو (Ichimoku Cloud) ---
-        # tenkan=9, kijun=26, senkou=52
-        ichimoku = df.ta.ichimoku(high='high', low='low', close='close', tenkan=9, kijun=26, senkou=52)
+        # --- حساب مؤشرات الإيشيموكو بشكل صحيح ---
+        # الدالة ترجع DataFrame يحتوي على كل الخطوط
+        ichi = df.ta.ichimoku(high='high', low='low', close='close', tenkan=9, kijun=26, senkou=52)
         
-        # ichimoku[0] يحتوي على البيانات الرئيسية
-        ichi_df = ichimoku[0]
+        if ichi is None: return None, "Ichimoku Error"
+
+        # ichi[0] هو الـ DataFrame الذي يحتوي على القيم
+        ichi_data = ichi[0]
         
-        # دمج البيانات
-        df = pd.concat([df, ichi_df], axis=1)
+        # 🔥 الإصلاح: دمج البيانات بشكل صحيح باستخدام اسم العمود بدقة 🔥
+        # الأعمدة عادة تكون: ITS_9, IKS_26, ISA_9, ISB_26, ICS_26
+        # سنبحث عن الأعمدة التي تبدأ بهذه الحروف لضمان التوافق
         
-        # تحديد الأعمدة (أسمائها تعتمد على المكتبة، لذا نحددها بدقة)
-        # ITS_9 = Tenkan-sen (Conversion Line)
-        # IKS_26 = Kijun-sen (Base Line)
-        # ISA_9 = Senkou Span A (Leading Span A)
-        # ISB_26 = Senkou Span B (Leading Span B)
+        ts_col = [c for c in ichi_data.columns if c.startswith('ITS')][0] # Tenkan
+        ks_col = [c for c in ichi_data.columns if c.startswith('IKS')][0] # Kijun
+        sa_col = [c for c in ichi_data.columns if c.startswith('ISA')][0] # Span A
+        sb_col = [c for c in ichi_data.columns if c.startswith('ISB')][0] # Span B
         
-        df['tenkan'] = df['ITS_9']
-        df['kijun'] = df['IKS_26']
-        df['span_a'] = df['ISA_9']
-        df['span_b'] = df['ISB_26']
+        df['tenkan'] = ichi_data[ts_col]
+        df['kijun'] = ichi_data[ks_col]
+        df['span_a'] = ichi_data[sa_col]
+        df['span_b'] = ichi_data[sb_col]
         
         # ATR للستوب
         df['atr'] = df.ta.atr(length=14)
@@ -111,65 +113,49 @@ async def get_signal_logic(symbol):
         entry = curr['close']
         atr = curr['atr']
         
-        # === المنطق الياباني (The Logic) ===
+        # === المنطق الياباني ===
         
-        # 1. حالة السحابة (Cloud Status)
-        # هل السعر فوق السحابة (إيجابي) أم تحتها (سلبي)؟
-        # السحابة هي المنطقة بين Span A و Span B
+        # 1. حالة السحابة
         cloud_top = max(curr['span_a'], curr['span_b'])
         cloud_bottom = min(curr['span_a'], curr['span_b'])
         
         above_cloud = curr['close'] > cloud_top
         below_cloud = curr['close'] < cloud_bottom
         
-        # 2. تقاطع التنكان والكيجون (TK Cross)
-        # تقاطع ذهبي: التنكان يقطع الكيجون لأعلى
+        # 2. تقاطع TK
         tk_cross_bull = (prev['tenkan'] < prev['kijun']) and (curr['tenkan'] > curr['kijun'])
-        # تقاطع موت: التنكان يقطع الكيجون لأسفل
         tk_cross_bear = (prev['tenkan'] > prev['kijun']) and (curr['tenkan'] < curr['kijun'])
 
-        # 3. التأكيد (Kumo Twist - اختياري لكن مفضل)
-        # هل السحابة خضراء؟ (Span A > Span B)
+        # 3. لون السحابة
         green_cloud = curr['span_a'] > curr['span_b']
         red_cloud = curr['span_a'] < curr['span_b']
 
-        # 🟢 LONG STRATEGY (شراء)
-        # الشروط: تقاطع TK لأعلى + السعر فوق السحابة + السحابة خضراء (قوية)
+        # 🟢 LONG STRATEGY
         if tk_cross_bull and above_cloud and green_cloud:
-            sl = cloud_bottom # الستوب تحت السحابة مباشرة (دعم قوي)
-            
-            # إذا كان الستوب بعيداً جداً، نستخدم ATR
+            sl = cloud_bottom 
             dist_to_cloud = (entry - sl) / entry * 100
-            if dist_to_cloud > 3.0: 
-                sl = entry - (atr * 2.0)
-                
+            if dist_to_cloud > 3.0: sl = entry - (atr * 2.0)
             risk = entry - sl
             tp = entry + (risk * 2.5)
             
-            return ("LONG", entry, tp, sl, int(curr['time'])), f"ICHIMOKU BULL (TK Cross + Above Kumo)"
+            return ("LONG", entry, tp, sl, int(curr['time'])), f"ICHIMOKU BULL"
 
-        # 🔴 SHORT STRATEGY (بيع)
-        # الشروط: تقاطع TK لأسفل + السعر تحت السحابة + السحابة حمراء
+        # 🔴 SHORT STRATEGY
         if tk_cross_bear and below_cloud and red_cloud:
-            sl = cloud_top # الستوب فوق السحابة
-            
+            sl = cloud_top
             dist_to_cloud = (sl - entry) / entry * 100
-            if dist_to_cloud > 3.0:
-                sl = entry + (atr * 2.0)
-                
+            if dist_to_cloud > 3.0: sl = entry + (atr * 2.0)
             risk = sl - entry
             tp = entry - (risk * 2.5)
             
-            return ("SHORT", entry, tp, sl, int(curr['time'])), f"ICHIMOKU BEAR (TK Cross + Below Kumo)"
+            return ("SHORT", entry, tp, sl, int(curr['time'])), f"ICHIMOKU BEAR"
 
         # تقارير الرفض
-        if tk_cross_bull and not above_cloud: return None, "TK Cross Bullish but Inside/Below Cloud (Weak)"
-        if tk_cross_bear and not below_cloud: return None, "TK Cross Bearish but Inside/Above Cloud (Weak)"
-        if not (tk_cross_bull or tk_cross_bear):
-            trend = "Bullish" if curr['tenkan'] > curr['kijun'] else "Bearish"
-            return None, f"No Cross (Trend: {trend})"
-            
-        return None, "Waiting Setup..."
+        if tk_cross_bull and not above_cloud: return None, "Bullish Cross but Below Cloud"
+        if tk_cross_bear and not below_cloud: return None, "Bearish Cross but Above Cloud"
+        
+        trend = "Bullish" if curr['tenkan'] > curr['kijun'] else "Bearish"
+        return None, f"No Cross (Trend: {trend})"
 
     except Exception as e:
         return None, f"Error: {str(e)}"
@@ -210,7 +196,9 @@ async def safe_check(symbol, app_state):
     if symbol in app_state.active_trades: return
 
     async with sem:
-        await asyncio.sleep(0.1) # منع الحظر
+        # 🔥 تأخير 0.2 ثانية لمنع الحظر 🔥
+        await asyncio.sleep(0.2)
+        
         result = await get_signal_logic(symbol)
         if not result: return 
         
@@ -320,7 +308,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: ICHIMOKU KINKO HYO (20M+)...")
+    print(f"🚀 System Online: ICHIMOKU KINKO HYO (20M+ Fixed)...")
     try:
         await exchange.load_markets()
         
