@@ -14,27 +14,28 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 # ==========================================
-# 1. إعدادات القناص (Triple Threat Config)
+# 1. إعدادات الإصلاح (Fixer Config)
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     
-    # التسلسل الهرمي للفريمات
-    TF_STRUCTURE = '1h'   # (1) الخريطة والسيولة
-    TF_ZONE = '15m'       # (2) تأكيد الوصول للمنطقة
-    TF_TRIGGER = '5m'     # (3) نقطة الدخول المبكر
+    TF_STRUCTURE = '1h'
+    TF_TRIGGER = '5m'
     
     MIN_VOLUME = 15_000_000 
     
-    # Golden Pocket
-    FIB_MIN = 0.618
+    # تحسين دقة الفيبوناتشي
+    FIB_MIN = 0.5
     FIB_MAX = 0.786
     
     # إدارة المخاطر
-    ATR_SL_MULT = 1.0     
+    ATR_SL_MULT = 1.5     # وسعنا الستوب قليلاً لتجنب ضربه بالذيل
     
-    DB_FILE = "v43_sniper.json"
+    # سرعة المراقبة
+    MONITOR_SPEED = 1.0   # ثانية واحدة (متوازن)
+    
+    DB_FILE = "v44_fixer.json"
     REPORT_HOUR = 23
     REPORT_MINUTE = 59
 
@@ -45,13 +46,13 @@ class Notifier:
     @staticmethod
     def format_signal(symbol, side, entry, tp1, tp2, tp3, sl, note):
         clean_sym = symbol.split(':')[0]
-        icon = "⚡" if side == "LONG" else "💀"
+        icon = "🟢" if side == "LONG" else "🔴"
         
         return (
             f"<code>{clean_sym}</code>\n"
-            f"{icon} <b>{side}</b> | 5m Sniper Entry\n"
+            f"{icon} <b>{side}</b> | V44 Fixer\n"
             f"──────────────\n"
-            f"🔭 <b>Setup:</b> {note}\n"
+            f"🛠️ <b>Setup:</b> {note}\n"
             f"──────────────\n"
             f"💰 Entry: <code>{entry}</code>\n\n"
             f"🎯 TP 1: <code>{tp1}</code>\n"
@@ -63,10 +64,10 @@ class Notifier:
     @staticmethod
     def format_alert(type_str, level, profit_pct):
         if type_str == "TP":
-            emoji = "✅" if level == 1 else "🚀" if level == 2 else "🏆"
+            emoji = "✅" if level == 1 else "🚀"
             return f"{emoji} <b>TP {level} HIT</b>\nProfit: +{profit_pct:.2f}%"
         elif type_str == "BE":
-            return f"🛡️ <b>BREAKEVEN</b>\nSecured at Entry."
+            return f"🛡️ <b>BREAKEVEN</b>\nTrade Secured."
         else:
             return f"🛑 <b>STOP LOSS</b>\nLoss: -{profit_pct:.2f}%"
 
@@ -75,7 +76,7 @@ class Notifier:
         total = stats['wins'] + stats['losses']
         win_rate = (stats['wins'] / total * 100) if total > 0 else 0
         return (
-            f"📊 <b>V43 SNIPER REPORT</b>\n"
+            f"📊 <b>DAILY FIXER REPORT</b>\n"
             f"──────────────\n"
             f"🔢 Trades: <b>{total}</b>\n"
             f"✅ Wins: <b>{stats['wins']}</b>\n"
@@ -99,7 +100,7 @@ def fmt(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. مدير البيانات
+# 3. مدير البيانات (Robust)
 # ==========================================
 class TradeManager:
     def __init__(self):
@@ -158,9 +159,9 @@ class TradeManager:
 store = TradeManager()
 
 # ==========================================
-# 4. محرك الثلاثي (Triple Engine)
+# 4. محرك الاستراتيجية (Logic Core)
 # ==========================================
-class TripleEngine:
+class FixerEngine:
     def __init__(self, exchange):
         self.exchange = exchange
         self.struct_cache = {}
@@ -206,15 +207,17 @@ class TripleEngine:
             if trend == "UP":
                 prev_lows = valid_lows[valid_lows.index < last_high_idx]
                 if not prev_lows.empty:
-                    start_point = prev_lows.iloc[-1]['fractal_low']
-                    end_point = last_high
-                    impulse = {"start": start_point, "end": end_point, "type": "BULLISH"}
+                    start = prev_lows.iloc[-1]['fractal_low']
+                    end = last_high
+                    if (end - start) / start > 0.01: # تأكيد أن الموجة قوية (> 1%)
+                        impulse = {"start": start, "end": end, "type": "BULLISH"}
             else:
                 prev_highs = valid_highs[valid_highs.index < last_low_idx]
                 if not prev_highs.empty:
-                    start_point = prev_highs.iloc[-1]['fractal_high']
-                    end_point = last_low
-                    impulse = {"start": start_point, "end": end_point, "type": "BEARISH"}
+                    start = prev_highs.iloc[-1]['fractal_high']
+                    end = last_low
+                    if (start - end) / end > 0.01:
+                        impulse = {"start": start, "end": end, "type": "BEARISH"}
             
             data = {'trend': trend, 'impulse': impulse}
             self.struct_cache[symbol] = {'data': data, 'time': now}
@@ -223,112 +226,85 @@ class TripleEngine:
 
     async def analyze(self, symbol):
         try:
-            # 1. المرحلة الأولى: الخريطة (1H)
+            # 1H Structure
             struct = await self.get_structure(symbol)
             if not struct or not struct['impulse']: return None
             impulse = struct['impulse']
             
-            # 2. المرحلة الثانية: هل السعر في المنطقة؟ (نستخدم السعر الحالي لتقليل الطلبات)
-            # يمكن استخدام ticker سريع بدلاً من شمعة كاملة، لكن سنطلب 5m مباشرة للسرعة
-            # إذا كان السعر بعيداً جداً، سنوفر الطلب.
-            
-            # 3. المرحلة الثالثة: الزناد (5m)
-            # نسحب بيانات 5m لأننا نريد دخولاً مبكراً جداً
+            # 5m Trigger (MSS)
             ohlcv_5m = await self.exchange.fetch_ohlcv(symbol, Config.TF_TRIGGER, limit=50)
             if not ohlcv_5m: return None
             df_5m = pd.DataFrame(ohlcv_5m, columns=['time','o','h','l','c','v'])
-            
-            df_5m['rsi'] = ta.rsi(df_5m['c'], length=14)
             df_5m['atr'] = ta.atr(df_5m['h'], df_5m['l'], df_5m['c'], length=14)
-            
+            df_5m['rsi'] = ta.rsi(df_5m['c'], length=14)
+
             curr = df_5m.iloc[-1]
             prev = df_5m.iloc[-2]
             
-            # ==========================================
-            # 🟢 LONG TRIGGER (5m)
-            # ==========================================
+            # 🟢 LONG
             if impulse['type'] == "BULLISH":
                 range_size = impulse['end'] - impulse['start']
-                fib_618 = impulse['end'] - (range_size * 0.618)
+                fib_50 = impulse['end'] - (range_size * 0.5)
                 fib_786 = impulse['end'] - (range_size * 0.786)
                 
-                # هل نحن داخل الـ Golden Pocket؟
-                # نستخدم Low الشمعة للتأكد من الملامسة
-                in_zone = (curr['l'] <= fib_618) and (curr['c'] >= fib_786)
+                # Zone Check
+                in_zone = (curr['l'] <= fib_50) and (curr['c'] >= fib_786)
                 
                 if in_zone:
-                    # شروط الدخول المبكر على 5m
+                    # 🔥 MSS Trigger (كسر هيكل مصغر)
+                    # يجب أن يغلق السعر فوق أعلى قمة في آخر 3 شمعات
+                    short_term_high = df_5m['h'].iloc[-4:-1].max()
+                    mss_break = curr['c'] > short_term_high
                     
-                    # 1. نمط انعكاسي (Engulfing / Hammer)
-                    is_bullish_engulfing = (prev['c'] < prev['o']) and \
-                                           (curr['c'] > curr['o']) and \
-                                           (curr['c'] > prev['o']) and \
-                                           (curr['o'] < prev['c'])
+                    # RSI Filter
+                    rsi_ok = curr['rsi'] > 40 # ليس ميتاً
                     
-                    is_hammer = (min(curr['c'], curr['o']) - curr['l']) > 2 * abs(curr['c'] - curr['o'])
-                    
-                    # 2. دايفرجنس سريع (5m)
-                    price_lower = curr['l'] < df_5m['l'].iloc[-10:-2].min()
-                    rsi_higher = curr['rsi'] > df_5m['rsi'].iloc[-10:-2].min()
-                    divergence = price_lower and rsi_higher
-                    
-                    if is_bullish_engulfing or is_hammer or divergence:
+                    if mss_break and rsi_ok:
                         entry = curr['c']
-                        # ستوب لوس: تحت قاع شمعة الدخول + قليل من ATR
-                        # ميزة 5m: الستوب قريب جداً
-                        sl = min(curr['l'], prev['l']) - (curr['atr'] * 0.5) 
+                        sl = min(curr['l'], prev['l']) - (curr['atr'] * Config.ATR_SL_MULT)
                         
                         tp1 = impulse['end']
                         tp2 = impulse['end'] + (range_size * 0.272)
                         tp3 = impulse['end'] + (range_size * 0.618)
                         
-                        note = "5m Early Entry (Div)" if divergence else "5m Early Entry (Pattern)"
-                        return "LONG", entry, tp1, tp2, tp3, sl, note
+                        return "LONG", entry, tp1, tp2, tp3, sl, "Fib Zone + 5m MSS"
 
-            # ==========================================
-            # 🔴 SHORT TRIGGER (5m)
-            # ==========================================
+            # 🔴 SHORT
             if impulse['type'] == "BEARISH":
                 range_size = impulse['start'] - impulse['end']
-                fib_618 = impulse['end'] + (range_size * 0.618)
+                fib_50 = impulse['end'] + (range_size * 0.5)
                 fib_786 = impulse['end'] + (range_size * 0.786)
                 
-                in_zone = (curr['h'] >= fib_618) and (curr['c'] <= fib_786)
+                in_zone = (curr['h'] >= fib_50) and (curr['c'] <= fib_786)
                 
                 if in_zone:
-                    is_bearish_engulfing = (prev['c'] > prev['o']) and \
-                                           (curr['c'] < curr['o']) and \
-                                           (curr['c'] < prev['o']) and \
-                                           (curr['o'] > prev['c'])
-                                           
-                    is_shooting_star = (curr['h'] - max(curr['c'], curr['o'])) > 2 * abs(curr['c'] - curr['o'])
+                    # 🔥 MSS Trigger
+                    short_term_low = df_5m['l'].iloc[-4:-1].min()
+                    mss_break = curr['c'] < short_term_low
                     
-                    price_higher = curr['h'] > df_5m['h'].iloc[-10:-2].max()
-                    rsi_lower = curr['rsi'] < df_5m['rsi'].iloc[-10:-2].max()
-                    divergence = price_higher and rsi_lower
+                    rsi_ok = curr['rsi'] < 60
                     
-                    if is_bearish_engulfing or is_shooting_star or divergence:
+                    if mss_break and rsi_ok:
                         entry = curr['c']
-                        sl = max(curr['h'], prev['h']) + (curr['atr'] * 0.5)
+                        sl = max(curr['h'], prev['h']) + (curr['atr'] * Config.ATR_SL_MULT)
                         
                         tp1 = impulse['end']
                         tp2 = impulse['end'] - (range_size * 0.272)
                         tp3 = impulse['end'] - (range_size * 0.618)
                         
-                        note = "5m Early Entry (Div)" if divergence else "5m Early Entry (Pattern)"
-                        return "SHORT", entry, tp1, tp2, tp3, sl, note
+                        return "SHORT", entry, tp1, tp2, tp3, sl, "Fib Zone + 5m MSS"
 
         except Exception: return None
         return None
 
 # ==========================================
-# 5. الحلقات
+# 5. الحلقات (System Loops)
 # ==========================================
 state = {"history": {}, "last_scan": time.time()}
 sem = asyncio.Semaphore(20)
 
 async def scan_task(symbol, engine):
-    if time.time() - state['history'].get(symbol, 0) < 300: return # كول داون 5 دقائق فقط (للدخول المتكرر)
+    if time.time() - state['history'].get(symbol, 0) < 300: return
     if symbol in store.active_trades: return
 
     async with sem:
@@ -342,7 +318,7 @@ async def scan_task(symbol, engine):
             state['history'][symbol] = time.time()
             state['history'][sig_key] = True
             
-            print(f"\n⚡ 5m TRIGGER: {symbol} {side}", flush=True)
+            print(f"\n✅ SIGNAL: {symbol} {side}", flush=True)
             msg = Notifier.format_signal(symbol, side, fmt(entry), fmt(tp1), fmt(tp2), fmt(tp3), fmt(sl), note)
             msg_id = await Notifier.send(msg)
             
@@ -352,13 +328,13 @@ async def scan_task(symbol, engine):
                 })
 
 async def scanner_loop(exchange):
-    print("⚡ Fortress V43 (Triple Sniper) Started...", flush=True)
-    engine = TripleEngine(exchange)
+    print("🛠️ Fortress V44 (The Fixer) Started...", flush=True)
+    engine = FixerEngine(exchange)
     while True:
         try:
             tickers = await exchange.fetch_tickers()
             symbols = [s for s, t in tickers.items() if '/USDT:USDT' in s and t['quoteVolume'] >= Config.MIN_VOLUME]
-            print(f"\n🔎 Scanning {len(symbols)} pairs (1H Map -> 5m Trigger)...", flush=True)
+            print(f"\n🔎 Scanning {len(symbols)} pairs...", flush=True)
             
             chunk_size = 20
             for i in range(0, len(symbols), chunk_size):
@@ -368,20 +344,29 @@ async def scanner_loop(exchange):
             
             state['last_scan'] = time.time()
             gc.collect()
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
         except: await asyncio.sleep(5)
 
+# 🔥 تم إصلاح المراقبة بالكامل 🔥
 async def monitor_loop(exchange):
-    print("👀 Monitor Active...", flush=True)
+    print("👀 Monitor System Active...", flush=True)
     while True:
         if not store.active_trades:
             await asyncio.sleep(1)
             continue
         
-        for sym, trade in list(store.active_trades.items()):
+        # استخدام list() لمنع خطأ Runtime Error أثناء التعديل
+        active_list = list(store.active_trades.items())
+        
+        for sym, trade in active_list:
             try:
+                # التأكد من صحة الرمز
                 ticker = await exchange.fetch_ticker(sym)
                 price = ticker['last']
+                
+                # طباعة للمتابعة (يمكنك إيقافها لاحقاً)
+                print(f" -> Checking {sym}: {price} (Entry: {trade['entry']})", flush=True)
+
                 side = trade.get('side', 'LONG')
                 entry = trade['entry']
                 sl = trade['sl']
@@ -411,11 +396,13 @@ async def monitor_loop(exchange):
 
                 if hit_sl:
                     type_str = "BE" if status >= 1 else "LOSS"
+                    print(f"  🔴 SL Hit for {sym}", flush=True)
                     msg = Notifier.format_alert(type_str, 0, abs(pnl))
                     await Notifier.send(msg, reply_to=trade.get('msg_id'))
                     store.close_trade(sym, "WIN" if status>=1 else "LOSS", pnl)
                 
                 elif hit_tp1:
+                    print(f"  ✅ TP1 Hit for {sym}", flush=True)
                     msg = Notifier.format_alert("TP", 1, pnl)
                     await Notifier.send(msg, reply_to=trade.get('msg_id'))
                     store.update_trade(sym, {"status": 1, "sl": entry})
@@ -430,8 +417,12 @@ async def monitor_loop(exchange):
                     await Notifier.send(msg, reply_to=trade.get('msg_id'))
                     store.close_trade(sym, "WIN", pnl)
 
-            except: pass
-        await asyncio.sleep(2)
+            except Exception as e:
+                print(f"⚠️ Monitor Error ({sym}): {e}", flush=True)
+                # لا نوقف الحلقة، فقط نتجاهل الخطأ المؤقت
+                pass
+                
+        await asyncio.sleep(Config.MONITOR_SPEED)
 
 async def report_loop():
     while True:
@@ -478,8 +469,8 @@ async def root():
     return f"""
     <html><body style='background:#111;color:#ff3d00;text-align:center;padding:50px;font-family:sans-serif;'>
     <div style='border:1px solid #ff3d00;padding:20px;margin:auto;max-width:400px;border-radius:10px;'>
-        <h1>FORTRESS V43</h1>
-        <p>System: 5m Sniper Trigger</p>
+        <h1>FORTRESS V44</h1>
+        <p>System: The Fixer (Monitor Debug)</p>
         <p>Active Trades: {len(store.active_trades)}</p>
     </div></body></html>
     """
