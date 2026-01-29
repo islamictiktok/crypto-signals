@@ -1,6 +1,5 @@
 import asyncio
 import os
-import time
 import json
 import logging
 from datetime import datetime
@@ -14,41 +13,40 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 # ==========================================
-# 0. إعدادات السجلات (Logging)
+# 0. إعدادات السجلات
 # ==========================================
-# هذا سيجعل البوت يطبع كل خطوة في التيرمينال
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%H:%M:%S'
 )
-logger = logging.getLogger("Fortress")
+logger = logging.getLogger("FortressV61")
 
 # ==========================================
-# 1. الإعدادات (Configuration)
+# 1. الإعدادات (Config)
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     
-    # الإعدادات العامة
-    TIMEFRAME = '15m'       # الفريم
-    MIN_VOLUME = 10_000_000 # فلتر السيولة
+    # السرعة والفريم
+    TIMEFRAME = '5m'         
+    MIN_VOLUME = 5_000_000   
     
-    # إعدادات الاستراتيجية (Rubber Band)
-    BB_LENGTH = 20
-    BB_STD = 2.5            # انحراف 2.5 لضمان التقاط التطرف السعري
-    RSI_OVERSOLD = 40       # تشبع بيعي (رفعناه قليلاً لزيادة الفرص)
-    RSI_OVERBOUGHT = 60     # تشبع شرائي
+    # إعدادات الاستراتيجية (Velocity)
+    EMA_PERIOD = 50          
+    STOCH_K = 14
+    STOCH_D = 3
+    STOCH_RSI_LEN = 14
     
-    # إدارة المخاطر (ثابتة)
-    TP_PCT = 0.025          # هدف 2.5%
-    SL_PCT = 0.015          # ستوب 1.5%
+    # الأهداف (سكالب سريع)
+    TP_PCT = 0.015           # 1.5%
+    SL_PCT = 0.008           # 0.8%
     
-    DB_FILE = "v50_rebound.json"
+    DB_FILE = "v61_clean.json"
 
 # ==========================================
-# 2. نظام التنبيهات (Notification System)
+# 2. التنسيق (Minimalist UI)
 # ==========================================
 class TelegramBot:
     @staticmethod
@@ -72,29 +70,29 @@ class TelegramBot:
         return None
 
     @staticmethod
-    def signal_template(symbol, side, entry, tp, sl, rsi_val):
+    def signal_template(symbol, side, entry, tp, sl):
         clean_sym = symbol.split(':')[0]
         icon = "🟢" if side == "LONG" else "🔴"
+        
+        # 🔥 التنسيق الجديد: بسيط ومباشر جداً
         return (
-            f"<b>{clean_sym}</b> | {side} {icon}\n"
-            f"⚡ <i>Rubber Band Reversal</i>\n"
-            f"──────────────\n"
-            f"💰 Entry: <code>{entry}</code>\n"
-            f"📉 RSI: <code>{rsi_val:.1f}</code>\n"
-            f"──────────────\n"
-            f"🎯 Target: <code>{tp}</code>\n"
-            f"🛑 Stop: <code>{sl}</code>"
+            f"<b>{clean_sym}</b>\n"
+            f"{icon} {side}\n\n"
+            f"Entry: <code>{entry}</code>\n\n"
+            f"Target: <code>{tp}</code>\n"
+            f"Stop: <code>{sl}</code>"
         )
 
     @staticmethod
-    def alert_template(type_str, pnl):
+    def alert_template(type_str, pnl, symbol):
+        clean_sym = symbol.split(':')[0]
         if type_str == "WIN":
-            return f"✅ <b>PROFIT SECURED</b>\nGain: +{pnl:.2f}%"
+            return f"✅ <b>{clean_sym} PROFIT</b> (+{pnl:.2f}%)"
         else:
-            return f"🛑 <b>STOP LOSS</b>\nLoss: -{pnl:.2f}%"
+            return f"🛑 <b>{clean_sym} STOP</b> (-{pnl:.2f}%)"
 
 # ==========================================
-# 3. إدارة البيانات (State Management)
+# 3. قاعدة البيانات
 # ==========================================
 class DataManager:
     def __init__(self):
@@ -127,11 +125,10 @@ class DataManager:
 db = DataManager()
 
 # ==========================================
-# 4. محرك السوق (Market Engine)
+# 4. محرك السوق
 # ==========================================
 class MarketEngine:
     def __init__(self):
-        # تفعيل Rate Limit لتجنب الحظر
         self.exchange = ccxt.mexc({
             'enableRateLimit': True, 
             'options': {'defaultType': 'swap'},
@@ -146,13 +143,12 @@ class MarketEngine:
                 if '/USDT:USDT' in s and t['quoteVolume'] >= Config.MIN_VOLUME:
                     pairs.append(s)
             return pairs
-        except Exception as e:
-            logger.error(f"Fetch Pairs Error: {e}")
+        except Exception:
             return []
 
     async def get_ohlcv(self, symbol):
         try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=50)
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TIMEFRAME, limit=100)
             if not ohlcv: return None
             df = pd.DataFrame(ohlcv, columns=['time','o','h','l','c','v'])
             return df
@@ -168,67 +164,65 @@ class MarketEngine:
         await self.exchange.close()
 
 # ==========================================
-# 5. الاستراتيجية (The Logic)
+# 5. الاستراتيجية (Velocity Logic)
 # ==========================================
 class Strategy:
     @staticmethod
     def analyze(df):
         try:
-            # حساب المؤشرات
-            bb = ta.bbands(df['c'], length=Config.BB_LENGTH, std=Config.BB_STD)
-            df['lower'] = bb[f'BBL_{Config.BB_LENGTH}_{Config.BB_STD}']
-            df['upper'] = bb[f'BBU_{Config.BB_LENGTH}_{Config.BB_STD}']
-            df['rsi'] = ta.rsi(df['c'], length=14)
+            # 1. EMA Trend
+            df['ema'] = ta.ema(df['c'], length=Config.EMA_PERIOD)
+            
+            # 2. Stoch RSI
+            stoch = ta.stochrsi(df['c'], length=Config.STOCH_RSI_LEN, rsi_length=Config.STOCH_RSI_LEN, k=Config.STOCH_K, d=Config.STOCH_D)
+            k_col = [c for c in stoch.columns if c.startswith('STOCHRSIk')][0]
+            d_col = [c for c in stoch.columns if c.startswith('STOCHRSId')][0]
+            
+            df['k'] = stoch[k_col]
+            df['d'] = stoch[d_col]
             
             curr = df.iloc[-1]
             prev = df.iloc[-2]
             
-            # 🟢 LONG SIGNAL
-            # 1. السعر السابق كان خارج الباند السفلي
-            prev_out = prev['c'] < prev['lower']
-            # 2. السعر الحالي أغلق داخل الباند (عودة)
-            curr_in = curr['c'] > curr['lower']
-            # 3. RSI يدعم الارتداد
-            rsi_ok = curr['rsi'] < Config.RSI_OVERSOLD
+            # 🟢 LONG
+            trend_up = curr['c'] > curr['ema']
+            oversold = (prev['k'] < 25) or (curr['k'] < 30)
+            crossover = (prev['k'] < prev['d']) and (curr['k'] > curr['d'])
             
-            if prev_out and curr_in and rsi_ok:
+            if trend_up and oversold and crossover:
                 entry = curr['c']
                 tp = entry * (1 + Config.TP_PCT)
                 sl = entry * (1 - Config.SL_PCT)
-                return "LONG", entry, tp, sl, curr['rsi']
+                return "LONG", entry, tp, sl
 
-            # 🔴 SHORT SIGNAL
-            # 1. السعر السابق كان فوق الباند العلوي
-            prev_out = prev['c'] > prev['upper']
-            # 2. السعر الحالي أغلق داخل الباند
-            curr_in = curr['c'] < curr['upper']
-            # 3. RSI يدعم الهبوط
-            rsi_ok = curr['rsi'] > Config.RSI_OVERBOUGHT
+            # 🔴 SHORT
+            trend_down = curr['c'] < curr['ema']
+            overbought = (prev['k'] > 75) or (curr['k'] > 70)
+            crossunder = (prev['k'] > prev['d']) and (curr['k'] < curr['d'])
             
-            if prev_out and curr_in and rsi_ok:
+            if trend_down and overbought and crossunder:
                 entry = curr['c']
                 tp = entry * (1 - Config.TP_PCT)
                 sl = entry * (1 + Config.SL_PCT)
-                return "SHORT", entry, tp, sl, curr['rsi']
+                return "SHORT", entry, tp, sl
                 
         except Exception:
             pass
         return None
 
 # ==========================================
-# 6. الحلقات الرئيسية (Background Tasks)
+# 6. المهام الخلفية
 # ==========================================
 market = MarketEngine()
 
 async def scanner_task():
-    logger.info("🚀 Scanner Loop Started...")
+    logger.info("🚀 Scanner Started (5m)...")
     while True:
         try:
             symbols = await market.get_top_pairs()
             logger.info(f"🔎 Scanning {len(symbols)} pairs...")
             
             for symbol in symbols:
-                # لا تفحص عملة مفتوح لها صفقة بالفعل
                 if symbol in db.trades: continue
                 
                 df = await market.get_ohlcv(symbol)
@@ -236,37 +230,34 @@ async def scanner_task():
                 
                 signal = Strategy.analyze(df)
                 if signal:
-                    side, entry, tp, sl, rsi = signal
+                    side, entry, tp, sl = signal
                     
-                    # إرسال التنبيه
-                    logger.info(f"🔥 Signal Found: {symbol} {side}")
-                    msg = TelegramBot.signal_template(symbol, side, entry, tp, sl, rsi)
+                    logger.info(f"🔥 Signal: {symbol} {side}")
+                    # استدعاء التنسيق النظيف الجديد
+                    msg = TelegramBot.signal_template(symbol, side, entry, tp, sl)
                     msg_id = await TelegramBot.send(msg)
                     
-                    # حفظ الصفقة
                     if msg_id:
                         db.add_trade(symbol, {
                             "side": side, "entry": entry, "tp": tp, "sl": sl, "msg_id": msg_id
                         })
                 
-                # راحة بسيطة جداً بين العملات لتخفيف الحمل
                 await asyncio.sleep(0.05)
                 
-            await asyncio.sleep(10) # انتظار 10 ثواني بعد كل دورة فحص كاملة
+            await asyncio.sleep(5)
             
         except Exception as e:
             logger.error(f"Scanner Error: {e}")
             await asyncio.sleep(5)
 
 async def monitor_task():
-    logger.info("👀 Monitor Loop Started...")
+    logger.info("👀 Monitor Active...")
     while True:
         try:
             if not db.trades:
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
                 continue
             
-            # تحويل المفاتيح لقائمة لتجنب أخطاء التعديل أثناء الدوران
             active_symbols = list(db.trades.keys())
             
             for symbol in active_symbols:
@@ -290,51 +281,46 @@ async def monitor_task():
                 
                 if is_win or is_loss:
                     type_str = "WIN" if is_win else "LOSS"
-                    msg = TelegramBot.alert_template(type_str, abs(pnl))
+                    msg = TelegramBot.alert_template(type_str, abs(pnl), symbol)
                     await TelegramBot.send(msg, reply_to=trade['msg_id'])
                     db.remove_trade(symbol)
-                    logger.info(f"Trade Closed: {symbol} -> {type_str}")
+                    logger.info(f"Closed {symbol}: {type_str}")
             
-            await asyncio.sleep(1) # فحص الأسعار كل ثانية
+            await asyncio.sleep(1)
             
         except Exception as e:
             logger.error(f"Monitor Error: {e}")
             await asyncio.sleep(1)
 
 # ==========================================
-# 7. تشغيل السيرفر (Boot & Web Server)
+# 7. التشغيل
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # بدء المهام في الخلفية عند تشغيل السيرفر
     t1 = asyncio.create_task(scanner_task())
     t2 = asyncio.create_task(monitor_task())
     yield
-    # تنظيف عند الإغلاق
     t1.cancel()
     t2.cancel()
     await market.close()
 
 app = FastAPI(lifespan=lifespan)
 
-# 🔥 الحل النهائي لمشكلة 405 (HEAD + GET) 🔥
 @app.get("/", response_class=HTMLResponse)
 @app.head("/", response_class=HTMLResponse)
 async def root():
     return f"""
     <html>
-        <head><title>Fortress V50 Active</title></head>
-        <body style="background-color: #0d0d0d; color: #00ff88; font-family: monospace; text-align: center; padding-top: 50px;">
-            <h1>✅ Fortress V50 is Running...</h1>
-            <p>Strategy: Rubber Band Reversal (OOP)</p>
+        <head><title>Fortress V61</title></head>
+        <body style="background:#111; color:#fff; font-family:sans-serif; text-align:center; padding:50px;">
+            <h1>✅ Fortress V61 (Clean)</h1>
+            <p>Strategy: Velocity Scalp</p>
             <p>Active Trades: {len(db.trades)}</p>
-            <p>Status: 200 OK (HEAD/GET Supported)</p>
         </body>
     </html>
     """
 
 if __name__ == "__main__":
     import uvicorn
-    # الحصول على المنفذ من البيئة (ضروري لـ Render)
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
