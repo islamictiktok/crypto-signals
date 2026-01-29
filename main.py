@@ -14,36 +14,27 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 # ==========================================
-# 1. الإعدادات (Fearless Config)
+# 1. إعدادات القناص (Triple Threat Config)
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     
-    TF_TREND = '1h'
-    TF_TRADE = '15m'
+    # التسلسل الهرمي للفريمات
+    TF_STRUCTURE = '1h'   # (1) الخريطة والسيولة
+    TF_ZONE = '15m'       # (2) تأكيد الوصول للمنطقة
+    TF_TRIGGER = '5m'     # (3) نقطة الدخول المبكر
     
     MIN_VOLUME = 15_000_000 
     
-    # ⚡ إعدادات السرعة
-    MAX_CONCURRENCY = 50      
-    CHUNK_SIZE = 50           
-    MONITOR_SPEED = 0.5       
+    # Golden Pocket
+    FIB_MIN = 0.618
+    FIB_MAX = 0.786
     
-    # فلاتر البقاء (تم حذف فلتر الصدمات)
-    SLOPE_THRESH = 0.0005
-    # SHOCK_FACTOR تم الحذف ❌
-    EMA_EXTENSION = 0.03
-    RSI_OVERBOUGHT = 75
-    RSI_OVERSOLD = 25
-    WICK_RATIO = 0.3
-    COOLING_FACTOR = 2.5      # رفعنا حد التبريد قليلاً للسماح بحركات أقوى
+    # إدارة المخاطر
+    ATR_SL_MULT = 1.0     
     
-    ATR_SL_MULT = 1.5
-    TP1_RR = 1.5
-    TP2_RR = 3.0
-    
-    DB_FILE = "v40_fearless.json"
+    DB_FILE = "v43_sniper.json"
     REPORT_HOUR = 23
     REPORT_MINUTE = 59
 
@@ -52,26 +43,27 @@ class Config:
 # ==========================================
 class Notifier:
     @staticmethod
-    def format_signal(symbol, side, entry, tp1, tp2, sl):
+    def format_signal(symbol, side, entry, tp1, tp2, tp3, sl, note):
         clean_sym = symbol.split(':')[0]
-        icon = "🚀" if side == "LONG" else "☄️"
+        icon = "⚡" if side == "LONG" else "💀"
         
         return (
             f"<code>{clean_sym}</code>\n"
-            f"{icon} <b>{side}</b> | V40 Fearless\n"
+            f"{icon} <b>{side}</b> | 5m Sniper Entry\n"
+            f"──────────────\n"
+            f"🔭 <b>Setup:</b> {note}\n"
             f"──────────────\n"
             f"💰 Entry: <code>{entry}</code>\n\n"
             f"🎯 TP 1: <code>{tp1}</code>\n"
-            f"🎯 TP 2: <code>{tp2}</code>\n\n"
-            f"🛑 Stop: <code>{sl}</code>\n"
-            f"──────────────\n"
-            f"⚡ <i>Momentum Breakout</i>"
+            f"🎯 TP 2: <code>{tp2}</code>\n"
+            f"🎯 TP 3: <code>{tp3}</code>\n\n"
+            f"🛑 Stop: <code>{sl}</code>"
         )
 
     @staticmethod
     def format_alert(type_str, level, profit_pct):
         if type_str == "TP":
-            emoji = "✅" if level == 1 else "🚀"
+            emoji = "✅" if level == 1 else "🚀" if level == 2 else "🏆"
             return f"{emoji} <b>TP {level} HIT</b>\nProfit: +{profit_pct:.2f}%"
         elif type_str == "BE":
             return f"🛡️ <b>BREAKEVEN</b>\nSecured at Entry."
@@ -83,12 +75,12 @@ class Notifier:
         total = stats['wins'] + stats['losses']
         win_rate = (stats['wins'] / total * 100) if total > 0 else 0
         return (
-            f"📊 <b>FEARLESS REPORT</b>\n"
+            f"📊 <b>V43 SNIPER REPORT</b>\n"
             f"──────────────\n"
-            f"🔢 Total: <b>{total}</b>\n"
+            f"🔢 Trades: <b>{total}</b>\n"
             f"✅ Wins: <b>{stats['wins']}</b>\n"
             f"❌ Losses: <b>{stats['losses']}</b>\n"
-            f"📈 Rate: <b>{win_rate:.1f}%</b>\n"
+            f"📈 Accuracy: <b>{win_rate:.1f}%</b>\n"
             f"──────────────\n"
             f"📅 {datetime.now().strftime('%Y-%m-%d')}"
         )
@@ -166,196 +158,224 @@ class TradeManager:
 store = TradeManager()
 
 # ==========================================
-# 4. محرك التحليل (Turbo Engine)
+# 4. محرك الثلاثي (Triple Engine)
 # ==========================================
-class TurboEngine:
+class TripleEngine:
     def __init__(self, exchange):
         self.exchange = exchange
-        self.trend_cache = {}
+        self.struct_cache = {}
 
-    async def get_htf_trend(self, symbol):
+    def find_fractals(self, df):
+        df['fractal_high'] = df['h'][(df['h'] > df['h'].shift(1)) & 
+                                     (df['h'] > df['h'].shift(2)) & 
+                                     (df['h'] > df['h'].shift(-1)) & 
+                                     (df['h'] > df['h'].shift(-2))]
+        df['fractal_low'] = df['l'][(df['l'] < df['l'].shift(1)) & 
+                                    (df['l'] < df['l'].shift(2)) & 
+                                    (df['l'] < df['l'].shift(-1)) & 
+                                    (df['l'] < df['l'].shift(-2))]
+        return df
+
+    async def get_structure(self, symbol):
         now = time.time()
-        if symbol in self.trend_cache:
-            if now - self.trend_cache[symbol]['time'] < 1800:
-                return self.trend_cache[symbol]
+        if symbol in self.struct_cache:
+            if now - self.struct_cache[symbol]['time'] < 1800:
+                return self.struct_cache[symbol]['data']
 
         try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TF_TREND, limit=150)
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TF_STRUCTURE, limit=200)
             if not ohlcv: return None
             df = pd.DataFrame(ohlcv, columns=['time','o','h','l','c','v'])
             
-            ema200 = ta.ema(df['c'], length=120).iloc[-1]
-            ema_prev = ta.ema(df['c'], length=120).iloc[-5]
-            slope = (ema200 - ema_prev) / ema_prev
+            df = self.find_fractals(df)
             
-            data = {'ema': ema200, 'slope': slope, 'time': now}
-            self.trend_cache[symbol] = data
+            valid_highs = df[df['fractal_high'].notnull()]
+            valid_lows = df[df['fractal_low'].notnull()]
+            
+            if valid_highs.empty or valid_lows.empty: return None
+            
+            last_high_idx = valid_highs.index[-1]
+            last_high = valid_highs.iloc[-1]['fractal_high']
+            
+            last_low_idx = valid_lows.index[-1]
+            last_low = valid_lows.iloc[-1]['fractal_low']
+            
+            trend = "UP" if last_low_idx > last_high_idx else "DOWN"
+            
+            impulse = None
+            if trend == "UP":
+                prev_lows = valid_lows[valid_lows.index < last_high_idx]
+                if not prev_lows.empty:
+                    start_point = prev_lows.iloc[-1]['fractal_low']
+                    end_point = last_high
+                    impulse = {"start": start_point, "end": end_point, "type": "BULLISH"}
+            else:
+                prev_highs = valid_highs[valid_highs.index < last_low_idx]
+                if not prev_highs.empty:
+                    start_point = prev_highs.iloc[-1]['fractal_high']
+                    end_point = last_low
+                    impulse = {"start": start_point, "end": end_point, "type": "BEARISH"}
+            
+            data = {'trend': trend, 'impulse': impulse}
+            self.struct_cache[symbol] = {'data': data, 'time': now}
             return data
         except: return None
 
     async def analyze(self, symbol):
         try:
-            # 1. الاتجاه العام
-            trend_data = await self.get_htf_trend(symbol)
-            if not trend_data: 
-                print(f"  > ⚠️ {symbol}: No Data", flush=True)
-                return None
+            # 1. المرحلة الأولى: الخريطة (1H)
+            struct = await self.get_structure(symbol)
+            if not struct or not struct['impulse']: return None
+            impulse = struct['impulse']
+            
+            # 2. المرحلة الثانية: هل السعر في المنطقة؟ (نستخدم السعر الحالي لتقليل الطلبات)
+            # يمكن استخدام ticker سريع بدلاً من شمعة كاملة، لكن سنطلب 5m مباشرة للسرعة
+            # إذا كان السعر بعيداً جداً، سنوفر الطلب.
+            
+            # 3. المرحلة الثالثة: الزناد (5m)
+            # نسحب بيانات 5m لأننا نريد دخولاً مبكراً جداً
+            ohlcv_5m = await self.exchange.fetch_ohlcv(symbol, Config.TF_TRIGGER, limit=50)
+            if not ohlcv_5m: return None
+            df_5m = pd.DataFrame(ohlcv_5m, columns=['time','o','h','l','c','v'])
+            
+            df_5m['rsi'] = ta.rsi(df_5m['c'], length=14)
+            df_5m['atr'] = ta.atr(df_5m['h'], df_5m['l'], df_5m['c'], length=14)
+            
+            curr = df_5m.iloc[-1]
+            prev = df_5m.iloc[-2]
+            
+            # ==========================================
+            # 🟢 LONG TRIGGER (5m)
+            # ==========================================
+            if impulse['type'] == "BULLISH":
+                range_size = impulse['end'] - impulse['start']
+                fib_618 = impulse['end'] - (range_size * 0.618)
+                fib_786 = impulse['end'] - (range_size * 0.786)
                 
-            htf_ema = trend_data['ema']
-            slope = trend_data['slope']
-
-            if abs(slope) < Config.SLOPE_THRESH:
-                print(f"  > 💤 {symbol}: Ranging (Slope {slope:.5f})", flush=True)
-                return None
-
-            # 2. الفريم الصغير
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, Config.TF_TRADE, limit=100)
-            if not ohlcv: return None
-            df = pd.DataFrame(ohlcv, columns=['time','o','h','l','c','v'])
-
-            df['ema200'] = ta.ema(df['c'], length=200)
-            df['atr'] = ta.atr(df['h'], df['l'], df['c'], length=14)
-            df['rsi'] = ta.rsi(df['c'], length=14)
-            df['adx'] = ta.adx(df['h'], df['l'], df['c'], length=14)['ADX_14']
-            
-            df['tp'] = (df['h'] + df['l'] + df['c']) / 3
-            df['vwap'] = (df['tp'] * df['v']).rolling(20).sum() / df['v'].rolling(20).sum()
-
-            avg_vol = df['v'].rolling(20).mean().iloc[-1]
-            avg_atr = df['atr'].rolling(50).mean().iloc[-1]
-
-            curr = df.iloc[-1]
-            prev = df.iloc[-2]
-
-            # --- الفلاتر (تم حذف فلتر الصدمات) ---
-            
-            # Volatility Check
-            if curr['atr'] < avg_atr:
-                print(f"  > 🐌 {symbol}: Low Volatility", flush=True)
-                return None
-
-            # Cooling (منع الدخول بعد شمعة عملاقة جداً فقط)
-            prev_body = abs(prev['c'] - prev['o'])
-            if prev_body > (prev['atr'] * Config.COOLING_FACTOR):
-                print(f"  > ❄️ {symbol}: Cooling Down", flush=True)
-                return None
-
-            # --- LONG ---
-            if slope > 0:
-                trend_ok = curr['c'] > htf_ema and curr['c'] > curr['ema200']
-                if not trend_ok:
-                    print(f"  > 📉 {symbol}: Trend Misaligned", flush=True)
-                    return None
+                # هل نحن داخل الـ Golden Pocket؟
+                # نستخدم Low الشمعة للتأكد من الملامسة
+                in_zone = (curr['l'] <= fib_618) and (curr['c'] >= fib_786)
+                
+                if in_zone:
+                    # شروط الدخول المبكر على 5m
                     
-                vwap_ok = curr['c'] > curr['vwap']
-                upper_wick = curr['h'] - curr['c']
-                body = curr['c'] - curr['o']
-                strong_close = upper_wick < (body * Config.WICK_RATIO)
-                rsi_ok = 50 < curr['rsi'] < Config.RSI_OVERBOUGHT
-                structure_ok = curr['l'] > prev['l']
-                vol_ok = curr['v'] > (avg_vol * 1.5)
-                adx_ok = curr['adx'] > 20
-                recent_high = df['h'].rolling(20).max().iloc[-2]
-                breakout = curr['c'] > recent_high
-
-                if vwap_ok and strong_close and rsi_ok and structure_ok and vol_ok and adx_ok and breakout:
-                    entry = curr['c']
-                    sl = entry - (curr['atr'] * Config.ATR_SL_MULT)
-                    risk = entry - sl
-                    tp1 = entry + (risk * Config.TP1_RR)
-                    tp2 = entry + (risk * Config.TP2_RR)
-                    return "LONG", entry, tp1, tp2, sl
-
-            # --- SHORT ---
-            if slope < 0:
-                trend_ok = curr['c'] < htf_ema and curr['c'] < curr['ema200']
-                if not trend_ok:
-                    print(f"  > 📈 {symbol}: Trend Misaligned", flush=True)
-                    return None
+                    # 1. نمط انعكاسي (Engulfing / Hammer)
+                    is_bullish_engulfing = (prev['c'] < prev['o']) and \
+                                           (curr['c'] > curr['o']) and \
+                                           (curr['c'] > prev['o']) and \
+                                           (curr['o'] < prev['c'])
                     
-                vwap_ok = curr['c'] < curr['vwap']
-                lower_wick = curr['c'] - curr['l']
-                body = curr['o'] - curr['c']
-                strong_close = lower_wick < (body * Config.WICK_RATIO)
-                rsi_ok = Config.RSI_OVERSOLD < curr['rsi'] < 50
-                structure_ok = curr['h'] < prev['h']
-                vol_ok = curr['v'] > (avg_vol * 1.5)
-                adx_ok = curr['adx'] > 20
-                recent_low = df['l'].rolling(20).min().iloc[-2]
-                breakout = curr['c'] < recent_low
+                    is_hammer = (min(curr['c'], curr['o']) - curr['l']) > 2 * abs(curr['c'] - curr['o'])
+                    
+                    # 2. دايفرجنس سريع (5m)
+                    price_lower = curr['l'] < df_5m['l'].iloc[-10:-2].min()
+                    rsi_higher = curr['rsi'] > df_5m['rsi'].iloc[-10:-2].min()
+                    divergence = price_lower and rsi_higher
+                    
+                    if is_bullish_engulfing or is_hammer or divergence:
+                        entry = curr['c']
+                        # ستوب لوس: تحت قاع شمعة الدخول + قليل من ATR
+                        # ميزة 5m: الستوب قريب جداً
+                        sl = min(curr['l'], prev['l']) - (curr['atr'] * 0.5) 
+                        
+                        tp1 = impulse['end']
+                        tp2 = impulse['end'] + (range_size * 0.272)
+                        tp3 = impulse['end'] + (range_size * 0.618)
+                        
+                        note = "5m Early Entry (Div)" if divergence else "5m Early Entry (Pattern)"
+                        return "LONG", entry, tp1, tp2, tp3, sl, note
 
-                if vwap_ok and strong_close and rsi_ok and structure_ok and vol_ok and adx_ok and breakout:
-                    entry = curr['c']
-                    sl = entry + (curr['atr'] * Config.ATR_SL_MULT)
-                    risk = sl - entry
-                    tp1 = entry - (risk * Config.TP1_RR)
-                    tp2 = entry - (risk * Config.TP2_RR)
-                    return "SHORT", entry, tp1, tp2, sl
-
-            print(f"  > ⏳ {symbol}: Watching...", flush=True)
+            # ==========================================
+            # 🔴 SHORT TRIGGER (5m)
+            # ==========================================
+            if impulse['type'] == "BEARISH":
+                range_size = impulse['start'] - impulse['end']
+                fib_618 = impulse['end'] + (range_size * 0.618)
+                fib_786 = impulse['end'] + (range_size * 0.786)
+                
+                in_zone = (curr['h'] >= fib_618) and (curr['c'] <= fib_786)
+                
+                if in_zone:
+                    is_bearish_engulfing = (prev['c'] > prev['o']) and \
+                                           (curr['c'] < curr['o']) and \
+                                           (curr['c'] < prev['o']) and \
+                                           (curr['o'] > prev['c'])
+                                           
+                    is_shooting_star = (curr['h'] - max(curr['c'], curr['o'])) > 2 * abs(curr['c'] - curr['o'])
+                    
+                    price_higher = curr['h'] > df_5m['h'].iloc[-10:-2].max()
+                    rsi_lower = curr['rsi'] < df_5m['rsi'].iloc[-10:-2].max()
+                    divergence = price_higher and rsi_lower
+                    
+                    if is_bearish_engulfing or is_shooting_star or divergence:
+                        entry = curr['c']
+                        sl = max(curr['h'], prev['h']) + (curr['atr'] * 0.5)
+                        
+                        tp1 = impulse['end']
+                        tp2 = impulse['end'] - (range_size * 0.272)
+                        tp3 = impulse['end'] - (range_size * 0.618)
+                        
+                        note = "5m Early Entry (Div)" if divergence else "5m Early Entry (Pattern)"
+                        return "SHORT", entry, tp1, tp2, tp3, sl, note
 
         except Exception: return None
         return None
 
 # ==========================================
-# 5. الحلقات (Turbo Loops)
+# 5. الحلقات
 # ==========================================
 state = {"history": {}, "last_scan": time.time()}
-sem = asyncio.Semaphore(Config.MAX_CONCURRENCY)
+sem = asyncio.Semaphore(20)
 
 async def scan_task(symbol, engine):
-    if time.time() - state['history'].get(symbol, 0) < 900: return
+    if time.time() - state['history'].get(symbol, 0) < 300: return # كول داون 5 دقائق فقط (للدخول المتكرر)
     if symbol in store.active_trades: return
 
     async with sem:
         res = await engine.analyze(symbol)
         if res:
-            side, entry, tp1, tp2, sl = res
+            side, entry, tp1, tp2, tp3, sl, note = res
             
-            sig_key = f"{symbol}_{int(time.time()/900)}"
+            sig_key = f"{symbol}_{int(time.time()/300)}"
             if sig_key in state['history']: return
             
             state['history'][symbol] = time.time()
             state['history'][sig_key] = True
             
-            print(f"\n🚀 SIGNAL FOUND: {symbol} {side}", flush=True)
-            msg = Notifier.format_signal(symbol, side, fmt(entry), fmt(tp1), fmt(tp2), fmt(sl))
+            print(f"\n⚡ 5m TRIGGER: {symbol} {side}", flush=True)
+            msg = Notifier.format_signal(symbol, side, fmt(entry), fmt(tp1), fmt(tp2), fmt(tp3), fmt(sl), note)
             msg_id = await Notifier.send(msg)
             
             if msg_id:
                 store.add_trade(symbol, {
-                    "side": side, "entry": entry, "tp1": tp1, "tp2": tp2, "sl": sl, "msg_id": msg_id, "status": 0
+                    "side": side, "entry": entry, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, "msg_id": msg_id, "status": 0
                 })
 
 async def scanner_loop(exchange):
-    print("⚡ Fortress V40 (Fearless) Started...", flush=True)
-    engine = TurboEngine(exchange)
+    print("⚡ Fortress V43 (Triple Sniper) Started...", flush=True)
+    engine = TripleEngine(exchange)
     while True:
         try:
             tickers = await exchange.fetch_tickers()
             symbols = [s for s, t in tickers.items() if '/USDT:USDT' in s and t['quoteVolume'] >= Config.MIN_VOLUME]
+            print(f"\n🔎 Scanning {len(symbols)} pairs (1H Map -> 5m Trigger)...", flush=True)
             
-            print(f"\n🔎 STARTING NEW SCAN: {len(symbols)} pairs...", flush=True)
-            
-            chunk_size = Config.CHUNK_SIZE
+            chunk_size = 20
             for i in range(0, len(symbols), chunk_size):
                 chunk = symbols[i:i + chunk_size]
-                print(f"--- Processing Batch {i} to {i+chunk_size} ---", flush=True)
                 await asyncio.gather(*[scan_task(s, engine) for s in chunk])
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.5)
             
             state['last_scan'] = time.time()
             gc.collect()
-            await asyncio.sleep(1)
-        except Exception as e: 
-            print(f"⚠️ Loop Error: {e}")
             await asyncio.sleep(5)
+        except: await asyncio.sleep(5)
 
 async def monitor_loop(exchange):
-    print("👀 Turbo Monitor Active...", flush=True)
+    print("👀 Monitor Active...", flush=True)
     while True:
         if not store.active_trades:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
             continue
         
         for sym, trade in list(store.active_trades.items()):
@@ -367,29 +387,33 @@ async def monitor_loop(exchange):
                 sl = trade['sl']
                 tp1 = trade['tp1']
                 tp2 = trade['tp2']
+                tp3 = trade['tp3']
                 status = trade['status']
                 
                 pnl = 0
                 hit_tp1 = False
                 hit_tp2 = False
+                hit_tp3 = False
                 hit_sl = False
 
                 if side == 'LONG':
                     pnl = (price - entry) / entry * 100
                     if price <= sl: hit_sl = True
-                    elif status == 0 and price >= tp1: hit_tp1 = True
-                    elif price >= tp2: hit_tp2 = True
+                    elif status < 1 and price >= tp1: hit_tp1 = True
+                    elif status < 2 and price >= tp2: hit_tp2 = True
+                    elif price >= tp3: hit_tp3 = True
                 else:
                     pnl = (entry - price) / entry * 100
                     if price >= sl: hit_sl = True
-                    elif status == 0 and price <= tp1: hit_tp1 = True
-                    elif price <= tp2: hit_tp2 = True
+                    elif status < 1 and price <= tp1: hit_tp1 = True
+                    elif status < 2 and price <= tp2: hit_tp2 = True
+                    elif price <= tp3: hit_tp3 = True
 
                 if hit_sl:
-                    type_str = "BE" if status == 1 else "LOSS"
+                    type_str = "BE" if status >= 1 else "LOSS"
                     msg = Notifier.format_alert(type_str, 0, abs(pnl))
                     await Notifier.send(msg, reply_to=trade.get('msg_id'))
-                    store.close_trade(sym, "WIN" if status==1 else "LOSS", pnl)
+                    store.close_trade(sym, "WIN" if status>=1 else "LOSS", pnl)
                 
                 elif hit_tp1:
                     msg = Notifier.format_alert("TP", 1, pnl)
@@ -399,10 +423,15 @@ async def monitor_loop(exchange):
                 elif hit_tp2:
                     msg = Notifier.format_alert("TP", 2, pnl)
                     await Notifier.send(msg, reply_to=trade.get('msg_id'))
+                    store.update_trade(sym, {"status": 2})
+                
+                elif hit_tp3:
+                    msg = Notifier.format_alert("TP", 3, pnl)
+                    await Notifier.send(msg, reply_to=trade.get('msg_id'))
                     store.close_trade(sym, "WIN", pnl)
 
             except: pass
-        await asyncio.sleep(Config.MONITOR_SPEED)
+        await asyncio.sleep(2)
 
 async def report_loop():
     while True:
@@ -447,10 +476,10 @@ app = FastAPI(lifespan=lifespan)
 @app.head("/", response_class=HTMLResponse)
 async def root():
     return f"""
-    <html><body style='background:#000;color:#ff0000;text-align:center;padding:50px;font-family:monospace;'>
-    <div style='border:1px solid #ff0000;padding:20px;margin:auto;max-width:400px;'>
-        <h1>FORTRESS V40</h1>
-        <p>MODE: FEARLESS (No News Filter)</p>
+    <html><body style='background:#111;color:#ff3d00;text-align:center;padding:50px;font-family:sans-serif;'>
+    <div style='border:1px solid #ff3d00;padding:20px;margin:auto;max-width:400px;border-radius:10px;'>
+        <h1>FORTRESS V43</h1>
+        <p>System: 5m Sniper Trigger</p>
         <p>Active Trades: {len(store.active_trades)}</p>
     </div></body></html>
     """
