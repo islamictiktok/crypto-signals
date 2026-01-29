@@ -23,10 +23,10 @@ BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 # السيولة 10 مليون
 MIN_VOLUME_USDT = 10_000_000 
 
-# إعدادات الاستراتيجية (EMA Crossover)
+# إعدادات الاستراتيجية
 EMA_FAST = 20
 EMA_SLOW = 50
-TIMEFRAME = '15m'  # أفضل فريم لتقاطع المتوسطات
+TIMEFRAME = '15m' 
 
 app = FastAPI()
 
@@ -36,9 +36,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (MA CROSS EDITION)</h1>
-            <p>Strategy: EMA 20/50 Crossover (15m)</p>
-            <p>Speed: Turbo Mode (Auto-Update Tickers)</p>
+            <h1>🛡️ Fortress Bot (STOCH EDITION)</h1>
+            <p>Strategy: EMA Cross + ADX + RSI + Stoch</p>
+            <p>Logs: Verbose (Full Detail)</p>
         </body>
     </html>
     """
@@ -71,81 +71,113 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (EMA Crossover Strategy)
+# 3. المنطق (EMA + ADX + RSI + Stoch) 🔥 تعديل 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # نحتاج بيانات كافية لحساب EMA 50 (على الأقل 100 شمعة)
+        # جلب البيانات
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=200)
-        if not ohlcv: return None
+        if not ohlcv: return None, "No Data"
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # حساب المؤشرات
+        # 1. المتوسطات (EMA)
         df['ema_fast'] = df.ta.ema(close='close', length=EMA_FAST)
         df['ema_slow'] = df.ta.ema(close='close', length=EMA_SLOW)
+        
+        # 2. قوة الاتجاه (ADX)
+        adx_df = df.ta.adx(high='high', low='low', close='close', length=14)
+        df['adx'] = adx_df['ADX_14']
+        
+        # 3. الزخم (RSI)
+        df['rsi'] = df.ta.rsi(close='close', length=14)
+        
+        # 4. 🔥 الستوكاستيك (Stoch) 🔥
+        stoch = df.ta.stoch(high='high', low='low', close='close', k=14, d=3, smooth_k=3)
+        # Stoch يرجع عمودين، نحتاج تحديد أسمائهم بدقة
+        k_col = [c for c in stoch.columns if c.startswith('STOCHk')][0]
+        d_col = [c for c in stoch.columns if c.startswith('STOCHd')][0]
+        df['k'] = stoch[k_col]
+        df['d'] = stoch[d_col]
+        
+        # 5. التذبذب (ATR)
         df['atr'] = df.ta.atr(high='high', low='low', close='close', length=14)
         
-        # التأكد من عدم وجود قيم فارغة في الشموع الأخيرة
-        if pd.isna(df['ema_slow'].iloc[-1]) or pd.isna(df['ema_fast'].iloc[-1]):
-            return None
+        if pd.isna(df['adx'].iloc[-1]) or pd.isna(df['ema_slow'].iloc[-1]):
+            return None, "Calculating Indicators..."
 
-        # البيانات الحالية والسابقة
         curr = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # منطق التقاطع
-        # Golden Cross (شراء): السريع يقطع البطيء لأعلى
-        crossover_up = (prev['ema_fast'] < prev['ema_slow']) and (curr['ema_fast'] > curr['ema_slow'])
+        # الشروط الأساسية
+        cross_up = (prev['ema_fast'] < prev['ema_slow']) and (curr['ema_fast'] > curr['ema_slow'])
+        cross_down = (prev['ema_fast'] > prev['ema_slow']) and (curr['ema_fast'] < curr['ema_slow'])
         
-        # Death Cross (بيع): السريع يقطع البطيء لأسفل
-        crossover_down = (prev['ema_fast'] > prev['ema_slow']) and (curr['ema_fast'] < curr['ema_slow'])
+        # فحص الفلاتر وإرجاع سبب الرفض
+        if not (cross_up or cross_down):
+            diff = (curr['ema_fast'] - curr['ema_slow']) / curr['ema_slow'] * 100
+            trend = "Uptrend" if curr['ema_fast'] > curr['ema_slow'] else "Downtrend"
+            return None, f"No Cross ({trend} gap {abs(diff):.2f}%)"
+
+        # 1. ADX Filter
+        if curr['adx'] < 20:
+            return None, f"Weak ADX ({curr['adx']:.1f})"
+            
+        # 2. RSI Filter
+        if cross_up and curr['rsi'] <= 50: return None, f"Low RSI ({curr['rsi']:.1f})"
+        if cross_down and curr['rsi'] >= 50: return None, f"High RSI ({curr['rsi']:.1f})"
+        
+        # 3. 🔥 Stoch Filter 🔥
+        # شراء: خط K فوق D (زخم إيجابي)
+        if cross_up and (curr['k'] < curr['d']): return None, "Bad Stoch (K < D)"
+        # بيع: خط K تحت D (زخم سلبي)
+        if cross_down and (curr['k'] > curr['d']): return None, "Bad Stoch (K > D)"
+
+        # 4. Candle Color
+        green_candle = curr['close'] > curr['open']
+        red_candle = curr['close'] < curr['open']
+        
+        if cross_up and not green_candle: return None, "Red Candle on Buy"
+        if cross_down and not red_candle: return None, "Green Candle on Sell"
         
         entry = curr['close']
         atr = curr['atr']
 
-        # 🔥 LONG STRATEGY
-        if crossover_up:
-            sl = entry - (atr * 1.5)  # وقف الخسارة أسفل السعر بـ 1.5 ATR
+        # ✅ LONG SIGNAL
+        if cross_up:
+            sl = entry - (atr * 1.5)
             risk = entry - sl
-            tp = entry + (risk * 2.0) # الهدف ضعف المخاطرة (Risk:Reward 1:2)
+            tp = entry + (risk * 2.0)
             
-            # حماية من المخاطرة العالية
-            risk_pct = (entry - sl) / entry * 100
-            if risk_pct > 5.0: return None
-            
-            return "LONG", entry, tp, sl, int(curr['time'])
+            if ((entry - sl) / entry * 100) > 5.0: return None, "High Risk > 5%"
+            return ("LONG", entry, tp, sl, int(curr['time'])), "SIGNAL FOUND"
 
-        # 🔥 SHORT STRATEGY
-        elif crossover_down:
-            sl = entry + (atr * 1.5)  # وقف الخسارة أعلى السعر بـ 1.5 ATR
+        # ✅ SHORT SIGNAL
+        elif cross_down:
+            sl = entry + (atr * 1.5)
             risk = sl - entry
             tp = entry - (risk * 2.0)
             
-            # حماية من المخاطرة العالية
-            risk_pct = (sl - entry) / entry * 100
-            if risk_pct > 5.0: return None
-            
-            return "SHORT", entry, tp, sl, int(curr['time'])
+            if ((sl - entry) / entry * 100) > 5.0: return None, "High Risk > 5%"
+            return ("SHORT", entry, tp, sl, int(curr['time'])), "SIGNAL FOUND"
 
-        return None
+        return None, "Unknown"
     except Exception as e:
-        return None
+        return None, f"Error: {str(e)}"
 
 # ==========================================
 # 4. المعالجة السريعة (Turbo)
 # ==========================================
-# زيادة السرعة: فحص 50 عملة في نفس الوقت بدلاً من 20
 sem = asyncio.Semaphore(50) 
 
 async def safe_check(symbol, app_state):
-    # تقليل وقت الانتظار لنفس العملة لضمان عدم تفويت التقاطع
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    if time.time() - last_sig_time < (60 * 60): return # انتظار ساعة بعد الإشارة لنفس العملة
+    if time.time() - last_sig_time < (60 * 60): return 
     if symbol in app_state.active_trades: return
 
     async with sem:
-        logic_res = await get_signal_logic(symbol)
+        # نستلم النتيجة + السبب
+        logic_res, reason = await get_signal_logic(symbol)
         
         if logic_res:
             side, entry, tp, sl, ts = logic_res
@@ -158,7 +190,7 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (MA Cross)</b>" if side == "LONG" else "🔴 <b>SELL (MA Cross)</b>"
+                side_text = "🟢 <b>BUY (Stoch+)</b>" if side == "LONG" else "🔴 <b>SELL (Stoch+)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
@@ -174,13 +206,16 @@ async def safe_check(symbol, app_state):
                     f"<i>(Risk: {sl_pct:.2f}%)</i>"
                 )
                 
-                print(f"\n🔥 SIGNAL: {clean_name} {side}")
+                print(f"\n🔥 {symbol}: SIGNAL FOUND! ({side})", flush=True)
                 msg_id = await send_telegram_msg(msg)
                 
                 if msg_id:
                     app_state.active_trades[symbol] = {
                         "side": side, "entry": entry, "tp": tp, "sl": sl, "msg_id": msg_id
                     }
+        else:
+            # 🔥 اللوغز التفصيلي مع سبب الرفض 🔥
+            print(f"  > {symbol}: {reason}", flush=True)
 
 # ==========================================
 # 5. المراقبة
@@ -223,7 +258,7 @@ async def monitor_trades(app_state):
                     print(f"🛑 {sym} Loss")
                     
             except: pass
-        await asyncio.sleep(1) # سرعة المراقبة 1 ثانية
+        await asyncio.sleep(1)
 
 async def daily_report_task(app_state):
     while True:
@@ -249,44 +284,34 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: MA CROSS EDITION (Turbo)...")
+    print(f"🚀 System Online: STOCH EDITION (Turbo Logs)...")
     try:
         await exchange.load_markets()
         
         while True:
-            # ==========================================
-            # 🔥 تحديث العملات مع كل دورة فحص 🔥
-            # ==========================================
             try:
-                # جلب كل العملات من المنصة مباشرة
                 tickers = await exchange.fetch_tickers()
                 active_symbols = []
-                
-                # فلترة العملات بناء على السيولة
                 for s, t in tickers.items():
                     if '/USDT:USDT' in s and t['quoteVolume'] is not None:
                         if t['quoteVolume'] >= MIN_VOLUME_USDT:
                             active_symbols.append(s)
                 
                 app_state.symbols = active_symbols
-                
-                # طباعة للوجز للتأكد من التحديث
-                print(f"🔄 Market Update: Scanning {len(active_symbols)} coins (Vol > {MIN_VOLUME_USDT/1000000}M)")
+                # طباعة عدد العملات المكتشفة
+                print(f"\n🔎 Scan Cycle: Found {len(active_symbols)} coins...", flush=True)
                 
             except Exception as e:
-                print(f"⚠️ Error fetching tickers: {e}")
-                # إذا فشل التحديث، انتظر قليلا وحاول مرة أخرى في الدورة القادمة
+                print(f"⚠️ Market Update Error: {e}")
                 await asyncio.sleep(5)
                 continue
             
             if not app_state.symbols:
                 await asyncio.sleep(5); continue
 
-            # بدء الفحص المتوازي
             tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
             await asyncio.gather(*tasks)
             
-            # تقليل وقت الانتظار بين الدورات لزيادة السرعة
             await asyncio.sleep(1) 
 
     except Exception as e:
@@ -296,7 +321,7 @@ async def start_scanning(app_state):
 async def keep_alive_task():
     async with httpx.AsyncClient() as client:
         while True:
-            try: await client.get(RENDER_URL); print("💓")
+            try: await client.get(RENDER_URL); print("💓 Ping")
             except: pass
             await asyncio.sleep(600)
 
