@@ -20,11 +20,11 @@ RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# السيولة 20 مليون
-MIN_VOLUME_USDT = 20_000_000 
+# السيولة 10 مليون (كافية للسكالبينج السريع)
+MIN_VOLUME_USDT = 10_000_000 
 
-# الفريم 15 دقيقة
-TIMEFRAME = '15m'
+# الفريم 5 دقائق (أفضل فريم للبولينجر)
+TIMEFRAME = '5m'
 
 app = FastAPI()
 
@@ -33,10 +33,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#0d1117;color:#ff4d4d;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>⛩️ Fortress Bot (ICHIMOKU FIXED) ⛩️</h1>
-            <p>Strategy: TK Cross + Kumo Breakout</p>
-            <p>Status: Active 🟢</p>
+        <body style='background:#0d1117;color:#00ffff;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>⚡ Fortress Bot (BOLLINGER SCALPER) ⚡</h1>
+            <p>Strategy: BB Reversion + RSI</p>
+            <p>Status: Active (High Frequency) 🟢</p>
         </body>
     </html>
     """
@@ -69,93 +69,85 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Ichimoku Strategy) 🔥 تم الإصلاح 🔥
+# 3. المنطق (Bollinger Bands Scalping) 🔥 استراتيجية سريعة 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # نحتاج بيانات كافية (150 شمعة)
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
+        # جلب البيانات (100 شمعة تكفي)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
         if not ohlcv: return None, "No Data"
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # --- حساب مؤشرات الإيشيموكو بشكل صحيح ---
-        # الدالة ترجع DataFrame يحتوي على كل الخطوط
-        ichi = df.ta.ichimoku(high='high', low='low', close='close', tenkan=9, kijun=26, senkou=52)
+        # 1. حساب Bollinger Bands
+        # length=20, std=2.0 (الإعدادات القياسية)
+        bb = df.ta.bbands(close='close', length=20, std=2.0)
         
-        if ichi is None: return None, "Ichimoku Error"
+        if bb is None: return None, "BB Error"
 
-        # ichi[0] هو الـ DataFrame الذي يحتوي على القيم
-        ichi_data = ichi[0]
+        # استخراج الأعمدة (Lower, Middle, Upper)
+        # الأسماء عادة تكون: BBL_20_2.0, BBM_20_2.0, BBU_20_2.0
+        lower_col = [c for c in bb.columns if c.startswith('BBL')][0]
+        mid_col = [c for c in bb.columns if c.startswith('BBM')][0]
+        upper_col = [c for c in bb.columns if c.startswith('BBU')][0]
         
-        # 🔥 الإصلاح: دمج البيانات بشكل صحيح باستخدام اسم العمود بدقة 🔥
-        # الأعمدة عادة تكون: ITS_9, IKS_26, ISA_9, ISB_26, ICS_26
-        # سنبحث عن الأعمدة التي تبدأ بهذه الحروف لضمان التوافق
+        df['lower'] = bb[lower_col]
+        df['mid'] = bb[mid_col]
+        df['upper'] = bb[upper_col]
         
-        ts_col = [c for c in ichi_data.columns if c.startswith('ITS')][0] # Tenkan
-        ks_col = [c for c in ichi_data.columns if c.startswith('IKS')][0] # Kijun
-        sa_col = [c for c in ichi_data.columns if c.startswith('ISA')][0] # Span A
-        sb_col = [c for c in ichi_data.columns if c.startswith('ISB')][0] # Span B
+        # 2. RSI
+        df['rsi'] = df.ta.rsi(close='close', length=14)
         
-        df['tenkan'] = ichi_data[ts_col]
-        df['kijun'] = ichi_data[ks_col]
-        df['span_a'] = ichi_data[sa_col]
-        df['span_b'] = ichi_data[sb_col]
-        
-        # ATR للستوب
+        # 3. ATR للستوب
         df['atr'] = df.ta.atr(length=14)
         
-        if pd.isna(df['span_b'].iloc[-1]): return None, "Calc Indicators..."
+        if pd.isna(df['lower'].iloc[-1]): return None, "Calc Indicators..."
 
         curr = df.iloc[-1]
-        prev = df.iloc[-2]
         
         entry = curr['close']
         atr = curr['atr']
         
-        # === المنطق الياباني ===
+        # === منطق السكالبينج (The Logic) ===
         
-        # 1. حالة السحابة
-        cloud_top = max(curr['span_a'], curr['span_b'])
-        cloud_bottom = min(curr['span_a'], curr['span_b'])
+        # 🟢 LONG STRATEGY (شراء من القاع)
+        # 1. السعر كسر الخط السفلي (Lower Band) أو لمسه
+        # 2. RSI في منطقة تشبع بيعي (أقل من 35) لضمان الارتداد
         
-        above_cloud = curr['close'] > cloud_top
-        below_cloud = curr['close'] < cloud_bottom
+        price_below_bb = curr['low'] <= curr['lower']
+        rsi_oversold = curr['rsi'] < 35
         
-        # 2. تقاطع TK
-        tk_cross_bull = (prev['tenkan'] < prev['kijun']) and (curr['tenkan'] > curr['kijun'])
-        tk_cross_bear = (prev['tenkan'] > prev['kijun']) and (curr['tenkan'] < curr['kijun'])
-
-        # 3. لون السحابة
-        green_cloud = curr['span_a'] > curr['span_b']
-        red_cloud = curr['span_a'] < curr['span_b']
-
-        # 🟢 LONG STRATEGY
-        if tk_cross_bull and above_cloud and green_cloud:
-            sl = cloud_bottom 
-            dist_to_cloud = (entry - sl) / entry * 100
-            if dist_to_cloud > 3.0: sl = entry - (atr * 2.0)
+        if price_below_bb and rsi_oversold:
+            # ستوب ضيق تحت أدنى قاع
+            sl = entry - (atr * 1.5)
             risk = entry - sl
-            tp = entry + (risk * 2.5)
+            tp = entry + (risk * 2.0) # الهدف هو العودة للمنتصف أو الخط العلوي
             
-            return ("LONG", entry, tp, sl, int(curr['time'])), f"ICHIMOKU BULL"
+            return ("LONG", entry, tp, sl, int(curr['time'])), f"BB SCALP BUY (RSI: {curr['rsi']:.1f})"
 
-        # 🔴 SHORT STRATEGY
-        if tk_cross_bear and below_cloud and red_cloud:
-            sl = cloud_top
-            dist_to_cloud = (sl - entry) / entry * 100
-            if dist_to_cloud > 3.0: sl = entry + (atr * 2.0)
+        # 🔴 SHORT STRATEGY (بيع من القمة)
+        # 1. السعر كسر الخط العلوي (Upper Band) أو لمسه
+        # 2. RSI في منطقة تشبع شرائي (فوق 65)
+        
+        price_above_bb = curr['high'] >= curr['upper']
+        rsi_overbought = curr['rsi'] > 65
+        
+        if price_above_bb and rsi_overbought:
+            sl = entry + (atr * 1.5)
             risk = sl - entry
-            tp = entry - (risk * 2.5)
+            tp = entry - (risk * 2.0)
             
-            return ("SHORT", entry, tp, sl, int(curr['time'])), f"ICHIMOKU BEAR"
+            return ("SHORT", entry, tp, sl, int(curr['time'])), f"BB SCALP SELL (RSI: {curr['rsi']:.1f})"
 
         # تقارير الرفض
-        if tk_cross_bull and not above_cloud: return None, "Bullish Cross but Below Cloud"
-        if tk_cross_bear and not below_cloud: return None, "Bearish Cross but Above Cloud"
+        # حساب موقع السعر بالنسبة للخطوط (Percent B)
+        # 0 = الخط السفلي، 1 = الخط العلوي
+        pb = (curr['close'] - curr['lower']) / (curr['upper'] - curr['lower'])
         
-        trend = "Bullish" if curr['tenkan'] > curr['kijun'] else "Bearish"
-        return None, f"No Cross (Trend: {trend})"
+        if price_below_bb and not rsi_oversold: return None, f"Price Low but RSI High ({curr['rsi']:.1f})"
+        if price_above_bb and not rsi_overbought: return None, f"Price High but RSI Low ({curr['rsi']:.1f})"
+        
+        return None, f"Inside Bands (Pos: {pb:.2f})"
 
     except Exception as e:
         return None, f"Error: {str(e)}"
@@ -192,12 +184,13 @@ db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    if time.time() - last_sig_time < 1800: return 
+    # تقليل وقت الانتظار لـ 15 دقيقة فقط لأنها استراتيجية سكالب سريعة
+    if time.time() - last_sig_time < 900: return 
     if symbol in app_state.active_trades: return
 
     async with sem:
-        # 🔥 تأخير 0.2 ثانية لمنع الحظر 🔥
-        await asyncio.sleep(0.2)
+        # تأخير بسيط جداً
+        await asyncio.sleep(0.1)
         
         result = await get_signal_logic(symbol)
         if not result: return 
@@ -215,12 +208,12 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (Ichimoku)</b>" if side == "LONG" else "🔴 <b>SELL (Ichimoku)</b>"
+                side_text = "⚡ <b>BUY (Scalp)</b>" if side == "LONG" else "⚡ <b>SELL (Scalp)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"⛩️ <code>{clean_name}</code>\n"
+                    f"🎯 <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -308,7 +301,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: ICHIMOKU KINKO HYO (20M+ Fixed)...")
+    print(f"🚀 System Online: BOLLINGER SCALPER (5m)...")
     try:
         await exchange.load_markets()
         
@@ -322,7 +315,7 @@ async def start_scanning(app_state):
                             active_symbols.append(s)
                 
                 app_state.symbols = active_symbols
-                print(f"\n🔎 Scan Cycle: Found {len(active_symbols)} coins (Vol > 20M)...", flush=True)
+                print(f"\n🔎 Scan Cycle: Found {len(active_symbols)} coins...", flush=True)
                 
             except Exception as e:
                 print(f"⚠️ Market Update Error: {e}")
