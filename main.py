@@ -23,10 +23,9 @@ BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 # السيولة 10 مليون
 MIN_VOLUME_USDT = 10_000_000 
 
-# إعدادات الاستراتيجية
-EMA_FAST = 20
-EMA_SLOW = 50
-TIMEFRAME = '15m' 
+# إعدادات الاستراتيجية (Fast Breakout)
+EMA_TRIGGER = 9        # متوسط سريع جداً لالتقاط الحركة من بدايتها
+TIMEFRAME = '15m'      # الفريم
 
 app = FastAPI()
 
@@ -36,9 +35,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (STOCH EDITION)</h1>
-            <p>Strategy: EMA Cross + ADX + RSI + Stoch</p>
-            <p>Logs: Verbose (Full Detail)</p>
+            <h1>🛡️ Fortress Bot (SNIPER ENTRY)</h1>
+            <p>Strategy: Price Breakout EMA 9 + Stoch</p>
+            <p>Target: Early Entry</p>
         </body>
     </html>
     """
@@ -71,97 +70,89 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (EMA + ADX + RSI + Stoch) 🔥 تعديل 🔥
+# 3. المنطق (Sniper Logic: Price > EMA 9) 🔥 تعديل جذري 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
         # جلب البيانات
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=200)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
         if not ohlcv: return None, "No Data"
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. المتوسطات (EMA)
-        df['ema_fast'] = df.ta.ema(close='close', length=EMA_FAST)
-        df['ema_slow'] = df.ta.ema(close='close', length=EMA_SLOW)
+        # 1. المؤشر السريع (EMA 9)
+        df['ema_fast'] = df.ta.ema(close='close', length=EMA_TRIGGER)
         
-        # 2. قوة الاتجاه (ADX)
-        adx_df = df.ta.adx(high='high', low='low', close='close', length=14)
-        df['adx'] = adx_df['ADX_14']
-        
-        # 3. الزخم (RSI)
-        df['rsi'] = df.ta.rsi(close='close', length=14)
-        
-        # 4. 🔥 الستوكاستيك (Stoch) 🔥
+        # 2. الستوكاستيك (للتأكد من الزخم)
         stoch = df.ta.stoch(high='high', low='low', close='close', k=14, d=3, smooth_k=3)
-        # Stoch يرجع عمودين، نحتاج تحديد أسمائهم بدقة
         k_col = [c for c in stoch.columns if c.startswith('STOCHk')][0]
         d_col = [c for c in stoch.columns if c.startswith('STOCHd')][0]
         df['k'] = stoch[k_col]
         df['d'] = stoch[d_col]
         
-        # 5. التذبذب (ATR)
+        # 3. RSI (فلتر إضافي)
+        df['rsi'] = df.ta.rsi(close='close', length=14)
+        
+        # 4. ATR (للستوب)
         df['atr'] = df.ta.atr(high='high', low='low', close='close', length=14)
         
-        if pd.isna(df['adx'].iloc[-1]) or pd.isna(df['ema_slow'].iloc[-1]):
-            return None, "Calculating Indicators..."
+        if pd.isna(df['ema_fast'].iloc[-1]): return None, "Calc Indicators..."
 
         curr = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # الشروط الأساسية
-        cross_up = (prev['ema_fast'] < prev['ema_slow']) and (curr['ema_fast'] > curr['ema_slow'])
-        cross_down = (prev['ema_fast'] > prev['ema_slow']) and (curr['ema_fast'] < curr['ema_slow'])
-        
-        # فحص الفلاتر وإرجاع سبب الرفض
-        if not (cross_up or cross_down):
-            diff = (curr['ema_fast'] - curr['ema_slow']) / curr['ema_slow'] * 100
-            trend = "Uptrend" if curr['ema_fast'] > curr['ema_slow'] else "Downtrend"
-            return None, f"No Cross ({trend} gap {abs(diff):.2f}%)"
-
-        # 1. ADX Filter
-        if curr['adx'] < 20:
-            return None, f"Weak ADX ({curr['adx']:.1f})"
-            
-        # 2. RSI Filter
-        if cross_up and curr['rsi'] <= 50: return None, f"Low RSI ({curr['rsi']:.1f})"
-        if cross_down and curr['rsi'] >= 50: return None, f"High RSI ({curr['rsi']:.1f})"
-        
-        # 3. 🔥 Stoch Filter 🔥
-        # شراء: خط K فوق D (زخم إيجابي)
-        if cross_up and (curr['k'] < curr['d']): return None, "Bad Stoch (K < D)"
-        # بيع: خط K تحت D (زخم سلبي)
-        if cross_down and (curr['k'] > curr['d']): return None, "Bad Stoch (K > D)"
-
-        # 4. Candle Color
-        green_candle = curr['close'] > curr['open']
-        red_candle = curr['close'] < curr['open']
-        
-        if cross_up and not green_candle: return None, "Red Candle on Buy"
-        if cross_down and not red_candle: return None, "Green Candle on Sell"
-        
         entry = curr['close']
         atr = curr['atr']
 
-        # ✅ LONG SIGNAL
-        if cross_up:
-            sl = entry - (atr * 1.5)
+        # =======================================
+        # 🟢 LONG: السعر يخترق EMA 9 لأعلى
+        # =======================================
+        # الشرط 1: السعر الحالي أغلق فوق EMA 9 والسابق كان تحته (اختراق)
+        price_cross_up = (prev['close'] < prev['ema_fast']) and (curr['close'] > curr['ema_fast'])
+        
+        # الشرط 2: الستوكاستيك إيجابي (K > D) وليس متشبعاً جداً (< 85)
+        stoch_bull = (curr['k'] > curr['d']) and (curr['k'] < 85)
+        
+        # الشرط 3: RSI فوق 40 (ليس ميتاً)
+        rsi_ok = curr['rsi'] > 40
+
+        if price_cross_up and stoch_bull and rsi_ok:
+            sl = entry - (atr * 2.0) # ستوب واسع قليلاً لحماية التذبذب
             risk = entry - sl
-            tp = entry + (risk * 2.0)
+            tp = entry + (risk * 2.5) # هدف طموح
             
-            if ((entry - sl) / entry * 100) > 5.0: return None, "High Risk > 5%"
-            return ("LONG", entry, tp, sl, int(curr['time'])), "SIGNAL FOUND"
+            return ("LONG", entry, tp, sl, int(curr['time'])), "SNIPER ENTRY (EMA 9 Break)"
 
-        # ✅ SHORT SIGNAL
-        elif cross_down:
-            sl = entry + (atr * 1.5)
+        # =======================================
+        # 🔴 SHORT: السعر يكسر EMA 9 لأسفل
+        # =======================================
+        # الشرط 1: السعر الحالي أغلق تحت EMA 9 والسابق كان فوقه
+        price_cross_down = (prev['close'] > prev['ema_fast']) and (curr['close'] < curr['ema_fast'])
+        
+        # الشرط 2: الستوكاستيك سلبي (K < D) وليس متشبعاً بيعياً جداً (> 15)
+        stoch_bear = (curr['k'] < curr['d']) and (curr['k'] > 15)
+        
+        # الشرط 3: RSI تحت 60
+        rsi_ok_bear = curr['rsi'] < 60
+
+        if price_cross_down and stoch_bear and rsi_ok_bear:
+            sl = entry + (atr * 2.0)
             risk = sl - entry
-            tp = entry - (risk * 2.0)
+            tp = entry - (risk * 2.5)
             
-            if ((sl - entry) / entry * 100) > 5.0: return None, "High Risk > 5%"
-            return ("SHORT", entry, tp, sl, int(curr['time'])), "SIGNAL FOUND"
+            return ("SHORT", entry, tp, sl, int(curr['time'])), "SNIPER ENTRY (EMA 9 Break)"
 
-        return None, "Unknown"
+        # أسباب الرفض للوغز
+        if not price_cross_up and not price_cross_down:
+            dist = (curr['close'] - curr['ema_fast']) / curr['ema_fast'] * 100
+            status = "Above" if curr['close'] > curr['ema_fast'] else "Below"
+            return None, f"No Breakout ({status} EMA9 by {abs(dist):.2f}%)"
+        
+        if price_cross_up and not stoch_bull: return None, "Breakout but Bad Stoch"
+        if price_cross_down and not stoch_bear: return None, "Breakout but Bad Stoch"
+
+        return None, "Waiting Setup..."
+
     except Exception as e:
         return None, f"Error: {str(e)}"
 
@@ -170,13 +161,37 @@ async def get_signal_logic(symbol):
 # ==========================================
 sem = asyncio.Semaphore(50) 
 
+class DataManager:
+    def __init__(self):
+        self.file = Config.DB_FILE
+        self.trades = {}
+        self.stats = {"wins": 0, "losses": 0}
+        self.last_signal_time = {}
+        self.sent_signals = {}
+
+    def add_trade(self, symbol, data):
+        self.trades[symbol] = data
+    
+    def remove_trade(self, symbol):
+        if symbol in self.trades: del self.trades[symbol]
+
+    def update_stats(self, type_str):
+        if type_str == "WIN": self.stats["wins"] += 1
+        else: self.stats["losses"] += 1
+
+class Config:
+    TELEGRAM_TOKEN = TELEGRAM_TOKEN
+    CHAT_ID = CHAT_ID
+    DB_FILE = "trades.json"
+
+db = DataManager()
+
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    if time.time() - last_sig_time < (60 * 60): return 
+    if time.time() - last_sig_time < (60 * 30): return # 30 دقيقة انتظار فقط للتسريع
     if symbol in app_state.active_trades: return
 
     async with sem:
-        # نستلم النتيجة + السبب
         logic_res, reason = await get_signal_logic(symbol)
         
         if logic_res:
@@ -190,7 +205,7 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (Stoch+)</b>" if side == "LONG" else "🔴 <b>SELL (Stoch+)</b>"
+                side_text = "🟢 <b>BUY (Sniper)</b>" if side == "LONG" else "🔴 <b>SELL (Sniper)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
@@ -214,7 +229,6 @@ async def safe_check(symbol, app_state):
                         "side": side, "entry": entry, "tp": tp, "sl": sl, "msg_id": msg_id
                     }
         else:
-            # 🔥 اللوغز التفصيلي مع سبب الرفض 🔥
             print(f"  > {symbol}: {reason}", flush=True)
 
 # ==========================================
@@ -284,7 +298,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: STOCH EDITION (Turbo Logs)...")
+    print(f"🚀 System Online: SNIPER EDITION (EMA 9 Break)...")
     try:
         await exchange.load_markets()
         
@@ -298,7 +312,6 @@ async def start_scanning(app_state):
                             active_symbols.append(s)
                 
                 app_state.symbols = active_symbols
-                # طباعة عدد العملات المكتشفة
                 print(f"\n🔎 Scan Cycle: Found {len(active_symbols)} coins...", flush=True)
                 
             except Exception as e:
@@ -328,10 +341,10 @@ async def keep_alive_task():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await exchange.load_markets()
-    app.state.sent_signals = {}
-    app.state.active_trades = {}
-    app.state.last_signal_time = {}
-    app.state.stats = {"total": 0, "wins": 0, "losses": 0}
+    app.state.sent_signals = db.sent_signals
+    app.state.active_trades = db.trades
+    app.state.last_signal_time = db.last_signal_time
+    app.state.stats = db.stats
     
     t1 = asyncio.create_task(start_scanning(app.state))
     t2 = asyncio.create_task(monitor_trades(app.state))
