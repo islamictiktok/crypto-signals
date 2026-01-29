@@ -20,11 +20,11 @@ RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# السيولة 10 مليون (مناسبة جداً للهايكن آشي)
+# السيولة 10 مليون
 MIN_VOLUME_USDT = 10_000_000 
 
-# الفريم 5 دقائق (الأسرع والأدق لهذه الاستراتيجية)
-TIMEFRAME = '5m'
+# الفريم 15 دقيقة (الأفضل لتحليل فيبوناتشي)
+TIMEFRAME = '15m'
 
 app = FastAPI()
 
@@ -33,10 +33,10 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (GHOST SNIPER)</h1>
-            <p>Strategy: Heiken Ashi Smoothed + EMA 9 + StochRSI</p>
-            <p>Target: ZERO LAG ENTRY</p>
+        <body style='background:#0d1117;color:#ffd700;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🛡️ Fortress Bot (FIBONACCI GOLD)</h1>
+            <p>Strategy: 4-TF Trend + Fib 0.618 Retracement</p>
+            <p>Status: Active 🟢</p>
         </body>
     </html>
     """
@@ -69,96 +69,104 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Heiken Ashi Sniper) 🔥 الاستراتيجية الجديدة 🔥
+# 3. المنطق (Fibonacci + 4-Trend Filters) 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # جلب البيانات
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
+        # جلب 200 شمعة لحساب الترندات الطويلة بدقة
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=200)
         if not ohlcv: return None, "No Data"
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. حساب شموع الهايكن آشي (Heiken Ashi)
-        # هذه الشموع تنقي الشارت من التذبذب وتعطي الاتجاه الصافي
+        # 1. محاكاة الـ 4 فريمات (Trend Alignment)
+        # EMA 200 = اتجاه 4 ساعات تقريبي
+        # EMA 50 = اتجاه 1 ساعة تقريبي
+        df['ema200'] = df.ta.ema(close='close', length=200)
+        df['ema50'] = df.ta.ema(close='close', length=50)
+        
+        # 2. حساب فيبوناتشي (Fibonacci Retracement)
+        # نحدد القمة والقاع في آخر 100 شمعة
+        lookback = 100
+        recent_high = df['high'].rolling(lookback).max()
+        recent_low = df['low'].rolling(lookback).min()
+        
+        # مستوى 61.8% (النسبة الذهبية)
+        # للصعود: القاع + (الفرق * 0.618) .. لا، الارتداد يكون لأسفل، يعني مستوى الدعم عند 0.618 من الهبوط
+        # FIB LEVEL CALCULATION:
+        # Uptrend Retracement Level (Support): High - ((High - Low) * 0.618) -> مستوى شراء
+        df['fib_buy_level'] = recent_high - ((recent_high - recent_low) * 0.382) # تصحيح 61.8% من القمة
+        
+        # Downtrend Retracement Level (Resistance): Low + ((High - Low) * 0.382) -> مستوى بيع
+        df['fib_sell_level'] = recent_low + ((recent_high - recent_low) * 0.382)
+
+        # 3. مؤشرات الزخم
+        df['rsi'] = df.ta.rsi(close='close', length=14)
+        
+        # 4. الهايكن آشي (للتأكيد النهائي)
         ha = df.ta.ha()
-        df['ha_open'] = ha['HA_open']
         df['ha_close'] = ha['HA_close']
-        df['ha_high'] = ha['HA_high']
-        df['ha_low'] = ha['HA_low']
+        df['ha_open'] = ha['HA_open']
+
+        df['atr'] = df.ta.atr(length=14)
         
-        # 2. EMA 9 (المتوسط السريع جداً)
-        df['ema9'] = df.ta.ema(close='close', length=9)
-        
-        # 3. Stochastic RSI (للتوقيت الدقيق جداً)
-        stoch_rsi = df.ta.stochrsi(close='close', length=14, rsi_length=14, k=3, d=3)
-        # تصحيح أسماء الأعمدة حسب مكتبة pandas_ta
-        k_col = [c for c in stoch_rsi.columns if c.startswith('STOCHRSIk')][0]
-        d_col = [c for c in stoch_rsi.columns if c.startswith('STOCHRSId')][0]
-        df['k'] = stoch_rsi[k_col]
-        df['d'] = stoch_rsi[d_col]
-        
-        # 4. ATR (للستوب)
-        df['atr'] = df.ta.atr(high='high', low='low', close='close', length=14)
-        
-        if pd.isna(df['ema9'].iloc[-1]): return None, "Calc Indicators..."
+        if pd.isna(df['ema200'].iloc[-1]): return None, "Calc Indicators..."
 
         curr = df.iloc[-1]
-        prev = df.iloc[-2]
         
         entry = curr['close']
         atr = curr['atr']
-
-        # === تحليل الهايكن آشي (HA Analysis) ===
-        # شمعة HA خضراء: الإغلاق أعلى من الافتتاح
-        ha_green = curr['ha_close'] > curr['ha_open']
-        # شمعة HA حمراء: الإغلاق أقل من الافتتاح
-        ha_red = curr['ha_close'] < curr['ha_open']
         
-        # === شروط الدخول الصارمة (Sniper Logic) ===
+        # === تحليل الاتجاه العام (4-TF Filter) ===
+        # ترند صاعد قوي: السعر فوق EMA 200 و EMA 50
+        uptrend_strong = (curr['close'] > curr['ema200']) and (curr['close'] > curr['ema50'])
+        # ترند هابط قوي: السعر تحت EMA 200 و EMA 50
+        downtrend_strong = (curr['close'] < curr['ema200']) and (curr['close'] < curr['ema50'])
 
-        # 🟢 LONG (شراء)
-        # 1. شمعة هايكن آشي خضراء (اتجاه صافي)
-        # 2. السعر أغلق فوق EMA 9 (اختراق)
-        # 3. StochRSI في صعود (K يقطع D لأعلى)
-        # 4. لسنا في قمة خطرة (K < 90)
-        if ha_green and (curr['close'] > curr['ema9']) and (curr['k'] > curr['d']) and (curr['k'] < 90):
-            
-            # التأكد أن الحركة بدأت للتو (الشمعة السابقة كانت تحت أو قريبة من EMA)
-            fresh_move = prev['close'] <= prev['ema9'] or (prev['k'] < prev['d'])
-            
-            if fresh_move:
-                sl = entry - (atr * 2.0)
-                risk = entry - sl
-                tp = entry + (risk * 3.0)
-                
-                return ("LONG", entry, tp, sl, int(curr['time'])), f"GHOST BUY (HA Green + EMA Break)"
+        # === تحليل الهايكن آشي ===
+        ha_green = curr['ha_close'] > curr['ha_open']
+        ha_red = curr['ha_close'] < curr['ha_open']
 
-        # 🔴 SHORT (بيع)
-        # 1. شمعة هايكن آشي حمراء
-        # 2. السعر أغلق تحت EMA 9
-        # 3. StochRSI في هبوط (K يقطع D لأسفل)
-        # 4. لسنا في قاع خطر (K > 10)
-        if ha_red and (curr['close'] < curr['ema9']) and (curr['k'] < curr['d']) and (curr['k'] > 10):
+        # 🟢 LONG STRATEGY (شراء من المنطقة الذهبية)
+        # 1. الاتجاه العام صاعد (فوق EMA 200)
+        # 2. السعر صحح (نزل) حتى لمس أو اقترب من مستوى فيبوناتشي
+        # 3. ظهرت شمعة هايكن آشي خضراء (بداية الارتداد)
+        # 4. RSI ليس متشبعاً شرائياً (تحت 70)
+        
+        dist_to_fib_buy = abs(curr['close'] - curr['fib_buy_level']) / curr['close'] * 100
+        in_golden_zone_buy = dist_to_fib_buy < 1.5 # السعر قريب 1.5% من مستوى الفيبو
+        
+        if uptrend_strong and in_golden_zone_buy and ha_green and (curr['rsi'] < 70):
+            sl = entry - (atr * 2.0)
+            risk = entry - sl
+            tp = entry + (risk * 3.0) # هدف فيبوناتشي عادة كبير
             
-            # التأكد أن الحركة بدأت للتو
-            fresh_move = prev['close'] >= prev['ema9'] or (prev['k'] > prev['d'])
+            return ("LONG", entry, tp, sl, int(curr['time'])), f"FIBO GOLDEN BOUNCE (Trend: UP)"
+
+        # 🔴 SHORT STRATEGY (بيع من المنطقة الذهبية)
+        # 1. الاتجاه العام هابط (تحت EMA 200)
+        # 2. السعر صحح (صعد) حتى لمس مستوى المقاومة فيبوناتشي
+        # 3. ظهرت شمعة حمراء
+        
+        dist_to_fib_sell = abs(curr['close'] - curr['fib_sell_level']) / curr['close'] * 100
+        in_golden_zone_sell = dist_to_fib_sell < 1.5
+        
+        if downtrend_strong and in_golden_zone_sell and ha_red and (curr['rsi'] > 30):
+            sl = entry + (atr * 2.0)
+            risk = sl - entry
+            tp = entry - (risk * 3.0)
             
-            if fresh_move:
-                sl = entry + (atr * 2.0)
-                risk = sl - entry
-                tp = entry - (risk * 3.0)
-                
-                return ("SHORT", entry, tp, sl, int(curr['time'])), f"GHOST SELL (HA Red + EMA Break)"
+            return ("SHORT", entry, tp, sl, int(curr['time'])), f"FIBO GOLDEN REJECTION (Trend: DOWN)"
 
         # تقارير الرفض للوغز
-        dist = (curr['close'] - curr['ema9']) / curr['ema9'] * 100
-        
-        if ha_green and not (curr['close'] > curr['ema9']): return None, f"HA Green but Below EMA9"
-        if ha_red and not (curr['close'] < curr['ema9']): return None, f"HA Red but Above EMA9"
-        if not (curr['k'] > curr['d']) and side == "LONG": return None, "StochRSI not crossing up"
-        
-        return None, f"No Signal (HA Trend: {'Green' if ha_green else 'Red'})"
+        if uptrend_strong and not in_golden_zone_buy: 
+            return None, f"Uptrend but far from Fib ({dist_to_fib_buy:.1f}%)"
+        if downtrend_strong and not in_golden_zone_sell: 
+            return None, f"Downtrend but far from Fib ({dist_to_fib_sell:.1f}%)"
+        if not uptrend_strong and not downtrend_strong:
+            return None, "Choppy Market (Between EMAs)"
+            
+        return None, "Waiting Setup..."
 
     except Exception as e:
         return None, f"Error: {str(e)}"
@@ -195,12 +203,16 @@ db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    # تقليل الحظر لـ 20 دقيقة فقط لضمان عدم تفويت الموجات المتتالية السريعة
-    if time.time() - last_sig_time < 1200: return 
+    # فاصل زمني 30 دقيقة
+    if time.time() - last_sig_time < 1800: return 
     if symbol in app_state.active_trades: return
 
     async with sem:
-        logic_res, reason = await get_signal_logic(symbol)
+        # 🔥 تم إصلاح المتغيرات هنا لاستلام السبب وعرضه 🔥
+        result = await get_signal_logic(symbol)
+        if not result: return # حماية من الخطأ
+        
+        logic_res, reason = result
         
         if logic_res:
             side, entry, tp, sl, ts = logic_res
@@ -213,12 +225,12 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🟢 <b>BUY (Ghost)</b>" if side == "LONG" else "🔴 <b>SELL (Ghost)</b>"
+                side_text = "🟢 <b>BUY (Fibo)</b>" if side == "LONG" else "🔴 <b>SELL (Fibo)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"👻 <code>{clean_name}</code>\n"
+                    f"✨ <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
                     f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
@@ -306,7 +318,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: GHOST SNIPER (Heiken Ashi + EMA9)...")
+    print(f"🚀 System Online: FIBONACCI FORTRESS (V140)...")
     try:
         await exchange.load_markets()
         
