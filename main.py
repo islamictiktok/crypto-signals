@@ -20,10 +20,10 @@ RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 
-# السيولة 20 مليون (لضمان مصداقية VWAP)
+# السيولة 20 مليون
 MIN_VOLUME_USDT = 20_000_000 
 
-# الفريم 15 دقيقة (المثالي لدمج الاتجاه مع السيولة)
+# الفريم 15 دقيقة
 TIMEFRAME = '15m'
 
 app = FastAPI()
@@ -34,9 +34,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (OMNI-HYBRID V250)</h1>
-            <p>Strategy: EMA200 + VWAP (Inst.) + MFI (Flow)</p>
-            <p>Status: Active (High Probability) 🟢</p>
+            <h1>🛡️ Fortress Bot (OMNI-HYBRID FIXED)</h1>
+            <p>Strategy: EMA200 + VWAP + MFI</p>
+            <p>Status: Active (Technical Fixed) 🟢</p>
         </body>
     </html>
     """
@@ -69,29 +69,40 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Hybrid Omni Strategy) 🔥 الاستراتيجية الشاملة 🔥
+# 3. المنطق (Omni-Hybrid) 🔥 تم الإصلاح التقني هنا 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # جلب البيانات (200 شمعة لحساب الاتجاه العام بدقة)
+        # جلب البيانات
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=200)
         if not ohlcv: return None, "No Data"
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 1. التحليل الفني (Technical - Trend)
-        # EMA 200: يحدد الاتجاه طويل المدى
+        # 🔥 إصلاح 1: تعيين الفهرس كـ DatetimeIndex ليعمل VWAP بشكل صحيح 🔥
+        # نحتفظ بعمود 'time' كما هو (int) للاستخدام لاحقاً، وننشئ الفهرس من نسخة محولة
+        df.index = pd.to_datetime(df['time'], unit='ms')
+        
+        # 1. التحليل الفني (Trend)
         df['ema200'] = df.ta.ema(close='close', length=200)
-        # EMA 9 & 21: للتقاطعات السريعة
         df['ema9'] = df.ta.ema(close='close', length=9)
         df['ema21'] = df.ta.ema(close='close', length=21)
         
-        # 2. التحليل الأساسي/المؤسساتي (Fundamental - Valuation)
-        # VWAP: متوسط السعر المرجح بالحجم (مؤشر البنوك)
-        df['vwap'] = df.ta.vwap(high='high', low='low', close='close', volume='vol')
+        # 2. التحليل الأساسي/المؤسساتي (Valuation)
+        # الآن VWAP سيعمل لأن الفهرس صحيح (datetime)
+        vwap = df.ta.vwap(high='high', low='low', close='close', volume='vol')
         
-        # 3. تحليل السيولة (Flow - Sentiment)
-        # MFI (Money Flow Index): أفضل من RSI لأنه يحسب الكميات
+        # التأكد من أن vwap ليس None وأنه Series
+        if vwap is not None:
+             # إذا رجع DataFrame (يحدث أحياناً)، نأخذ العمود الأول
+            if isinstance(vwap, pd.DataFrame):
+                df['vwap'] = vwap.iloc[:, 0]
+            else:
+                df['vwap'] = vwap
+        else:
+            return None, "VWAP Calc Error"
+        
+        # 3. تحليل السيولة (Flow)
         df['mfi'] = df.ta.mfi(high='high', low='low', close='close', volume='vol', length=14)
         
         # ATR للستوب
@@ -107,41 +118,26 @@ async def get_signal_logic(symbol):
         
         # === المنطق الشامل (The Logic) ===
         
-        # 🟢 LONG STRATEGY (شراء)
-        # 1. السعر فوق EMA 200 (نحن في سوق صاعد فنياً)
+        # 🟢 LONG STRATEGY
         tech_bullish = curr['close'] > curr['ema200']
-        
-        # 2. السعر فوق VWAP (المؤسسات تشتري والسعر عادل أو رخيص بالنسبة لهم)
         fund_bullish = curr['close'] > curr['vwap']
-        
-        # 3. MFI فوق 50 (يوجد تدفق أموال شرائية حقيقية)
         flow_bullish = curr['mfi'] > 50
         
-        # 4. الزناد: تقاطع EMA 9 فوق EMA 21 (بدأ الزخم الآن)
         trigger_buy = (prev['ema9'] < prev['ema21']) and (curr['ema9'] > curr['ema21'])
-        # أو إذا كانوا مرتبين بالفعل والسعر يرتد من VWAP
         alignment_buy = (curr['ema9'] > curr['ema21']) and (curr['low'] <= curr['ema9'])
         
         if tech_bullish and fund_bullish and flow_bullish and (trigger_buy or alignment_buy):
-            # التأكد أننا لسنا في قمة خطيرة (MFI < 80)
             if curr['mfi'] < 85:
                 sl = min(curr['ema21'], curr['vwap']) - (atr * 1.0)
                 risk = entry - sl
                 tp = entry + (risk * 2.0)
-                
-                return ("LONG", entry, tp, sl, int(curr['time'])), f"OMNI BUY (Inst. Support + Money Flow)"
+                return ("LONG", entry, tp, sl, int(curr['time'])), f"OMNI BUY (Inst. Support + Flow)"
 
-        # 🔴 SHORT STRATEGY (بيع)
-        # 1. السعر تحت EMA 200 (سوق هابط)
+        # 🔴 SHORT STRATEGY
         tech_bearish = curr['close'] < curr['ema200']
-        
-        # 2. السعر تحت VWAP (المؤسسات تبيع)
         fund_bearish = curr['close'] < curr['vwap']
-        
-        # 3. MFI تحت 50 (خروج سيولة)
         flow_bearish = curr['mfi'] < 50
         
-        # 4. الزناد: تقاطع سلبي
         trigger_sell = (prev['ema9'] > prev['ema21']) and (curr['ema9'] < curr['ema21'])
         alignment_sell = (curr['ema9'] < curr['ema21']) and (curr['high'] >= curr['ema9'])
         
@@ -150,15 +146,13 @@ async def get_signal_logic(symbol):
                 sl = max(curr['ema21'], curr['vwap']) + (atr * 1.0)
                 risk = sl - entry
                 tp = entry - (risk * 2.0)
-                
                 return ("SHORT", entry, tp, sl, int(curr['time'])), f"OMNI SELL (Inst. Resist + Outflow)"
 
         # تقارير الرفض
-        if tech_bullish and not fund_bullish: return None, "Tech Bullish but Price below VWAP (Weak)"
-        if fund_bullish and not tech_bullish: return None, "Price above VWAP but below EMA200 (Counter Trend)"
-        if not flow_bullish and tech_bullish: return None, "Trend Up but No Volume (Fakeout Risk)"
+        if tech_bullish and not fund_bullish: return None, "Price > EMA200 but < VWAP (Weak)"
+        if fund_bullish and not tech_bullish: return None, "Price > VWAP but < EMA200 (Counter Trend)"
         
-        return None, "Scanning for Confluence..."
+        return None, "Scanning..."
 
     except Exception as e:
         return None, f"Error: {str(e)}"
@@ -195,12 +189,13 @@ db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    # فاصل زمني 30 دقيقة
     if time.time() - last_sig_time < 1800: return 
     if symbol in app_state.active_trades: return
 
     async with sem:
-        await asyncio.sleep(0.1)
+        # 🔥 إصلاح 2: زيادة التأخير إلى 0.5 ثانية لحل مشكلة الحظر (Error 510) 🔥
+        await asyncio.sleep(0.5)
+        
         result = await get_signal_logic(symbol)
         if not result: return 
         
@@ -310,7 +305,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: OMNI-HYBRID STRATEGY (V250)...")
+    print(f"🚀 System Online: OMNI-HYBRID FIXED (V251)...")
     try:
         await exchange.load_markets()
         
