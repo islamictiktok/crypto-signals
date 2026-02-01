@@ -23,7 +23,7 @@ BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 # السيولة 20 مليون
 MIN_VOLUME_USDT = 20_000_000 
 
-# الفريم 15 دقيقة
+# فريم التنفيذ هو 15 دقيقة (كما في الاستراتيجية)
 TIMEFRAME = '15m'
 
 app = FastAPI()
@@ -34,9 +34,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (OMNI-HYBRID FIXED)</h1>
-            <p>Strategy: EMA200 + VWAP + MFI</p>
-            <p>Status: Active (Technical Fixed) 🟢</p>
+            <h1>🛡️ Fortress Bot (4H OPEN RETEST)</h1>
+            <p>Strategy: 4H Trend (Open Price) + 15m Entry</p>
+            <p>Status: Active (Price Action) 🟢</p>
         </body>
     </html>
     """
@@ -69,90 +69,96 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Omni-Hybrid) 🔥 تم الإصلاح التقني هنا 🔥
+# 3. المنطق (4H Open Price Strategy) 🔥 استراتيجية الصور 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # جلب البيانات
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=200)
-        if not ohlcv: return None, "No Data"
+        # ----------------------------------------------------
+        # 1. تحليل الفريم الكبير (4H) - تحديد الاتجاه والمستوى
+        # ----------------------------------------------------
+        # نجلب آخر شمعتين للتأكد من إغلاق الشمعة السابقة
+        ohlcv_4h = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=5)
+        if not ohlcv_4h: return None, "No 4H Data"
         
-        df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        df_4h = pd.DataFrame(ohlcv_4h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # 🔥 إصلاح 1: تعيين الفهرس كـ DatetimeIndex ليعمل VWAP بشكل صحيح 🔥
-        # نحتفظ بعمود 'time' كما هو (int) للاستخدام لاحقاً، وننشئ الفهرس من نسخة محولة
-        df.index = pd.to_datetime(df['time'], unit='ms')
+        # نأخذ الشمعة ما قبل الأخيرة (لأن الأخيرة لم تغلق بعد)
+        # الاستراتيجية تعتمد على سعر افتتاح الشمعة القوية المكتملة
+        candle_4h = df_4h.iloc[-2] 
         
-        # 1. التحليل الفني (Trend)
-        df['ema200'] = df.ta.ema(close='close', length=200)
-        df['ema9'] = df.ta.ema(close='close', length=9)
-        df['ema21'] = df.ta.ema(close='close', length=21)
+        open_4h = candle_4h['open']
+        close_4h = candle_4h['close']
+        high_4h = candle_4h['high']
+        low_4h = candle_4h['low']
         
-        # 2. التحليل الأساسي/المؤسساتي (Valuation)
-        # الآن VWAP سيعمل لأن الفهرس صحيح (datetime)
-        vwap = df.ta.vwap(high='high', low='low', close='close', volume='vol')
+        # تحديد قوة الشمعة (هل هي شمعة قوية؟)
+        # الشمعة القوية يجب أن يكون جسمها أكبر من 50% من طولها الكلي (عشان نتجنب شمعات الدوجي والحيرة)
+        body_size = abs(close_4h - open_4h)
+        total_range = high_4h - low_4h
+        if total_range == 0: return None, "Flat Candle"
         
-        # التأكد من أن vwap ليس None وأنه Series
-        if vwap is not None:
-             # إذا رجع DataFrame (يحدث أحياناً)، نأخذ العمود الأول
-            if isinstance(vwap, pd.DataFrame):
-                df['vwap'] = vwap.iloc[:, 0]
-            else:
-                df['vwap'] = vwap
-        else:
-            return None, "VWAP Calc Error"
+        is_strong_candle = (body_size / total_range) > 0.5
         
-        # 3. تحليل السيولة (Flow)
-        df['mfi'] = df.ta.mfi(high='high', low='low', close='close', volume='vol', length=14)
-        
-        # ATR للستوب
-        df['atr'] = df.ta.atr(length=14)
-        
-        if pd.isna(df['ema200'].iloc[-1]) or pd.isna(df['vwap'].iloc[-1]): return None, "Calc Indicators..."
+        if not is_strong_candle:
+            return None, "Weak 4H Candle (No Direction)"
 
-        curr = df.iloc[-1]
-        prev = df.iloc[-2]
+        # تحديد الاتجاه بناءً على شمعة 4 ساعات
+        trend_bullish = close_4h > open_4h # شمعة خضراء
+        trend_bearish = close_4h < open_4h # شمعة حمراء
         
-        entry = curr['close']
-        atr = curr['atr']
-        
-        # === المنطق الشامل (The Logic) ===
-        
-        # 🟢 LONG STRATEGY
-        tech_bullish = curr['close'] > curr['ema200']
-        fund_bullish = curr['close'] > curr['vwap']
-        flow_bullish = curr['mfi'] > 50
-        
-        trigger_buy = (prev['ema9'] < prev['ema21']) and (curr['ema9'] > curr['ema21'])
-        alignment_buy = (curr['ema9'] > curr['ema21']) and (curr['low'] <= curr['ema9'])
-        
-        if tech_bullish and fund_bullish and flow_bullish and (trigger_buy or alignment_buy):
-            if curr['mfi'] < 85:
-                sl = min(curr['ema21'], curr['vwap']) - (atr * 1.0)
-                risk = entry - sl
-                tp = entry + (risk * 2.0)
-                return ("LONG", entry, tp, sl, int(curr['time'])), f"OMNI BUY (Inst. Support + Flow)"
+        # مستوى الاهتمام (POI) هو سعر الافتتاح
+        level_of_interest = open_4h
 
-        # 🔴 SHORT STRATEGY
-        tech_bearish = curr['close'] < curr['ema200']
-        fund_bearish = curr['close'] < curr['vwap']
-        flow_bearish = curr['mfi'] < 50
+        # ----------------------------------------------------
+        # 2. تحليل الفريم الصغير (15m) - انتظار التصحيح والدخول
+        # ----------------------------------------------------
+        ohlcv_15m = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=10)
+        if not ohlcv_15m: return None, "No 15m Data"
         
-        trigger_sell = (prev['ema9'] > prev['ema21']) and (curr['ema9'] < curr['ema21'])
-        alignment_sell = (curr['ema9'] < curr['ema21']) and (curr['high'] >= curr['ema9'])
+        df_15m = pd.DataFrame(ohlcv_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        curr_15m = df_15m.iloc[-1]
         
-        if tech_bearish and fund_bearish and flow_bearish and (trigger_sell or alignment_sell):
-            if curr['mfi'] > 15:
-                sl = max(curr['ema21'], curr['vwap']) + (atr * 1.0)
-                risk = sl - entry
-                tp = entry - (risk * 2.0)
-                return ("SHORT", entry, tp, sl, int(curr['time'])), f"OMNI SELL (Inst. Resist + Outflow)"
+        # حساب ATR لتحديد الهدف والستوب
+        df_15m['atr'] = df_15m.ta.atr(length=14)
+        atr = df_15m['atr'].iloc[-1]
+        if pd.isna(atr): atr = curr_15m['close'] * 0.01
+
+        current_price = curr_15m['close']
+        
+        # تحديد منطقة التسامح (Tolerance)
+        # السعر نادراً ما يلمس الخط بالمليمتر، نعطي مجال بسيط (مثلاً 0.2%)
+        tolerance = level_of_interest * 0.002
+        
+        # === سيناريو الشراء (Long Setup) ===
+        if trend_bullish:
+            # الشرط: 4 ساعات صاعدة، وسعر 15 دقيقة الحالي عاد ونزل ليلمس سعر افتتاح 4 ساعات
+            # يعني Low الشمعة الحالية أو السابقة لامس المنطقة
+            dist_to_level = abs(curr_15m['low'] - level_of_interest)
+            
+            # هل نحن قريبون جداً من مستوى الافتتاح؟ (إعادة اختبار)
+            # وهل السعر الحالي أعلى قليلاً أو عند المستوى (ارتداد)
+            if dist_to_level <= tolerance:
+                sl = level_of_interest - (atr * 2.0) # ستوب تحت منطقة الدعم
+                risk = level_of_interest - sl
+                tp = level_of_interest + (risk * 3.0) # هدف 3 أضعاف
+                
+                return ("LONG", level_of_interest, tp, sl, int(curr_15m['time'])), f"4H OPEN RETEST (Bullish)"
+
+        # === سيناريو البيع (Sell Setup) ===
+        if trend_bearish:
+            # الشرط: 4 ساعات هابطة، وسعر 15 دقيقة صعد ليلمس سعر افتتاح 4 ساعات
+            dist_to_level = abs(curr_15m['high'] - level_of_interest)
+            
+            if dist_to_level <= tolerance:
+                sl = level_of_interest + (atr * 2.0) # ستوب فوق منطقة المقاومة
+                risk = sl - level_of_interest
+                tp = level_of_interest - (risk * 3.0)
+                
+                return ("SHORT", level_of_interest, tp, sl, int(curr_15m['time'])), f"4H OPEN RETEST (Bearish)"
 
         # تقارير الرفض
-        if tech_bullish and not fund_bullish: return None, "Price > EMA200 but < VWAP (Weak)"
-        if fund_bullish and not tech_bullish: return None, "Price > VWAP but < EMA200 (Counter Trend)"
-        
-        return None, "Scanning..."
+        dist_pct = (current_price - level_of_interest) / level_of_interest * 100
+        return None, f"Waiting Retest of 4H Open ({dist_pct:.2f}% away)"
 
     except Exception as e:
         return None, f"Error: {str(e)}"
@@ -189,12 +195,13 @@ db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
+    # فاصل زمني 30 دقيقة
     if time.time() - last_sig_time < 1800: return 
     if symbol in app_state.active_trades: return
 
     async with sem:
-        # 🔥 إصلاح 2: زيادة التأخير إلى 0.5 ثانية لحل مشكلة الحظر (Error 510) 🔥
-        await asyncio.sleep(0.5)
+        # تأخير بسيط لمنع الحظر
+        await asyncio.sleep(0.2)
         
         result = await get_signal_logic(symbol)
         if not result: return 
@@ -212,15 +219,15 @@ async def safe_check(symbol, app_state):
                 
                 clean_name = symbol.split(':')[0]
                 leverage = "Cross 20x"
-                side_text = "🛡️ <b>BUY (Omni)</b>" if side == "LONG" else "🛡️ <b>SELL (Omni)</b>"
+                side_text = "🛡️ <b>BUY (4H Open)</b>" if side == "LONG" else "🛡️ <b>SELL (4H Open)</b>"
                 
                 sl_pct = abs(entry - sl) / entry * 100
                 
                 msg = (
-                    f"⚔️ <code>{clean_name}</code>\n"
+                    f"🧱 <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
-                    f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
+                    f"⚡ <b>Entry (4H Open):</b> <code>{format_price(entry)}</code>\n"
                     f"──────────────\n"
                     f"🏆 <b>TARGET:</b> <code>{format_price(tp)}</code>\n"
                     f"──────────────\n"
@@ -305,7 +312,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: OMNI-HYBRID FIXED (V251)...")
+    print(f"🚀 System Online: 4H OPEN RETEST (V260)...")
     try:
         await exchange.load_markets()
         
