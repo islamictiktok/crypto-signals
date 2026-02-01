@@ -23,7 +23,7 @@ BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 # السيولة 20 مليون
 MIN_VOLUME_USDT = 20_000_000 
 
-# فريم التنفيذ هو 15 دقيقة (كما في الاستراتيجية)
+# فريم التنفيذ 15 دقيقة
 TIMEFRAME = '15m'
 
 app = FastAPI()
@@ -34,9 +34,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (4H OPEN RETEST)</h1>
+            <h1>🛡️ Fortress Bot (4H OPEN RETEST V261)</h1>
             <p>Strategy: 4H Trend (Open Price) + 15m Entry</p>
-            <p>Status: Active (Price Action) 🟢</p>
+            <p>Status: Active (Optimized & Fixed) 🟢</p>
         </body>
     </html>
     """
@@ -69,21 +69,19 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (4H Open Price Strategy) 🔥 استراتيجية الصور 🔥
+# 3. المنطق (4H Open Price Strategy) 🔥 تم الإصلاح والتحسين 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
         # ----------------------------------------------------
-        # 1. تحليل الفريم الكبير (4H) - تحديد الاتجاه والمستوى
+        # 1. تحليل الفريم الكبير (4H)
         # ----------------------------------------------------
-        # نجلب آخر شمعتين للتأكد من إغلاق الشمعة السابقة
         ohlcv_4h = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=5)
         if not ohlcv_4h: return None, "No 4H Data"
         
         df_4h = pd.DataFrame(ohlcv_4h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # نأخذ الشمعة ما قبل الأخيرة (لأن الأخيرة لم تغلق بعد)
-        # الاستراتيجية تعتمد على سعر افتتاح الشمعة القوية المكتملة
+        # نأخذ الشمعة ما قبل الأخيرة (المكتملة)
         candle_4h = df_4h.iloc[-2] 
         
         open_4h = candle_4h['open']
@@ -91,74 +89,73 @@ async def get_signal_logic(symbol):
         high_4h = candle_4h['high']
         low_4h = candle_4h['low']
         
-        # تحديد قوة الشمعة (هل هي شمعة قوية؟)
-        # الشمعة القوية يجب أن يكون جسمها أكبر من 50% من طولها الكلي (عشان نتجنب شمعات الدوجي والحيرة)
+        # تحسين شرط القوة: خففنا النسبة من 0.5 إلى 0.3 لزيادة الفرص
         body_size = abs(close_4h - open_4h)
         total_range = high_4h - low_4h
         if total_range == 0: return None, "Flat Candle"
         
-        is_strong_candle = (body_size / total_range) > 0.5
+        is_strong_candle = (body_size / total_range) > 0.3 # تحسين: 30% كافي
         
         if not is_strong_candle:
-            return None, "Weak 4H Candle (No Direction)"
+            return None, "Weak 4H Candle (Wait for Momentum)"
 
-        # تحديد الاتجاه بناءً على شمعة 4 ساعات
-        trend_bullish = close_4h > open_4h # شمعة خضراء
-        trend_bearish = close_4h < open_4h # شمعة حمراء
+        trend_bullish = close_4h > open_4h
+        trend_bearish = close_4h < open_4h
         
-        # مستوى الاهتمام (POI) هو سعر الافتتاح
         level_of_interest = open_4h
 
         # ----------------------------------------------------
-        # 2. تحليل الفريم الصغير (15m) - انتظار التصحيح والدخول
+        # 2. تحليل الفريم الصغير (15m)
         # ----------------------------------------------------
-        ohlcv_15m = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=10)
+        ohlcv_15m = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=20)
         if not ohlcv_15m: return None, "No 15m Data"
         
         df_15m = pd.DataFrame(ohlcv_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         curr_15m = df_15m.iloc[-1]
         
-        # حساب ATR لتحديد الهدف والستوب
-        df_15m['atr'] = df_15m.ta.atr(length=14)
+        # 🔥 إصلاح تقني: ATR Calculation Fix 🔥
+        atr_val = df_15m.ta.atr(length=14)
+        if isinstance(atr_val, pd.DataFrame):
+            df_15m['atr'] = atr_val.iloc[:, 0]
+        else:
+            df_15m['atr'] = atr_val
+            
         atr = df_15m['atr'].iloc[-1]
         if pd.isna(atr): atr = curr_15m['close'] * 0.01
 
-        current_price = curr_15m['close']
+        # توسيع منطقة التسامح قليلاً (0.3%) لضمان التقاط السعر
+        tolerance = level_of_interest * 0.003 
         
-        # تحديد منطقة التسامح (Tolerance)
-        # السعر نادراً ما يلمس الخط بالمليمتر، نعطي مجال بسيط (مثلاً 0.2%)
-        tolerance = level_of_interest * 0.002
-        
-        # === سيناريو الشراء (Long Setup) ===
+        # === LONG SETUP ===
         if trend_bullish:
-            # الشرط: 4 ساعات صاعدة، وسعر 15 دقيقة الحالي عاد ونزل ليلمس سعر افتتاح 4 ساعات
-            # يعني Low الشمعة الحالية أو السابقة لامس المنطقة
+            # السعر عاد للمنطقة (Retest)
             dist_to_level = abs(curr_15m['low'] - level_of_interest)
             
-            # هل نحن قريبون جداً من مستوى الافتتاح؟ (إعادة اختبار)
-            # وهل السعر الحالي أعلى قليلاً أو عند المستوى (ارتداد)
-            if dist_to_level <= tolerance:
-                sl = level_of_interest - (atr * 2.0) # ستوب تحت منطقة الدعم
+            # شرط إضافي: السعر الحالي يجب أن يكون فوق المستوى (ارتداد)
+            is_bouncing = curr_15m['close'] >= level_of_interest
+            
+            if (dist_to_level <= tolerance) and is_bouncing:
+                sl = level_of_interest - (atr * 2.0)
                 risk = level_of_interest - sl
-                tp = level_of_interest + (risk * 3.0) # هدف 3 أضعاف
+                tp = level_of_interest + (risk * 3.0)
                 
                 return ("LONG", level_of_interest, tp, sl, int(curr_15m['time'])), f"4H OPEN RETEST (Bullish)"
 
-        # === سيناريو البيع (Sell Setup) ===
+        # === SHORT SETUP ===
         if trend_bearish:
-            # الشرط: 4 ساعات هابطة، وسعر 15 دقيقة صعد ليلمس سعر افتتاح 4 ساعات
             dist_to_level = abs(curr_15m['high'] - level_of_interest)
             
-            if dist_to_level <= tolerance:
-                sl = level_of_interest + (atr * 2.0) # ستوب فوق منطقة المقاومة
+            is_rejecting = curr_15m['close'] <= level_of_interest
+            
+            if (dist_to_level <= tolerance) and is_rejecting:
+                sl = level_of_interest + (atr * 2.0)
                 risk = sl - level_of_interest
                 tp = level_of_interest - (risk * 3.0)
                 
                 return ("SHORT", level_of_interest, tp, sl, int(curr_15m['time'])), f"4H OPEN RETEST (Bearish)"
 
-        # تقارير الرفض
-        dist_pct = (current_price - level_of_interest) / level_of_interest * 100
-        return None, f"Waiting Retest of 4H Open ({dist_pct:.2f}% away)"
+        dist_pct = (curr_15m['close'] - level_of_interest) / level_of_interest * 100
+        return None, f"Waiting Retest (Gap: {dist_pct:.2f}%)"
 
     except Exception as e:
         return None, f"Error: {str(e)}"
@@ -195,13 +192,13 @@ db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    # فاصل زمني 30 دقيقة
-    if time.time() - last_sig_time < 1800: return 
+    # تقليل وقت الانتظار لـ 15 دقيقة
+    if time.time() - last_sig_time < 900: return 
     if symbol in app_state.active_trades: return
 
     async with sem:
-        # تأخير بسيط لمنع الحظر
-        await asyncio.sleep(0.2)
+        # 🔥 إصلاح 2: زيادة التأخير لـ 0.3 ثانية لمنع الحظر 🔥
+        await asyncio.sleep(0.3)
         
         result = await get_signal_logic(symbol)
         if not result: return 
@@ -227,7 +224,7 @@ async def safe_check(symbol, app_state):
                     f"🧱 <code>{clean_name}</code>\n"
                     f"{side_text} | {leverage}\n"
                     f"──────────────\n"
-                    f"⚡ <b>Entry (4H Open):</b> <code>{format_price(entry)}</code>\n"
+                    f"⚡ <b>Entry (Retest):</b> <code>{format_price(entry)}</code>\n"
                     f"──────────────\n"
                     f"🏆 <b>TARGET:</b> <code>{format_price(tp)}</code>\n"
                     f"──────────────\n"
@@ -312,7 +309,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: 4H OPEN RETEST (V260)...")
+    print(f"🚀 System Online: 4H OPEN RETEST (V261 Fixed)...")
     try:
         await exchange.load_markets()
         
