@@ -23,7 +23,7 @@ BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 # السيولة 20 مليون
 MIN_VOLUME_USDT = 20_000_000 
 
-# فريم التأكيد 15 دقيقة
+# فريم التنفيذ (الدخول) يبقى 15 دقيقة
 TIMEFRAME = '15m'
 
 app = FastAPI()
@@ -34,9 +34,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🦁 Fortress Bot (V310 SWEEP)</h1>
-            <p>Strategy: 4H Open Sweep & Reclaim</p>
-            <p>Status: Active (20x Speed) 🟢</p>
+            <h1>🛡️ Fortress Bot (V370 - 6H POWER)</h1>
+            <p>Strategy: 6H Open Retest + Balanced Target</p>
+            <p>Status: Active (20x Turbo) 🟢</p>
         </body>
     </html>
     """
@@ -69,88 +69,79 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (4H Open Sweep & Reclaim) 🔥 الاستراتيجية المطلوبة 🔥
+# 3. المنطق (V370 - 6H Strategy) 🔥 التغيير: استخدام فريم 6 ساعات 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
         # ----------------------------------------------------
-        # 1. تحليل الفريم الكبير (4H) - تحديد الملعب
+        # 1. تحليل الفريم الكبير (6H) - أقوى من 4 ساعات
         # ----------------------------------------------------
-        # نجلب بيانات كافية
-        ohlcv_4h = await exchange.fetch_ohlcv(symbol, timeframe='4h', limit=5)
-        if not ohlcv_4h: return None, "No 4H Data"
+        # نطلب بيانات 6 ساعات بدلاً من 4
+        ohlcv_6h = await exchange.fetch_ohlcv(symbol, timeframe='6h', limit=5)
+        if not ohlcv_6h: return None, "No 6H Data"
         
-        df_4h = pd.DataFrame(ohlcv_4h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        df_6h = pd.DataFrame(ohlcv_6h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # نأخذ الشمعة ما قبل الأخيرة (المكتملة)
-        candle_4h = df_4h.iloc[-2]
+        candle_6h = df_6h.iloc[-2] # الشمعة المكتملة
         
-        open_4h = candle_4h['open']
-        close_4h = candle_4h['close']
-        high_4h = candle_4h['high']
-        low_4h = candle_4h['low']
+        open_6h = candle_6h['open']
+        close_6h = candle_6h['close']
+        high_6h = candle_6h['high']
+        low_6h = candle_6h['low']
         
-        # تحديد الاتجاه بناءً على لون الشمعة
-        is_bullish_4h = close_4h > open_4h
-        is_bearish_4h = close_4h < open_4h
+        is_bullish_6h = close_6h > open_6h
+        is_bearish_6h = close_6h < open_6h
         
         # ----------------------------------------------------
-        # 2. تحليل الفريم الصغير (15m) - انتظار سحب السيولة (Sweep)
+        # 2. تحليل الفريم الصغير (15m)
         # ----------------------------------------------------
-        ohlcv_15m = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=5)
+        ohlcv_15m = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=10)
         if not ohlcv_15m: return None, "No 15m Data"
         
         df_15m = pd.DataFrame(ohlcv_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         curr_15m = df_15m.iloc[-1]
         
         entry_price = curr_15m['close']
+        
+        # منطقة التسامح (1%)
+        tolerance = open_6h * 0.01
 
         # === سيناريو الشراء (Long Setup) ===
-        # الشروط:
-        # 1. شمعة 4 ساعات صاعدة (خضراء).
-        # 2. شمعة 15 دقيقة الحالية:
-        #    - ذيلها السفلي نزل تحت سعر افتتاح 4 ساعات (Low < Open_4H) -> سحب سيولة
-        #    - سعرها الحالي فوق سعر افتتاح 4 ساعات (Close > Open_4H) -> تأكيد القوة
-        
-        if is_bullish_4h:
-            sweep_condition = curr_15m['low'] < open_4h
-            reclaim_condition = curr_15m['close'] > open_4h
+        if is_bullish_6h:
+            in_zone = curr_15m['low'] <= (open_6h + tolerance)
+            is_green_candle = curr_15m['close'] > curr_15m['open']
             
-            if sweep_condition and reclaim_condition:
-                # الأهداف والستوب كما طلبت
-                sl = low_4h        # الستوب: ذيل شمعة 4 ساعات
-                tp = close_4h      # الهدف: إغلاق شمعة 4 ساعات
+            # التأكد أن السعر لم يكسر ذيل الـ 6 ساعات
+            valid_structure = curr_15m['close'] > low_6h
+            
+            if in_zone and is_green_candle and valid_structure:
+                sl = low_6h        # الستوب: ذيل شمعة 6 ساعات
+                tp = close_6h      # الهدف: إغلاق شمعة 6 ساعات
                 
-                # التأكد من أن الهدف منطقي (أعلى من الدخول) والستوب آمن
-                if tp > entry_price and sl < entry_price:
-                    # حساب نسبة المخاطرة للتوضيح
-                    risk_pct = (entry_price - sl) / entry_price * 100
-                    if risk_pct < 10: # أمان: لا ندخل إذا الستوب بعيد جداً (أكثر من 10%)
-                        return ("LONG", entry_price, tp, sl, int(curr_15m['time'])), f"SWEEP & RECLAIM (Bullish)"
+                # فلتر الربح (1% صافي = 20% بالرافعة)
+                raw_gain_pct = ((tp - entry_price) / entry_price) * 100
+                
+                if raw_gain_pct >= 1.0: 
+                    return ("LONG", entry_price, tp, sl, int(curr_15m['time'])), f"6H POWER SETUP (Target: {raw_gain_pct:.2f}%)"
 
         # === سيناريو البيع (Short Setup) ===
-        # الشروط:
-        # 1. شمعة 4 ساعات هابطة (حمراء).
-        # 2. شمعة 15 دقيقة الحالية:
-        #    - ذيلها العلوي طلع فوق سعر افتتاح 4 ساعات (High > Open_4H) -> سحب سيولة
-        #    - سعرها الحالي تحت سعر افتتاح 4 ساعات (Close < Open_4H) -> تأكيد الهبوط
-        
-        if is_bearish_4h:
-            sweep_condition = curr_15m['high'] > open_4h
-            reclaim_condition = curr_15m['close'] < open_4h
+        if is_bearish_6h:
+            in_zone = curr_15m['high'] >= (open_6h - tolerance)
+            is_red_candle = curr_15m['close'] < curr_15m['open']
             
-            if sweep_condition and reclaim_condition:
-                sl = high_4h       # الستوب: ذيل شمعة 4 ساعات العلوي
-                tp = close_4h      # الهدف: إغلاق شمعة 4 ساعات
+            valid_structure = curr_15m['close'] < high_6h
+            
+            if in_zone and is_red_candle and valid_structure:
+                sl = high_6h       # الستوب: ذيل شمعة 6 ساعات
+                tp = close_6h      # الهدف: إغلاق شمعة 6 ساعات
                 
-                if tp < entry_price and sl > entry_price:
-                    risk_pct = (sl - entry_price) / entry_price * 100
-                    if risk_pct < 10:
-                        return ("SHORT", entry_price, tp, sl, int(curr_15m['time'])), f"SWEEP & RECLAIM (Bearish)"
+                raw_gain_pct = ((entry_price - tp) / entry_price) * 100
+                
+                if raw_gain_pct >= 1.0:
+                    return ("SHORT", entry_price, tp, sl, int(curr_15m['time'])), f"6H POWER SETUP (Target: {raw_gain_pct:.2f}%)"
 
-        # تقرير الرفض (للمتابعة)
-        dist_pct = (entry_price - open_4h) / open_4h * 100
-        return None, f"Watching 4H Open ({dist_pct:.2f}%)"
+        # تقرير الرفض
+        return None, "Scanning 6H Structure..."
 
     except Exception as e:
         return None, f"Err: {str(e)[:20]}"
@@ -187,15 +178,12 @@ db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    # فاصل زمني 5 دقائق
     if time.time() - last_sig_time < 300: return 
     if symbol in app_state.active_trades: return
 
     async with sem:
         try:
-            # سرعة عالية (0.1 ثانية)
             await asyncio.sleep(0.1)
-            
             result = await get_signal_logic(symbol)
             if not result: return 
             
@@ -212,22 +200,24 @@ async def safe_check(symbol, app_state):
                     
                     clean_name = symbol.split(':')[0]
                     leverage = "Cross 20x"
-                    side_text = "🦁 <b>BUY (Sweep)</b>" if side == "LONG" else "🦁 <b>SELL (Sweep)</b>"
+                    side_text = "🛡️ <b>BUY (6H Level)</b>" if side == "LONG" else "🛡️ <b>SELL (6H Level)</b>"
                     
                     sl_pct = abs(entry - sl) / entry * 100
+                    tp_pct = abs(entry - tp) / entry * 100
+                    
+                    lev_gain = tp_pct * 20
                     
                     msg = (
-                        f"⚡ <code>{clean_name}</code>\n"
+                        f"🧱 <code>{clean_name}</code>\n"
                         f"{side_text} | {leverage}\n"
                         f"──────────────\n"
                         f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
-                        f"<i>(Liquidity Swept ✅)</i>\n"
                         f"──────────────\n"
                         f"🏆 <b>TARGET:</b> <code>{format_price(tp)}</code>\n"
-                        f"<i>(4H Close)</i>\n"
+                        f"<i>(6H Close | +{lev_gain:.0f}%)</i>\n"
                         f"──────────────\n"
                         f"🛑 <b>STOP:</b> <code>{format_price(sl)}</code>\n"
-                        f"<i>(4H Wick - {sl_pct:.2f}%)</i>"
+                        f"<i>(6H Wick | {sl_pct:.2f}%)</i>"
                     )
                     
                     print(f"\n🔥 {symbol}: SIGNAL FOUND! ({side})", flush=True)
@@ -274,7 +264,7 @@ async def monitor_trades(app_state):
                     elif price >= sl: hit_sl = True
                 
                 if hit_tp:
-                    await reply_telegram_msg(f"✅ <b>TARGET HIT!</b>\nPrice: {format_price(price)}", msg_id)
+                    await reply_telegram_msg(f"✅ <b>6H TARGET HIT!</b>\nPrice: {format_price(price)}", msg_id)
                     app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
                     del app_state.active_trades[sym]
                     print(f"✅ {sym} Win")
@@ -312,7 +302,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: 4H SWEEP & RECLAIM (V310)...")
+    print(f"🚀 System Online: 6H POWER STRATEGY (V370)...")
     try:
         await exchange.load_markets()
         
@@ -336,7 +326,6 @@ async def start_scanning(app_state):
             if not app_state.symbols:
                 await asyncio.sleep(5); continue
 
-            # معالجة متوازية
             tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
             await asyncio.gather(*tasks)
             
