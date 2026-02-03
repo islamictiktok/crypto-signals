@@ -23,7 +23,7 @@ BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
 # السيولة 20 مليون
 MIN_VOLUME_USDT = 20_000_000 
 
-# فريم التنفيذ (الدخول) يبقى 15 دقيقة
+# فريم العمل (15 دقيقة)
 TIMEFRAME = '15m'
 
 app = FastAPI()
@@ -34,9 +34,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (V370 - 6H POWER)</h1>
-            <p>Strategy: 6H Open Retest + Balanced Target</p>
-            <p>Status: Active (20x Turbo) 🟢</p>
+            <h1>🛡️ Fortress Bot (V390 ELITE)</h1>
+            <p>Strategy: Sweep + RSI + Vol + Wick</p>
+            <p>Status: Active (High Precision) 🟢</p>
         </body>
     </html>
     """
@@ -69,79 +69,86 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (V370 - 6H Strategy) 🔥 التغيير: استخدام فريم 6 ساعات 🔥
+# 3. المنطق (Elite Liquidity Strategy) 🔥 الفلاتر الجديدة 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # ----------------------------------------------------
-        # 1. تحليل الفريم الكبير (6H) - أقوى من 4 ساعات
-        # ----------------------------------------------------
-        # نطلب بيانات 6 ساعات بدلاً من 4
-        ohlcv_6h = await exchange.fetch_ohlcv(symbol, timeframe='6h', limit=5)
-        if not ohlcv_6h: return None, "No 6H Data"
+        # نحتاج بيانات كافية لحساب RSI و Volume MA
+        lookback = 50
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=lookback + 20)
+        if not ohlcv: return None, "No Data"
         
-        df_6h = pd.DataFrame(ohlcv_6h, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        candle_6h = df_6h.iloc[-2] # الشمعة المكتملة
+        # حساب المؤشرات
+        # 1. RSI
+        df['rsi'] = df.ta.rsi(length=14)
         
-        open_6h = candle_6h['open']
-        close_6h = candle_6h['close']
-        high_6h = candle_6h['high']
-        low_6h = candle_6h['low']
+        # 2. Volume Moving Average (20)
+        df['vol_ma'] = df['vol'].rolling(20).mean()
         
-        is_bullish_6h = close_6h > open_6h
-        is_bearish_6h = close_6h < open_6h
+        curr = df.iloc[-1]
+        prev_rsi = df['rsi'].iloc[-2] # نتحقق من RSI الشمعة الحالية أو السابقة
+        curr_rsi = curr['rsi']
         
-        # ----------------------------------------------------
-        # 2. تحليل الفريم الصغير (15m)
-        # ----------------------------------------------------
-        ohlcv_15m = await exchange.fetch_ohlcv(symbol, timeframe='15m', limit=10)
-        if not ohlcv_15m: return None, "No 15m Data"
+        curr_vol = curr['vol']
+        vol_ma = curr['vol_ma']
         
-        df_15m = pd.DataFrame(ohlcv_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        curr_15m = df_15m.iloc[-1]
+        # تحديد مستويات السيولة (آخر 50 شمعة)
+        bsl_level = df['high'].shift(1).rolling(lookback).max().iloc[-1]
+        ssl_level = df['low'].shift(1).rolling(lookback).min().iloc[-1]
         
-        entry_price = curr_15m['close']
-        
-        # منطقة التسامح (1%)
-        tolerance = open_6h * 0.01
+        if pd.isna(bsl_level) or pd.isna(ssl_level): return None, "Calculating..."
 
-        # === سيناريو الشراء (Long Setup) ===
-        if is_bullish_6h:
-            in_zone = curr_15m['low'] <= (open_6h + tolerance)
-            is_green_candle = curr_15m['close'] > curr_15m['open']
-            
-            # التأكد أن السعر لم يكسر ذيل الـ 6 ساعات
-            valid_structure = curr_15m['close'] > low_6h
-            
-            if in_zone and is_green_candle and valid_structure:
-                sl = low_6h        # الستوب: ذيل شمعة 6 ساعات
-                tp = close_6h      # الهدف: إغلاق شمعة 6 ساعات
-                
-                # فلتر الربح (1% صافي = 20% بالرافعة)
-                raw_gain_pct = ((tp - entry_price) / entry_price) * 100
-                
-                if raw_gain_pct >= 1.0: 
-                    return ("LONG", entry_price, tp, sl, int(curr_15m['time'])), f"6H POWER SETUP (Target: {raw_gain_pct:.2f}%)"
+        entry_price = curr['close']
 
-        # === سيناريو البيع (Short Setup) ===
-        if is_bearish_6h:
-            in_zone = curr_15m['high'] >= (open_6h - tolerance)
-            is_red_candle = curr_15m['close'] < curr_15m['open']
-            
-            valid_structure = curr_15m['close'] < high_6h
-            
-            if in_zone and is_red_candle and valid_structure:
-                sl = high_6h       # الستوب: ذيل شمعة 6 ساعات
-                tp = close_6h      # الهدف: إغلاق شمعة 6 ساعات
-                
-                raw_gain_pct = ((entry_price - tp) / entry_price) * 100
-                
-                if raw_gain_pct >= 1.0:
-                    return ("SHORT", entry_price, tp, sl, int(curr_15m['time'])), f"6H POWER SETUP (Target: {raw_gain_pct:.2f}%)"
+        # 🔥 فلتر الحجم: يجب أن يكون هناك نشاط (أعلى من 80% من المتوسط)
+        # لا نتشدد بـ 100% لأن بعض منصات الفيوتشر تختلف بياناتها قليلاً
+        is_high_volume = curr_vol >= (vol_ma * 0.8)
 
-        # تقرير الرفض
-        return None, "Scanning 6H Structure..."
+        # === سيناريو صيد سيولة البيع (LONG) ===
+        # 1. سحب السيولة: Low < SSL
+        sweep_low = curr['low'] < ssl_level
+        
+        # 2. الإغلاق القوي: Close > SSL
+        reclaim_low = curr['close'] > ssl_level
+        
+        # 3. فلتر RSI: يجب أن يكون السوق متشبعاً بيعياً (تحت 35) لحظة الضربة
+        # (نقبل أن يكون الآن أو الشمعة السابقة مباشرة)
+        is_oversold = (curr_rsi < 35) or (prev_rsi < 35)
+        
+        if sweep_low and reclaim_low and is_high_volume and is_oversold:
+            sl = curr['low']
+            tp = bsl_level
+            
+            risk = entry_price - sl
+            reward = tp - entry_price
+            
+            # فلتر الجودة المالية (1:1.5 على الأقل لضمان الربحية)
+            if risk > 0 and reward >= (risk * 1.5):
+                return ("LONG", entry_price, tp, sl, int(curr['time'])), f"ELITE SWEEP (RSI:{curr_rsi:.0f} Vol:{curr_vol:.0f})"
+
+        # === سيناريو صيد سيولة الشراء (SHORT) ===
+        # 1. سحب السيولة: High > BSL
+        sweep_high = curr['high'] > bsl_level
+        
+        # 2. الإغلاق القوي: Close < BSL
+        reclaim_high = curr['close'] < bsl_level
+        
+        # 3. فلتر RSI: يجب أن يكون السوق متشبعاً شرائياً (فوق 65)
+        is_overbought = (curr_rsi > 65) or (prev_rsi > 65)
+        
+        if sweep_high and reclaim_high and is_high_volume and is_overbought:
+            sl = curr['high']
+            tp = ssl_level
+            
+            risk = sl - entry_price
+            reward = entry_price - tp
+            
+            if risk > 0 and reward >= (risk * 1.5):
+                return ("SHORT", entry_price, tp, sl, int(curr['time'])), f"ELITE SWEEP (RSI:{curr_rsi:.0f} Vol:{curr_vol:.0f})"
+
+        return None, "Scanning High Probability..."
 
     except Exception as e:
         return None, f"Err: {str(e)[:20]}"
@@ -178,6 +185,7 @@ db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
+    # فاصل زمني 5 دقائق
     if time.time() - last_sig_time < 300: return 
     if symbol in app_state.active_trades: return
 
@@ -200,7 +208,7 @@ async def safe_check(symbol, app_state):
                     
                     clean_name = symbol.split(':')[0]
                     leverage = "Cross 20x"
-                    side_text = "🛡️ <b>BUY (6H Level)</b>" if side == "LONG" else "🛡️ <b>SELL (6H Level)</b>"
+                    side_text = "🛡️ <b>BUY (Elite Sweep)</b>" if side == "LONG" else "🛡️ <b>SELL (Elite Sweep)</b>"
                     
                     sl_pct = abs(entry - sl) / entry * 100
                     tp_pct = abs(entry - tp) / entry * 100
@@ -208,16 +216,17 @@ async def safe_check(symbol, app_state):
                     lev_gain = tp_pct * 20
                     
                     msg = (
-                        f"🧱 <code>{clean_name}</code>\n"
+                        f"⚡ <code>{clean_name}</code>\n"
                         f"{side_text} | {leverage}\n"
                         f"──────────────\n"
                         f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
+                        f"<i>(RSI + Vol Confirmed ✅)</i>\n"
                         f"──────────────\n"
                         f"🏆 <b>TARGET:</b> <code>{format_price(tp)}</code>\n"
-                        f"<i>(6H Close | +{lev_gain:.0f}%)</i>\n"
+                        f"<i>(Next Liquidity | +{lev_gain:.0f}%)</i>\n"
                         f"──────────────\n"
                         f"🛑 <b>STOP:</b> <code>{format_price(sl)}</code>\n"
-                        f"<i>(6H Wick | {sl_pct:.2f}%)</i>"
+                        f"<i>(Sweep Wick | {sl_pct:.2f}%)</i>"
                     )
                     
                     print(f"\n🔥 {symbol}: SIGNAL FOUND! ({side})", flush=True)
@@ -264,7 +273,7 @@ async def monitor_trades(app_state):
                     elif price >= sl: hit_sl = True
                 
                 if hit_tp:
-                    await reply_telegram_msg(f"✅ <b>6H TARGET HIT!</b>\nPrice: {format_price(price)}", msg_id)
+                    await reply_telegram_msg(f"✅ <b>TARGET HIT!</b>\nPrice: {format_price(price)}", msg_id)
                     app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
                     del app_state.active_trades[sym]
                     print(f"✅ {sym} Win")
@@ -302,7 +311,7 @@ async def daily_report_task(app_state):
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: 6H POWER STRATEGY (V370)...")
+    print(f"🚀 System Online: ELITE SWEEP V390 (RSI+VOL)...")
     try:
         await exchange.load_markets()
         
