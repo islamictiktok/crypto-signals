@@ -18,13 +18,9 @@ TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
-BLACKLIST = ['USDC', 'TUSD', 'BUSD', 'DAI', 'USDP', 'EUR', 'GBP']
-
-# السيولة 20 مليون
-MIN_VOLUME_USDT = 20_000_000 
-
-# فريم العمل (15 دقيقة)
-TIMEFRAME = '15m'
+# نحتاج سيولة لقراءة شريط الصفقات بدقة
+MIN_VOLUME_USDT = 30_000_000 
+TIMEFRAME = '5m' 
 
 app = FastAPI()
 
@@ -33,16 +29,16 @@ app = FastAPI()
 async def root():
     return """
     <html>
-        <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress Bot (V390 ELITE)</h1>
-            <p>Strategy: Sweep + RSI + Vol + Wick</p>
-            <p>Status: Active (High Precision) 🟢</p>
+        <body style='background:#1e1e1e;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🏰 Fortress V1200 (CLEAN STYLE)</h1>
+            <p>Strategy: SMC Sweep + BB + Tape</p>
+            <p>UI: Copyable Prices 📋</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 2. دوال الاتصال وتنسيق السعر
+# 2. دوال الاتصال والتنسيق
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -54,13 +50,6 @@ async def send_telegram_msg(message):
         except: pass
     return None
 
-async def reply_telegram_msg(message, reply_to_msg_id):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML", "reply_to_message_id": reply_to_msg_id}
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try: await client.post(url, json=payload)
-        except: pass
-
 def format_price(price):
     if price is None: return "0"
     if price >= 1000: return f"{price:.2f}"
@@ -69,129 +58,106 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المنطق (Elite Liquidity Strategy) 🔥 الفلاتر الجديدة 🔥
+# 3. قراءة شريط الصفقات (True Order Flow)
+# ==========================================
+async def get_real_order_flow(symbol):
+    try:
+        trades = await exchange.fetch_trades(symbol, limit=500)
+        now_ts = exchange.milliseconds()
+        cutoff_ts = now_ts - (3 * 60 * 1000)
+        
+        buy_vol = 0.0
+        sell_vol = 0.0
+        
+        for t in trades:
+            if t['timestamp'] >= cutoff_ts:
+                cost = t['amount'] * t['price']
+                if t['side'] == 'buy':
+                    buy_vol += cost
+                else:
+                    sell_vol += cost
+        
+        return {
+            'buy_vol': buy_vol,
+            'sell_vol': sell_vol,
+            'delta': buy_vol - sell_vol,
+            'imbalance': (buy_vol / sell_vol) if sell_vol > 0 else 10
+        }
+    except: return None
+
+# ==========================================
+# 4. المنطق (SMC + BB + OrderFlow)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # نحتاج بيانات كافية لحساب RSI و Volume MA
-        lookback = 50
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=lookback + 20)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
         if not ohlcv: return None, "No Data"
-        
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # حساب المؤشرات
-        # 1. RSI
-        df['rsi'] = df.ta.rsi(length=14)
+        # Bollinger Bands
+        bb = df.ta.bbands(length=20, std=2)
+        df['upper_bb'] = bb['BBU_20_2.0']
+        df['lower_bb'] = bb['BBL_20_2.0']
         
-        # 2. Volume Moving Average (20)
-        df['vol_ma'] = df['vol'].rolling(20).mean()
+        # Swing Points (Liquidity)
+        swing_high = df['high'].shift(1).rolling(20).max().iloc[-1]
+        swing_low = df['low'].shift(1).rolling(20).min().iloc[-1]
         
         curr = df.iloc[-1]
-        prev_rsi = df['rsi'].iloc[-2] # نتحقق من RSI الشمعة الحالية أو السابقة
-        curr_rsi = curr['rsi']
-        
-        curr_vol = curr['vol']
-        vol_ma = curr['vol_ma']
-        
-        # تحديد مستويات السيولة (آخر 50 شمعة)
-        bsl_level = df['high'].shift(1).rolling(lookback).max().iloc[-1]
-        ssl_level = df['low'].shift(1).rolling(lookback).min().iloc[-1]
-        
-        if pd.isna(bsl_level) or pd.isna(ssl_level): return None, "Calculating..."
-
         entry_price = curr['close']
+        
+        # --- SHORT SETUP ---
+        is_sweeping_high = curr['high'] > swing_high
+        pierced_upper_bb = curr['high'] > curr['upper_bb']
+        closed_inside_bb = curr['close'] < curr['upper_bb']
+        
+        if is_sweeping_high and pierced_upper_bb and closed_inside_bb:
+            flow = await get_real_order_flow(symbol)
+            if flow and flow['delta'] < 0: 
+                sl = curr['high'] 
+                tp = swing_low
+                risk = sl - entry_price
+                reward = entry_price - tp
+                if risk > 0 and reward >= (risk * 1.5):
+                    return ("SHORT", entry_price, tp, sl, int(curr['time'])), "Bearish Flow"
 
-        # 🔥 فلتر الحجم: يجب أن يكون هناك نشاط (أعلى من 80% من المتوسط)
-        # لا نتشدد بـ 100% لأن بعض منصات الفيوتشر تختلف بياناتها قليلاً
-        is_high_volume = curr_vol >= (vol_ma * 0.8)
+        # --- LONG SETUP ---
+        is_sweeping_low = curr['low'] < swing_low
+        pierced_lower_bb = curr['low'] < curr['lower_bb']
+        closed_inside_bb = curr['close'] > curr['lower_bb']
+        
+        if is_sweeping_low and pierced_lower_bb and closed_inside_bb:
+            flow = await get_real_order_flow(symbol)
+            if flow and flow['delta'] > 0: 
+                sl = curr['low']
+                tp = swing_high 
+                risk = entry_price - sl
+                reward = tp - entry_price
+                if risk > 0 and reward >= (risk * 1.5):
+                    return ("LONG", entry_price, tp, sl, int(curr['time'])), "Bullish Flow"
 
-        # === سيناريو صيد سيولة البيع (LONG) ===
-        # 1. سحب السيولة: Low < SSL
-        sweep_low = curr['low'] < ssl_level
-        
-        # 2. الإغلاق القوي: Close > SSL
-        reclaim_low = curr['close'] > ssl_level
-        
-        # 3. فلتر RSI: يجب أن يكون السوق متشبعاً بيعياً (تحت 35) لحظة الضربة
-        # (نقبل أن يكون الآن أو الشمعة السابقة مباشرة)
-        is_oversold = (curr_rsi < 35) or (prev_rsi < 35)
-        
-        if sweep_low and reclaim_low and is_high_volume and is_oversold:
-            sl = curr['low']
-            tp = bsl_level
-            
-            risk = entry_price - sl
-            reward = tp - entry_price
-            
-            # فلتر الجودة المالية (1:1.5 على الأقل لضمان الربحية)
-            if risk > 0 and reward >= (risk * 1.5):
-                return ("LONG", entry_price, tp, sl, int(curr['time'])), f"ELITE SWEEP (RSI:{curr_rsi:.0f} Vol:{curr_vol:.0f})"
-
-        # === سيناريو صيد سيولة الشراء (SHORT) ===
-        # 1. سحب السيولة: High > BSL
-        sweep_high = curr['high'] > bsl_level
-        
-        # 2. الإغلاق القوي: Close < BSL
-        reclaim_high = curr['close'] < bsl_level
-        
-        # 3. فلتر RSI: يجب أن يكون السوق متشبعاً شرائياً (فوق 65)
-        is_overbought = (curr_rsi > 65) or (prev_rsi > 65)
-        
-        if sweep_high and reclaim_high and is_high_volume and is_overbought:
-            sl = curr['high']
-            tp = ssl_level
-            
-            risk = sl - entry_price
-            reward = entry_price - tp
-            
-            if risk > 0 and reward >= (risk * 1.5):
-                return ("SHORT", entry_price, tp, sl, int(curr['time'])), f"ELITE SWEEP (RSI:{curr_rsi:.0f} Vol:{curr_vol:.0f})"
-
-        return None, "Scanning High Probability..."
-
-    except Exception as e:
-        return None, f"Err: {str(e)[:20]}"
+        return None, "Scanning..."
+    except Exception as e: return None, f"Err: {str(e)[:20]}"
 
 # ==========================================
-# 4. المعالجة السريعة (Turbo 20x)
+# 5. المعالجة وتنسيق الرسالة
 # ==========================================
-sem = asyncio.Semaphore(20) 
+sem = asyncio.Semaphore(5) 
 
 class DataManager:
     def __init__(self):
-        self.file = Config.DB_FILE
-        self.trades = {}
-        self.stats = {"wins": 0, "losses": 0}
         self.last_signal_time = {}
         self.sent_signals = {}
-
-    def add_trade(self, symbol, data):
-        self.trades[symbol] = data
-    
-    def remove_trade(self, symbol):
-        if symbol in self.trades: del self.trades[symbol]
-
-    def update_stats(self, type_str):
-        if type_str == "WIN": self.stats["wins"] += 1
-        else: self.stats["losses"] += 1
-
-class Config:
-    TELEGRAM_TOKEN = TELEGRAM_TOKEN
-    CHAT_ID = CHAT_ID
-    DB_FILE = "trades.json"
 
 db = DataManager()
 
 async def safe_check(symbol, app_state):
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    # فاصل زمني 5 دقائق
     if time.time() - last_sig_time < 300: return 
-    if symbol in app_state.active_trades: return
-
+    
     async with sem:
         try:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
             result = await get_signal_logic(symbol)
             if not result: return 
             
@@ -204,117 +170,37 @@ async def safe_check(symbol, app_state):
                 if key not in app_state.sent_signals:
                     app_state.last_signal_time[symbol] = time.time()
                     app_state.sent_signals[key] = time.time()
-                    app_state.stats["total"] = app_state.stats.get("total", 0) + 1
                     
                     clean_name = symbol.split(':')[0]
-                    leverage = "Cross 20x"
-                    side_text = "🛡️ <b>BUY (Elite Sweep)</b>" if side == "LONG" else "🛡️ <b>SELL (Elite Sweep)</b>"
+                    pair_name = f"{clean_name}/USDT"
                     
-                    sl_pct = abs(entry - sl) / entry * 100
-                    tp_pct = abs(entry - tp) / entry * 100
+                    if side == "LONG":
+                        direction = "LONG 🟢"
+                    else:
+                        direction = "SHORT 🔴"
                     
-                    lev_gain = tp_pct * 20
-                    
+                    # 🔥 التنسيق المطلوب تماماً 🔥
                     msg = (
-                        f"⚡ <code>{clean_name}</code>\n"
-                        f"{side_text} | {leverage}\n"
+                        f"<code>{pair_name}</code> | {direction}\n"
+                        f"📥 Entry: <code>{format_price(entry)}</code>\n"
                         f"──────────────\n"
-                        f"⚡ <b>Entry:</b> <code>{format_price(entry)}</code>\n"
-                        f"<i>(RSI + Vol Confirmed ✅)</i>\n"
+                        f"🎯 Target: <code>{format_price(tp)}</code>\n"
                         f"──────────────\n"
-                        f"🏆 <b>TARGET:</b> <code>{format_price(tp)}</code>\n"
-                        f"<i>(Next Liquidity | +{lev_gain:.0f}%)</i>\n"
-                        f"──────────────\n"
-                        f"🛑 <b>STOP:</b> <code>{format_price(sl)}</code>\n"
-                        f"<i>(Sweep Wick | {sl_pct:.2f}%)</i>"
+                        f"🛑 Stop : <code>{format_price(sl)}</code>"
                     )
                     
-                    print(f"\n🔥 {symbol}: SIGNAL FOUND! ({side})", flush=True)
-                    msg_id = await send_telegram_msg(msg)
+                    print(f"\n🔥 {symbol}: SIGNAL SENT ({side})", flush=True)
+                    await send_telegram_msg(msg)
                     
-                    if msg_id:
-                        app_state.active_trades[symbol] = {
-                            "side": side, "entry": entry, "tp": tp, "sl": sl, "msg_id": msg_id
-                        }
-            else:
-                pass
-
-        except ccxt.RateLimitExceeded:
-            await asyncio.sleep(2)
-        except Exception as e:
-            pass
-
-# ==========================================
-# 5. المراقبة
-# ==========================================
-async def monitor_trades(app_state):
-    print("👀 Monitoring Active Trades (Turbo)...")
-    while True:
-        current_symbols = list(app_state.active_trades.keys())
-        for sym in current_symbols:
-            trade = app_state.active_trades[sym]
-            try:
-                ticker = await exchange.fetch_ticker(sym)
-                price = ticker['last']
-                
-                side = trade['side']
-                tp = trade['tp']
-                sl = trade['sl']
-                msg_id = trade['msg_id']
-                
-                hit_tp = False
-                hit_sl = False
-                
-                if side == "LONG":
-                    if price >= tp: hit_tp = True
-                    elif price <= sl: hit_sl = True
-                else: 
-                    if price <= tp: hit_tp = True
-                    elif price >= sl: hit_sl = True
-                
-                if hit_tp:
-                    await reply_telegram_msg(f"✅ <b>TARGET HIT!</b>\nPrice: {format_price(price)}", msg_id)
-                    app_state.stats["wins"] = app_state.stats.get("wins", 0) + 1
-                    del app_state.active_trades[sym]
-                    print(f"✅ {sym} Win")
-                    
-                elif hit_sl:
-                    await reply_telegram_msg(f"🛑 <b>STOP LOSS HIT</b>\nPrice: {format_price(price)}", msg_id)
-                    app_state.stats["losses"] = app_state.stats.get("losses", 0) + 1
-                    del app_state.active_trades[sym]
-                    print(f"🛑 {sym} Loss")
-                    
-            except: pass
-        await asyncio.sleep(1)
-
-async def daily_report_task(app_state):
-    while True:
-        now = datetime.now()
-        if now.hour == 23 and now.minute == 59:
-            stats = app_state.stats
-            total = stats.get("wins", 0) + stats.get("losses", 0)
-            wins = stats.get("wins", 0)
-            losses = stats.get("losses", 0)
-            win_rate = (wins / total * 100) if total > 0 else 0
-            
-            report = (
-                f"📊 <b>DAILY REPORT</b>\n──────────────\n"
-                f"🔢 <b>Trades:</b> {total}\n✅ <b>Wins:</b> {wins}\n❌ <b>Losses:</b> {losses}\n"
-                f"🎯 <b>Win Rate:</b> {win_rate:.1f}%"
-            )
-            await send_telegram_msg(report)
-            app_state.stats = {"total": 0, "wins": 0, "losses": 0}
-            await asyncio.sleep(70)
-        await asyncio.sleep(30)
+        except: pass
 
 # ==========================================
 # 6. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: ELITE SWEEP V390 (RSI+VOL)...")
+    print(f"🚀 System Online: V1200 (CLEAN FORMAT)...")
     try:
         await exchange.load_markets()
-        
         while True:
             try:
                 tickers = await exchange.fetch_tickers()
@@ -325,24 +211,11 @@ async def start_scanning(app_state):
                             active_symbols.append(s)
                 
                 app_state.symbols = active_symbols
-                print(f"\n🔎 Scan Cycle: Found {len(active_symbols)} coins (Vol > 20M)...", flush=True)
-                
-            except Exception as e:
-                print(f"⚠️ Market Update Error: {e}")
-                await asyncio.sleep(5)
-                continue
-            
-            if not app_state.symbols:
-                await asyncio.sleep(5); continue
-
-            tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
-            await asyncio.gather(*tasks)
-            
-            await asyncio.sleep(1) 
-
-    except Exception as e:
-        print(f"❌ Critical Error: {e}")
-        await asyncio.sleep(10)
+                tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
+                await asyncio.gather(*tasks)
+                await asyncio.sleep(1) 
+            except: await asyncio.sleep(5)
+    except: await asyncio.sleep(10)
 
 async def keep_alive_task():
     async with httpx.AsyncClient() as client:
@@ -355,17 +228,13 @@ async def keep_alive_task():
 async def lifespan(app: FastAPI):
     await exchange.load_markets()
     app.state.sent_signals = db.sent_signals
-    app.state.active_trades = db.trades
     app.state.last_signal_time = db.last_signal_time
-    app.state.stats = db.stats
     
     t1 = asyncio.create_task(start_scanning(app.state))
-    t2 = asyncio.create_task(monitor_trades(app.state))
-    t3 = asyncio.create_task(daily_report_task(app.state))
-    t4 = asyncio.create_task(keep_alive_task())
+    t2 = asyncio.create_task(keep_alive_task())
     yield
     await exchange.close()
-    t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel()
+    t1.cancel(); t2.cancel()
 
 app.router.lifespan_context = lifespan
 
