@@ -18,7 +18,6 @@ TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
-# نحتاج سيولة لقراءة شريط الصفقات بدقة
 MIN_VOLUME_USDT = 30_000_000 
 TIMEFRAME = '5m' 
 
@@ -30,15 +29,15 @@ async def root():
     return """
     <html>
         <body style='background:#1e1e1e;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🏰 Fortress V1200 (CLEAN STYLE)</h1>
+            <h1>🏰 Fortress V1250 (VISIBLE LOGS)</h1>
             <p>Strategy: SMC Sweep + BB + Tape</p>
-            <p>UI: Copyable Prices 📋</p>
+            <p>Status: Logging Active 📋</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 2. دوال الاتصال والتنسيق
+# 2. دوال الاتصال
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -58,7 +57,7 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. قراءة شريط الصفقات (True Order Flow)
+# 3. قراءة شريط الصفقات (Order Flow)
 # ==========================================
 async def get_real_order_flow(symbol):
     try:
@@ -99,7 +98,7 @@ async def get_signal_logic(symbol):
         df['upper_bb'] = bb['BBU_20_2.0']
         df['lower_bb'] = bb['BBL_20_2.0']
         
-        # Swing Points (Liquidity)
+        # Swing Points
         swing_high = df['high'].shift(1).rolling(20).max().iloc[-1]
         swing_low = df['low'].shift(1).rolling(20).min().iloc[-1]
         
@@ -140,7 +139,7 @@ async def get_signal_logic(symbol):
     except Exception as e: return None, f"Err: {str(e)[:20]}"
 
 # ==========================================
-# 5. المعالجة وتنسيق الرسالة
+# 5. المعالجة (مع طباعة اللوغز الجديدة)
 # ==========================================
 sem = asyncio.Semaphore(5) 
 
@@ -179,7 +178,10 @@ async def safe_check(symbol, app_state):
                     else:
                         direction = "SHORT 🔴"
                     
-                    # 🔥 التنسيق المطلوب تماماً 🔥
+                    # 🔥 1. طباعة اللوغز عند اكتشاف الصفقة 🔥
+                    print(f"\n🚨 SIGNAL FOUND: {clean_name} | {side}", flush=True)
+                    print(f"   Reason: {reason}", flush=True)
+                    
                     msg = (
                         f"<code>{pair_name}</code> | {direction}\n"
                         f"📥 Entry: <code>{format_price(entry)}</code>\n"
@@ -189,16 +191,15 @@ async def safe_check(symbol, app_state):
                         f"🛑 Stop : <code>{format_price(sl)}</code>"
                     )
                     
-                    print(f"\n🔥 {symbol}: SIGNAL SENT ({side})", flush=True)
                     await send_telegram_msg(msg)
                     
         except: pass
 
 # ==========================================
-# 6. التشغيل
+# 6. التشغيل (مع عداد العملات)
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: V1200 (CLEAN FORMAT)...")
+    print(f"🚀 System Online: V1250 (LOGS ENABLED)...")
     try:
         await exchange.load_markets()
         while True:
@@ -211,6 +212,11 @@ async def start_scanning(app_state):
                             active_symbols.append(s)
                 
                 app_state.symbols = active_symbols
+                
+                # 🔥 2. طباعة عدد العملات في كل دورة 🔥
+                current_time = datetime.now().strftime("%H:%M:%S")
+                print(f"[{current_time}] 🔎 Scanning {len(active_symbols)} coins...", flush=True)
+                
                 tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
                 await asyncio.gather(*tasks)
                 await asyncio.sleep(1) 
