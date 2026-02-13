@@ -1,7 +1,6 @@
 import asyncio
 import os
 import pandas as pd
-import pandas_ta as ta
 import ccxt.async_support as ccxt
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -12,14 +11,17 @@ import httpx
 import numpy as np
 
 # ==========================================
-# 1. الإعدادات
+# 1. الإعدادات الأساسية
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
-MIN_VOLUME_USDT = 30_000_000 
-TIMEFRAME = '5m' 
+# سيولة عالية لضمان احترام التحليل الكلاسيكي
+MIN_VOLUME_USDT = 40_000_000 
+
+# 🔥 تم التغيير إلى فريم الساعة (يمكنك تغييره إلى '4h') 🔥
+TIMEFRAME = '1h' 
 
 app = FastAPI()
 
@@ -29,25 +31,22 @@ async def root():
     return """
     <html>
         <body style='background:#1e1e1e;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🏰 Fortress V1250 (VISIBLE LOGS)</h1>
-            <p>Strategy: SMC Sweep + BB + Tape</p>
-            <p>Status: Logging Active 📋</p>
+            <h1>📐 Fortress V1300 (CLASSIC PATTERNS)</h1>
+            <p>Strategy: Ascending & Descending Triangles Only</p>
+            <p>Timeframe: 1H/4H | Status: Searching for Breakouts 🟢</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 2. دوال الاتصال
+# 2. دوال الاتصال والتنسيق
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            res = await client.post(url, json=payload)
-            if res.status_code == 200: return res.json()['result']['message_id']
+        try: await client.post(url, json=payload)
         except: pass
-    return None
 
 def format_price(price):
     if price is None: return "0"
@@ -57,89 +56,88 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. قراءة شريط الصفقات (Order Flow)
-# ==========================================
-async def get_real_order_flow(symbol):
-    try:
-        trades = await exchange.fetch_trades(symbol, limit=500)
-        now_ts = exchange.milliseconds()
-        cutoff_ts = now_ts - (3 * 60 * 1000)
-        
-        buy_vol = 0.0
-        sell_vol = 0.0
-        
-        for t in trades:
-            if t['timestamp'] >= cutoff_ts:
-                cost = t['amount'] * t['price']
-                if t['side'] == 'buy':
-                    buy_vol += cost
-                else:
-                    sell_vol += cost
-        
-        return {
-            'buy_vol': buy_vol,
-            'sell_vol': sell_vol,
-            'delta': buy_vol - sell_vol,
-            'imbalance': (buy_vol / sell_vol) if sell_vol > 0 else 10
-        }
-    except: return None
-
-# ==========================================
-# 4. المنطق (SMC + BB + OrderFlow)
+# 3. محرك اكتشاف المثلثات (Triangle Detector) 🔥
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
-        if not ohlcv: return None, "No Data"
+        # نجلب آخر 35 شمعة (لتشكيل المثلث بوضوح)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=35)
+        if not ohlcv or len(ohlcv) < 30: return None, "No Data"
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
-        # Bollinger Bands
-        bb = df.ta.bbands(length=20, std=2)
-        df['upper_bb'] = bb['BBU_20_2.0']
-        df['lower_bb'] = bb['BBL_20_2.0']
-        
-        # Swing Points
-        swing_high = df['high'].shift(1).rolling(20).max().iloc[-1]
-        swing_low = df['low'].shift(1).rolling(20).min().iloc[-1]
-        
+        # الشمعة الحالية (شمعة الكسر) والشمعة السابقة
         curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        # نافذة المثلث (الـ 30 شمعة السابقة التي شكلت النموذج)
+        window = df.iloc[-31:-1].copy()
+        
+        # 1. حساب ميل القمم والقيعان باستخدام (Linear Regression - polyfit)
+        x = np.arange(len(window))
+        slope_high, _ = np.polyfit(x, window['high'], 1)
+        slope_low, _ = np.polyfit(x, window['low'], 1)
+        
+        # تحويل الميل لنسبة مئوية لتوحيد القياس بين العملات الغالية والرخيصة
+        avg_price = window['close'].mean()
+        norm_slope_high = (slope_high / avg_price) * 100
+        norm_slope_low = (slope_low / avg_price) * 100
+        
+        # 2. حساب أبعاد المثلث
+        pattern_high = window['high'].max()
+        pattern_low = window['low'].min()
+        pattern_height = pattern_high - pattern_low # ارتفاع قاعدة المثلث (للهدف)
+        
         entry_price = curr['close']
         
-        # --- SHORT SETUP ---
-        is_sweeping_high = curr['high'] > swing_high
-        pierced_upper_bb = curr['high'] > curr['upper_bb']
-        closed_inside_bb = curr['close'] < curr['upper_bb']
+        # متوسط الفوليوم لتأكيد الكسر
+        avg_vol = window['vol'].mean()
+        is_breakout_vol = curr['vol'] > (avg_vol * 1.2) # كسر بفوليوم عالي
         
-        if is_sweeping_high and pierced_upper_bb and closed_inside_bb:
-            flow = await get_real_order_flow(symbol)
-            if flow and flow['delta'] < 0: 
-                sl = curr['high'] 
-                tp = swing_low
-                risk = sl - entry_price
-                reward = entry_price - tp
-                if risk > 0 and reward >= (risk * 1.5):
-                    return ("SHORT", entry_price, tp, sl, int(curr['time'])), "Bearish Flow"
-
-        # --- LONG SETUP ---
-        is_sweeping_low = curr['low'] < swing_low
-        pierced_lower_bb = curr['low'] < curr['lower_bb']
-        closed_inside_bb = curr['close'] > curr['lower_bb']
+        # ==========================================
+        # 📈 سيناريو الشراء: المثلث الصاعد (Ascending Triangle)
+        # مقاومة أفقية (ميل القمم شبه صفر) + دعم صاعد (ميل القيعان موجب)
+        # ==========================================
+        is_flat_top = abs(norm_slope_high) < 0.15
+        is_rising_bottom = norm_slope_low > 0.15
         
-        if is_sweeping_low and pierced_lower_bb and closed_inside_bb:
-            flow = await get_real_order_flow(symbol)
-            if flow and flow['delta'] > 0: 
-                sl = curr['low']
-                tp = swing_high 
-                risk = entry_price - sl
-                reward = tp - entry_price
-                if risk > 0 and reward >= (risk * 1.5):
-                    return ("LONG", entry_price, tp, sl, int(curr['time'])), "Bullish Flow"
+        if is_flat_top and is_rising_bottom:
+            resistance_line = pattern_high
+            # هل اخترقت الشمعة الحالية المقاومة بقوة؟
+            if curr['close'] > resistance_line and prev['close'] <= resistance_line and is_breakout_vol:
+                
+                # الهدف: حسب صورتك، الهدف هو نفس طول قاعدة المثلث
+                tp = entry_price + pattern_height
+                
+                # الستوب: منتصف المثلث أو أسفل شمعة الكسر مباشرة لتقليل المخاطرة
+                sl = entry_price - (pattern_height * 0.4) 
+                
+                return ("LONG", entry_price, tp, sl, int(curr['time'])), "Ascending Triangle Breakout 📐"
 
-        return None, "Scanning..."
+        # ==========================================
+        # 📉 سيناريو البيع: المثلث الهابط (Descending Triangle)
+        # دعم أفقي (ميل القيعان شبه صفر) + مقاومة هابطة (ميل القمم سالب)
+        # ==========================================
+        is_flat_bottom = abs(norm_slope_low) < 0.15
+        is_falling_top = norm_slope_high < -0.15
+        
+        if is_flat_bottom and is_falling_top:
+            support_line = pattern_low
+            # هل كسرت الشمعة الحالية الدعم بقوة؟
+            if curr['close'] < support_line and prev['close'] >= support_line and is_breakout_vol:
+                
+                # الهدف: طول قاعدة المثلث للأسفل
+                tp = entry_price - pattern_height
+                
+                # الستوب: أعلى شمعة الكسر أو منتصف المثلث
+                sl = entry_price + (pattern_height * 0.4)
+                
+                return ("SHORT", entry_price, tp, sl, int(curr['time'])), "Descending Triangle Breakout 📐"
+
+        return None, "Scanning for Triangles..."
     except Exception as e: return None, f"Err: {str(e)[:20]}"
 
 # ==========================================
-# 5. المعالجة (مع طباعة اللوغز الجديدة)
+# 4. المعالجة والإرسال (التنسيق النظيف)
 # ==========================================
 sem = asyncio.Semaphore(5) 
 
@@ -151,8 +149,9 @@ class DataManager:
 db = DataManager()
 
 async def safe_check(symbol, app_state):
+    # ننتظر ساعة كاملة قبل إرسال إشارة لنفس العملة مرة أخرى (لأن الفريم ساعة)
     last_sig_time = app_state.last_signal_time.get(symbol, 0)
-    if time.time() - last_sig_time < 300: return 
+    if time.time() - last_sig_time < 3600: return 
     
     async with sem:
         try:
@@ -178,7 +177,6 @@ async def safe_check(symbol, app_state):
                     else:
                         direction = "SHORT 🔴"
                     
-                    # 🔥 1. طباعة اللوغز عند اكتشاف الصفقة 🔥
                     print(f"\n🚨 SIGNAL FOUND: {clean_name} | {side}", flush=True)
                     print(f"   Reason: {reason}", flush=True)
                     
@@ -188,7 +186,8 @@ async def safe_check(symbol, app_state):
                         f"──────────────\n"
                         f"🎯 Target: <code>{format_price(tp)}</code>\n"
                         f"──────────────\n"
-                        f"🛑 Stop : <code>{format_price(sl)}</code>"
+                        f"🛑 Stop : <code>{format_price(sl)}</code>\n"
+                        f"<i>({reason})</i>"
                     )
                     
                     await send_telegram_msg(msg)
@@ -196,10 +195,11 @@ async def safe_check(symbol, app_state):
         except: pass
 
 # ==========================================
-# 6. التشغيل (مع عداد العملات)
+# 5. التشغيل واللوغز
 # ==========================================
 async def start_scanning(app_state):
-    print(f"🚀 System Online: V1250 (LOGS ENABLED)...")
+    print(f"🚀 System Online: V1300 CHART PATTERNS...")
+    print(f"⏱️ Timeframe set to: {TIMEFRAME}")
     try:
         await exchange.load_markets()
         while True:
@@ -213,13 +213,14 @@ async def start_scanning(app_state):
                 
                 app_state.symbols = active_symbols
                 
-                # 🔥 2. طباعة عدد العملات في كل دورة 🔥
                 current_time = datetime.now().strftime("%H:%M:%S")
-                print(f"[{current_time}] 🔎 Scanning {len(active_symbols)} coins...", flush=True)
+                print(f"[{current_time}] 🔎 Scanning {len(active_symbols)} coins for Triangles...", flush=True)
                 
                 tasks = [safe_check(sym, app_state) for sym in app_state.symbols]
                 await asyncio.gather(*tasks)
-                await asyncio.sleep(1) 
+                
+                # فحص كل 3 دقائق لأن فريم الساعة بطيء ولا نحتاج ضغط السيرفر
+                await asyncio.sleep(180) 
             except: await asyncio.sleep(5)
     except: await asyncio.sleep(10)
 
