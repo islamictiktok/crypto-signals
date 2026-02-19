@@ -23,80 +23,79 @@ TIMEFRAME = '4h'
 
 app = FastAPI()
 
+# ⚡ عميل اتصال دائم وسريع جداً ⚡
+# نزيد الحد الأقصى للاتصالات المتزامنة
+limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
+http_client = httpx.AsyncClient(timeout=10.0, limits=limits)
+
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
 async def root():
     return """
     <html>
-        <body style='background:#000000;color:#ff0000;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>☢️ Fortress V6000 (TOTAL WIPE)</h1>
-            <p>System Status: Channel Sanitized 🧹</p>
-            <p>Strategy: Engineering Breakouts 📐</p>
+        <body style='background:#000;color:#ff0000;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>☢️ Fortress V6500 (TURBO WIPE)</h1>
+            <p>Status: Cleaning at Max Speed 🚀</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 2. دوال الاتصال و "البلدوزر" (الحذف الشامل)
+# 2. دوال الاتصال السريع (Turbo Network)
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try:
-            res = await client.post(url, json=payload)
-            if res.status_code == 200: return res.json()['result']['message_id']
-        except: pass
+    try:
+        res = await http_client.post(url, json=payload)
+        if res.status_code == 200: return res.json()['result']['message_id']
+    except: pass
     return None
 
-async def delete_message(msg_id):
+# دالة الحذف الخفيفة (تستخدم العميل الدائم)
+async def delete_message_fast(msg_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
     payload = {"chat_id": CHAT_ID, "message_id": msg_id}
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try: 
-            await client.post(url, json=payload)
-        except: pass # تجاهل الأخطاء (إذا كانت الرسالة محذوفة أصلاً)
+    try:
+        # نرسل الطلب ولا ننتظر الرد (Fire and Forget) لتسريع العملية
+        await http_client.post(url, json=payload)
+    except: pass
 
-# 🔥 دالة المسح النووي (تمسح كل شيء مهما كان العدد) 🔥
+# 🔥 المحرك النووي السريع 🔥
 async def nuke_channel_history():
-    print("☢️ INITIATING TOTAL CHANNEL WIPE...")
+    print("☢️ TURBO WIPE INITIATED...")
     
-    # 1. نرسل رسالة لنعرف "سقف" الرسائل (أعلى ID)
-    start_msg_id = await send_telegram_msg("⚠️ <b>SYSTEM RESET: Deleting ALL History...</b>")
-    
-    if not start_msg_id:
-        print("❌ Failed to get message ID.")
-        return
+    # 1. معرفة السقف
+    start_msg_id = await send_telegram_msg("⚠️ <b>TURBO WIPE STARTED...</b>")
+    if not start_msg_id: return
 
-    print(f"🧹 Deleting from ID {start_msg_id} down to 1...")
+    print(f"🧹 Blitzkrieg from ID {start_msg_id}...")
     
-    # 2. حلقة تكرار تمسح كل الرسائل السابقة (Batch Processing)
-    # نقسم الحذف لمجموعات (20 رسالة في الضربة الواحدة) لتسريع العملية وتجنب الحظر
-    batch = []
+    tasks = []
+    # زيادة حجم الدفعة إلى 100 رسالة (الحد الأقصى الآمن)
+    BATCH_SIZE = 100 
     
     for i in range(start_msg_id, 0, -1):
-        batch.append(delete_message(i))
+        tasks.append(delete_message_fast(i))
         
-        # نفذ الحذف كل 20 رسالة
-        if len(batch) >= 20:
-            await asyncio.gather(*batch)
-            batch = []
-            await asyncio.sleep(1.2) # راحة ثانية وشوية عشان تليجرام ما يحظر البوت
-            print(f"🗑 Deleted down to msg #{i}...", flush=True)
-            
-    # حذف الباقي إن وجد
-    if batch:
-        await asyncio.gather(*batch)
+        if len(tasks) >= BATCH_SIZE:
+            # تنفيذ 100 عملية حذف في نفس اللحظة
+            await asyncio.gather(*tasks)
+            tasks = []
+            # راحة قصيرة جداً (0.5 ثانية) لتجنب حظر تليجرام (Error 429)
+            # لو قللنا الوقت عن كدا تليجرام حيعمل بلوك للبوت ساعة
+            await asyncio.sleep(0.5)
+            print(f"🔥 Deleted batch ending at {i}", flush=True)
+
+    if tasks: await asyncio.gather(*tasks)
         
-    print("✅ Channel Cleaned.")
-    await send_telegram_msg("✅ <b>Channel Fully Wiped.</b>\n💎 <b>Fortress V6000 is Hunting Gems...</b>")
+    await send_telegram_msg("✅ <b>Channel Cleaned (Turbo Mode).</b>\n💎 <b>System Ready.</b>")
 
 async def reply_telegram_msg(message, reply_to_msg_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML", "reply_to_message_id": reply_to_msg_id}
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        try: await client.post(url, json=payload)
-        except: pass
+    try: await http_client.post(url, json=payload)
+    except: pass
 
 def format_price(price):
     if price is None: return "0"
@@ -165,7 +164,7 @@ class DataManager:
     def __init__(self):
         self.last_signal_time = {}
         self.active_trades = {}
-        self.is_wiped = False # للتأكد من المسح مرة واحدة
+        self.is_wiped = False
 
 db = DataManager()
 
@@ -245,12 +244,12 @@ async def monitor_trades(app_state):
 # 5. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    # 🔥 تشغيل المسح النووي عند البداية فقط 🔥
+    # 🔥 تشغيل المسح التوربو 🔥
     if not app_state.is_wiped:
         await nuke_channel_history()
         app_state.is_wiped = True
         
-    print(f"🚀 System Online: V6000 (TOTAL WIPE & HUNT)...")
+    print(f"🚀 System Online: V6500 (TURBO)...")
     try:
         await exchange.load_markets()
         while True:
@@ -272,11 +271,10 @@ async def start_scanning(app_state):
     except: await asyncio.sleep(10)
 
 async def keep_alive_task():
-    async with httpx.AsyncClient() as client:
-        while True:
-            try: await client.get(RENDER_URL); print("💓 Ping")
-            except: pass
-            await asyncio.sleep(600)
+    while True:
+        try: await http_client.get(RENDER_URL); print("💓 Ping")
+        except: pass
+        await asyncio.sleep(600)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -284,6 +282,8 @@ async def lifespan(app: FastAPI):
     t2 = asyncio.create_task(keep_alive_task())
     t3 = asyncio.create_task(monitor_trades(db))
     yield
+    await http_client.aclose() # إغلاق الاتصال عند إيقاف البوت
+    await exchange.close()
     t1.cancel(); t2.cancel(); t3.cancel()
 
 app.router.lifespan_context = lifespan
