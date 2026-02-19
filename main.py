@@ -23,25 +23,24 @@ TIMEFRAME = '4h'
 
 app = FastAPI()
 
-# ⚡ عميل اتصال دائم وسريع جداً ⚡
-# نزيد الحد الأقصى للاتصالات المتزامنة
-limits = httpx.Limits(max_keepalive_connections=20, max_connections=100)
-http_client = httpx.AsyncClient(timeout=10.0, limits=limits)
+# نستخدم Client واحد لكن ننتظر الرد هذه المرة لنعرف السبب
+http_client = httpx.AsyncClient(timeout=20.0)
 
 @app.get("/", response_class=HTMLResponse)
 @app.head("/")
 async def root():
     return """
     <html>
-        <body style='background:#000;color:#ff0000;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>☢️ Fortress V6500 (TURBO WIPE)</h1>
-            <p>Status: Cleaning at Max Speed 🚀</p>
+        <body style='background:#000;color:#ffff00;text-align:center;padding-top:50px;font-family:monospace;'>
+            <h1>🔍 Fortress V7000 (DEBUGGER)</h1>
+            <p>Mode: Slow & Accurate Wipe 🧹</p>
+            <p>Check your Server Logs for Errors!</p>
         </body>
     </html>
     """
 
 # ==========================================
-# 2. دوال الاتصال السريع (Turbo Network)
+# 2. دوال الاتصال والتشخيص
 # ==========================================
 async def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -49,47 +48,51 @@ async def send_telegram_msg(message):
     try:
         res = await http_client.post(url, json=payload)
         if res.status_code == 200: return res.json()['result']['message_id']
-    except: pass
+        else: print(f"❌ Send Error: {res.text}")
+    except Exception as e: print(f"❌ Connection Error: {e}")
     return None
 
-# دالة الحذف الخفيفة (تستخدم العميل الدائم)
-async def delete_message_fast(msg_id):
+async def delete_message_debug(msg_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
     payload = {"chat_id": CHAT_ID, "message_id": msg_id}
     try:
-        # نرسل الطلب ولا ننتظر الرد (Fire and Forget) لتسريع العملية
-        await http_client.post(url, json=payload)
-    except: pass
+        res = await http_client.post(url, json=payload)
+        # هنا مربط الفرس: نفحص رد تليجرام
+        if res.status_code != 200:
+            resp_data = res.json()
+            err_desc = resp_data.get('description', 'Unknown Error')
+            # تجاهل خطأ "الرسالة غير موجودة" لأنه طبيعي
+            if "message to delete not found" not in err_desc:
+                print(f"⚠️ Failed to delete MSG {msg_id}: {err_desc}", flush=True)
+            return False
+        return True
+    except Exception as e:
+        print(f"❌ Network Error on MSG {msg_id}: {str(e)}")
+        return False
 
-# 🔥 المحرك النووي السريع 🔥
 async def nuke_channel_history():
-    print("☢️ TURBO WIPE INITIATED...")
+    print("🔍 DIAGNOSTIC WIPE STARTED... (Check Logs)", flush=True)
     
-    # 1. معرفة السقف
-    start_msg_id = await send_telegram_msg("⚠️ <b>TURBO WIPE STARTED...</b>")
-    if not start_msg_id: return
+    start_msg_id = await send_telegram_msg("⚠️ <b>DIAGNOSTIC WIPE STARTED...</b>")
+    if not start_msg_id:
+        print("❌ CRITICAL: Bot cannot even send messages! Check Token/Permissions.")
+        return
 
-    print(f"🧹 Blitzkrieg from ID {start_msg_id}...")
+    print(f"🧹 Scanning from ID {start_msg_id} downwards...", flush=True)
     
-    tasks = []
-    # زيادة حجم الدفعة إلى 100 رسالة (الحد الأقصى الآمن)
-    BATCH_SIZE = 100 
-    
+    # نمسح ببطء (واحدة واحدة) لنرى الأخطاء
     for i in range(start_msg_id, 0, -1):
-        tasks.append(delete_message_fast(i))
+        success = await delete_message_debug(i)
         
-        if len(tasks) >= BATCH_SIZE:
-            # تنفيذ 100 عملية حذف في نفس اللحظة
-            await asyncio.gather(*tasks)
-            tasks = []
-            # راحة قصيرة جداً (0.5 ثانية) لتجنب حظر تليجرام (Error 429)
-            # لو قللنا الوقت عن كدا تليجرام حيعمل بلوك للبوت ساعة
-            await asyncio.sleep(0.5)
-            print(f"🔥 Deleted batch ending at {i}", flush=True)
+        # نسرع قليلاً في الفراغات، لكن ننتظر عند الحذف
+        if success:
+            await asyncio.sleep(0.05) 
+        
+        # كل 100 رسالة نطبع تقرير
+        if i % 100 == 0:
+            print(f"📉 Reached ID {i}...", flush=True)
 
-    if tasks: await asyncio.gather(*tasks)
-        
-    await send_telegram_msg("✅ <b>Channel Cleaned (Turbo Mode).</b>\n💎 <b>System Ready.</b>")
+    await send_telegram_msg("✅ <b>Diagnostic Wipe Complete.</b>\nCheck logs if messages remain.")
 
 async def reply_telegram_msg(message, reply_to_msg_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -105,7 +108,7 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المهندس الذكي (استراتيجية الوتد)
+# 3. استراتيجية الوتد (كما هي)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -114,37 +117,33 @@ async def get_signal_logic(symbol):
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
         if df['vol'].iloc[-1] == 0: return None, "Dead"
-
         curr = df.iloc[-1]
         entry_price = curr['close']
         
-        # 1. التحقق الهندسي (الوتد الهابط)
+        # الوتد
         window = df.iloc[-50:-1].copy()
         x = np.arange(len(window))
         slope, intercept = np.polyfit(x, window['high'], 1)
-        
         is_falling_trend = slope < -0.0001 * entry_price 
         trend_line_value = (slope * 50) + intercept
         is_breakout = curr['close'] > trend_line_value
         
-        # 2. شرط القاع
+        # القاع
         lowest_low = df['low'].min()
         highest_high = df['high'].max()
         position = (entry_price - lowest_low) / (highest_high - lowest_low)
         is_at_bottom = position < 0.30
         
-        # 3. الفوليوم
+        # الفوليوم
         avg_vol = df['vol'].iloc[-50:-1].mean()
         vol_spike = curr['vol'] > (avg_vol * 2.0)
         
         if is_falling_trend and is_breakout and is_at_bottom and vol_spike:
             pattern_top = window['high'].max()
             pattern_bottom = window['low'].min()
-            
             tp1 = entry_price + ((pattern_top - pattern_bottom) * 0.5)
             tp_final = pattern_top
             sl = pattern_bottom * 0.95
-            
             gain_pct = ((tp_final - entry_price) / entry_price) * 100
             
             if gain_pct < 40: return None, "Small Target"
@@ -244,12 +243,11 @@ async def monitor_trades(app_state):
 # 5. التشغيل
 # ==========================================
 async def start_scanning(app_state):
-    # 🔥 تشغيل المسح التوربو 🔥
     if not app_state.is_wiped:
         await nuke_channel_history()
         app_state.is_wiped = True
         
-    print(f"🚀 System Online: V6500 (TURBO)...")
+    print(f"🚀 System Online: V7000...")
     try:
         await exchange.load_markets()
         while True:
@@ -282,7 +280,7 @@ async def lifespan(app: FastAPI):
     t2 = asyncio.create_task(keep_alive_task())
     t3 = asyncio.create_task(monitor_trades(db))
     yield
-    await http_client.aclose() # إغلاق الاتصال عند إيقاف البوت
+    await http_client.aclose()
     await exchange.close()
     t1.cancel(); t2.cancel(); t3.cancel()
 
