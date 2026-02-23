@@ -39,8 +39,8 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🔥 Fortress V23.0 (DIAGNOSTIC ENGINE)</h1>
-            <p>5 Strategies (15m) + Error Diagnostics</p>
+            <h1>🛡️ Fortress V23.1 (BULLETPROOF)</h1>
+            <p>5 Strategies (15m) | Bulletproof Indicators</p>
             <p>Status: Active & Hunting! 🎯</p>
         </body>
     </html>
@@ -69,11 +69,10 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المحرك الشامل (مع نظام كشف الأخطاء) 🧠
+# 3. المحرك الشامل والمضاد للرصاص 🛡️
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # طلب 150 شمعة فقط (مضمون وصولها من المنصة)
         ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
         if not ohlcv or len(ohlcv) < 120: return "ERROR: Not enough candles"
         
@@ -84,7 +83,7 @@ async def get_signal_logic(symbol):
         prev = df.iloc[-2]
         entry = curr['close']
 
-        # حساب المؤشرات (تم استبدال 200 بـ 100 لتسريع وضمان الحساب)
+        # المؤشرات الأساسية
         df['ema50'] = ta.ema(df['close'], length=50)
         df['ema100'] = ta.ema(df['close'], length=100) 
         df['rsi'] = ta.rsi(df['close'], length=14)
@@ -94,14 +93,29 @@ async def get_signal_logic(symbol):
         if adx_data is not None and not adx_data.empty:
             df['adx'] = adx_data.iloc[:, 0] 
         else:
-            return "ERROR: ADX calculation failed"
+            return "ERROR: ADX Calc Failed"
         
+        # 🚨 [الإصلاح الجذري] سحب البولنجر باند بذكاء مهما كان اسمه
         bb = df.ta.bbands(length=20, std=2)
-        df['bbu'] = bb['BBU_20_2.0']; df['bbl'] = bb['BBL_20_2.0']
-        df['bb_width'] = ((df['bbu'] - df['bbl']) / df['close']) * 100
+        if bb is not None and not bb.empty:
+            try:
+                df['bbl'] = bb.filter(like='BBL').iloc[:, 0]
+                df['bbu'] = bb.filter(like='BBU').iloc[:, 0]
+                df['bb_width'] = ((df['bbu'] - df['bbl']) / df['close']) * 100
+            except:
+                return "ERROR: BB Columns Error"
+        else:
+            return "ERROR: BB Calc Failed"
         
+        # 🚨 [الإصلاح الجذري] سحب السوبر ترند بذكاء
         sti = ta.supertrend(df['high'], df['low'], df['close'], length=10, multiplier=3)
-        df['st_dir'] = sti['SUPERTd_10_3.0']
+        if sti is not None and not sti.empty:
+            try:
+                df['st_dir'] = sti.filter(like='SUPERTd').iloc[:, 0]
+            except:
+                return "ERROR: ST Columns Error"
+        else:
+            return "ERROR: SuperTrend Failed"
 
         if pd.isna(df['ema100'].iloc[-1]) or pd.isna(df['atr'].iloc[-1]) or pd.isna(df['adx'].iloc[-1]): 
             return "ERROR: NaN indicators"
@@ -114,38 +128,33 @@ async def get_signal_logic(symbol):
         side = ""
 
         # ---------------------------------------------------------
-        # 🟢 الاستراتيجيات الخمس (مرنة جداً)
+        # 🟢 الاستراتيجيات الخمس
         # ---------------------------------------------------------
 
-        # 1. SMC Sweep
-        if prev['low'] < df['bbl'].iloc[-2] and curr['close'] > prev['open']: # تليين الشرط
+        if prev['low'] < df['bbl'].iloc[-2] and curr['close'] > prev['open']: 
             strategy_name = "SMC Sweep"; side = "LONG"
         elif prev['high'] > df['bbu'].iloc[-2] and curr['close'] < prev['open']:
             strategy_name = "SMC Sweep"; side = "SHORT"
 
-        # 2. Range Bounce 
         elif is_ranging_market and strategy_name == "":
             if curr['low'] <= df['bbl'].iloc[-1] and curr['close'] > curr['open']: 
                 strategy_name = "Range Bounce"; side = "LONG"
             elif curr['high'] >= df['bbu'].iloc[-1] and curr['close'] < curr['open']:
                 strategy_name = "Range Bounce"; side = "SHORT"
 
-        # 3. Golden Pullback 
         elif not is_ranging_market and strategy_name == "":
             if curr['close'] > df['ema100'].iloc[-1] and curr['low'] <= df['ema50'].iloc[-1] and curr['close'] > df['ema50'].iloc[-1]:
                 strategy_name = "EMA Pullback"; side = "LONG"
             elif curr['close'] < df['ema100'].iloc[-1] and curr['high'] >= df['ema50'].iloc[-1] and curr['close'] < df['ema50'].iloc[-1]:
                 strategy_name = "EMA Pullback"; side = "SHORT"
 
-        # 4. Bollinger Squeeze 
         elif strategy_name == "":
-            is_squeezing = df['bb_width'].iloc[-10:-1].mean() < 8.0 # توسيع الخنق
+            is_squeezing = df['bb_width'].iloc[-10:-1].mean() < 8.0 
             if is_squeezing and curr['close'] > df['bbu'].iloc[-1]:
                 strategy_name = "BB Breakout"; side = "LONG"
             elif is_squeezing and curr['close'] < df['bbl'].iloc[-1]:
                 strategy_name = "BB Breakout"; side = "SHORT"
 
-        # 5. Supertrend Flip 
         elif strategy_name == "":
             if df['st_dir'].iloc[-1] == 1 and df['st_dir'].iloc[-2] == -1:
                 strategy_name = "SuperTrend"; side = "LONG"
@@ -153,7 +162,7 @@ async def get_signal_logic(symbol):
                 strategy_name = "SuperTrend"; side = "SHORT"
 
         # ---------------------------------------------------------
-        # التنفيذ والأهداف 
+        # التنفيذ
         # ---------------------------------------------------------
         if strategy_name != "":
             atr = df['atr'].iloc[-1]
@@ -181,12 +190,11 @@ async def get_signal_logic(symbol):
             }
 
         return "NO_SIGNAL"
-    except Exception as e: return f"ERROR: {str(e)[:30]}"
+    except Exception as e: return f"ERROR: Exception Occurred"
 
 # ==========================================
 # 4. إدارة البيانات والمراقبة
 # ==========================================
-# 🚨 خفضنا عدد الطلبات المتزامنة من 15 إلى 8 لتجنب حظر MEXC المؤقت (Rate Limit)
 sem = asyncio.Semaphore(8)
 class DataManager:
     def __init__(self):
@@ -196,7 +204,7 @@ db = DataManager()
 
 async def safe_check(symbol):
     async with sem:
-        await asyncio.sleep(0.15) # فاصل زمني بسيط جداً لحماية السيرفر
+        await asyncio.sleep(0.15) 
         return await get_signal_logic(symbol)
 
 async def monitor_trades(app_state):
@@ -259,11 +267,11 @@ async def daily_report_task(app_state):
         app_state.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 
 # ==========================================
-# 6. المحرك والمفاضلة بواسطة الـ ADX 🌪️
+# 6. المحرك والمفاضلة
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V23.0 (DIAGNOSTIC ENGINE)", Log.GREEN)
-    await send_telegram_msg("🟢 <b>Fortress V23.0 Online.</b>\nHunting with 5 Strategies 🌐")
+    cprint("🚀 System Online: V23.1 (BULLETPROOF)", Log.GREEN)
+    await send_telegram_msg("🟢 <b>Fortress V23.1 Bulletproof Online.</b>\nHunting with 5 Strategies 🛡️🌐")
     
     try:
         await exchange.load_markets()
@@ -280,7 +288,6 @@ async def start_scanning(app_state):
                 tasks = [safe_check(sym) for sym in active_symbols]
                 results = await asyncio.gather(*tasks)
                 
-                # 🚨 نظام كشف الأخطاء الجديد 🚨
                 valid_signals = []
                 error_count = 0
                 last_error = ""
