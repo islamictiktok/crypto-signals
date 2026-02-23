@@ -40,9 +40,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🏛️ Fortress V21.0 (THE PENTAGON)</h1>
-            <p>5-in-1 Master Strategy Engine (15m)</p>
-            <p>Mode: Top 3 Draft & Sleep Mode 💤</p>
+            <h1>🌐 Fortress V22.0 (OMNI-MARKET)</h1>
+            <p>5 Strategies for All Markets + ADX Ranking (15m)</p>
+            <p>Mode: Top 3 Trend Strength Draft 🎯</p>
         </body>
     </html>
     """
@@ -70,7 +70,7 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المحرك الخماسي (The 5-in-1 Engine) 🧠
+# 3. المحرك الشامل (Omni-Market Engine) 🧠
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -83,13 +83,18 @@ async def get_signal_logic(symbol):
         prev = df.iloc[-2]
         entry = curr['close']
 
-        # حساب المؤشرات مرة واحدة للجميع لتوفير المعالجة
-        df['ema9'] = ta.ema(df['close'], length=9)
-        df['ema21'] = ta.ema(df['close'], length=21)
+        # حساب المؤشرات
         df['ema50'] = ta.ema(df['close'], length=50)
         df['ema200'] = ta.ema(df['close'], length=200)
         df['rsi'] = ta.rsi(df['close'], length=14)
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        
+        # مؤشر قوة الاتجاه (ADX) كبديل للفوليوم
+        adx_data = ta.adx(df['high'], df['low'], df['close'], length=14)
+        if adx_data is not None and not adx_data.empty:
+            df['adx'] = adx_data['ADX_14']
+        else:
+            return None
         
         bb = df.ta.bbands(length=20, std=2)
         df['bbu'] = bb['BBU_20_2.0']; df['bbl'] = bb['BBL_20_2.0']
@@ -98,61 +103,62 @@ async def get_signal_logic(symbol):
         sti = ta.supertrend(df['high'], df['low'], df['close'], length=10, multiplier=3)
         df['st_dir'] = sti['SUPERTd_10_3.0']
 
-        if pd.isna(df['ema200'].iloc[-1]) or pd.isna(df['atr'].iloc[-1]): return None
+        if pd.isna(df['ema200'].iloc[-1]) or pd.isna(df['atr'].iloc[-1]) or pd.isna(df['adx'].iloc[-1]): return None
 
-        avg_vol = df['vol'].iloc[-20:-1].mean()
-        vol_ratio = curr['vol'] / avg_vol if avg_vol > 0 else 0
-        vol_spike = vol_ratio > 1.3
-
+        # تحديد حالة السوق (Trend vs Ranging)
+        ema_distance_pct = abs(df['ema50'].iloc[-1] - df['ema200'].iloc[-1]) / entry * 100
+        is_ranging_market = ema_distance_pct < 0.5 # السوق العرضي الميت
+        
+        adx_strength = df['adx'].iloc[-1]
         strategy_name = ""
         side = ""
 
         # ---------------------------------------------------------
-        # 🟢 فحص الاستراتيجيات (من الأقوى للأضعف)
+        # 🟢 الاستراتيجيات الخمس (تغطي كل الظروف)
         # ---------------------------------------------------------
 
-        # 1. SMC Liquidity Grab
-        if prev['low'] < df['bbl'].iloc[-2] and curr['close'] > prev['high'] and vol_spike:
+        # 1. SMC Liquidity Grab (لكل الحالات)
+        if prev['low'] < df['bbl'].iloc[-2] and curr['close'] > prev['high']:
             strategy_name = "SMC Sweep"; side = "LONG"
-        elif prev['high'] > df['bbu'].iloc[-2] and curr['close'] < prev['low'] and vol_spike:
+        elif prev['high'] > df['bbu'].iloc[-2] and curr['close'] < prev['low']:
             strategy_name = "SMC Sweep"; side = "SHORT"
 
-        # 2. Golden Pullback (إذا لم يتحقق SMC)
-        elif strategy_name == "":
-            if curr['close'] > df['ema200'].iloc[-1] and curr['low'] <= df['ema50'].iloc[-1] and curr['close'] > df['ema50'].iloc[-1] and vol_ratio > 1.0:
+        # 2. Range Bounce (سوق عرضي/متذبذب)
+        elif is_ranging_market and strategy_name == "":
+            if curr['low'] <= df['bbl'].iloc[-1] and curr['rsi'] < 35 and curr['close'] > curr['open']:
+                strategy_name = "Range Bounce"; side = "LONG"
+            elif curr['high'] >= df['bbu'].iloc[-1] and curr['rsi'] > 65 and curr['close'] < curr['open']:
+                strategy_name = "Range Bounce"; side = "SHORT"
+
+        # 3. Golden Pullback (سوق ذو ترند قوي)
+        elif not is_ranging_market and strategy_name == "":
+            if curr['close'] > df['ema200'].iloc[-1] and curr['low'] <= df['ema50'].iloc[-1] and curr['close'] > df['ema50'].iloc[-1]:
                 strategy_name = "EMA Pullback"; side = "LONG"
-            elif curr['close'] < df['ema200'].iloc[-1] and curr['high'] >= df['ema50'].iloc[-1] and curr['close'] < df['ema50'].iloc[-1] and vol_ratio > 1.0:
+            elif curr['close'] < df['ema200'].iloc[-1] and curr['high'] >= df['ema50'].iloc[-1] and curr['close'] < df['ema50'].iloc[-1]:
                 strategy_name = "EMA Pullback"; side = "SHORT"
 
-        # 3. Bollinger Squeeze Breakout
+        # 4. Bollinger Squeeze (نهاية التذبذب والانفجار)
         elif strategy_name == "":
-            is_squeezing = df['bb_width'].iloc[-10:-1].mean() < 8.0
-            if is_squeezing and curr['close'] > df['bbu'].iloc[-1] and vol_spike:
+            is_squeezing = df['bb_width'].iloc[-10:-1].mean() < 6.0
+            if is_squeezing and curr['close'] > df['bbu'].iloc[-1]:
                 strategy_name = "BB Breakout"; side = "LONG"
-            elif is_squeezing and curr['close'] < df['bbl'].iloc[-1] and vol_spike:
+            elif is_squeezing and curr['close'] < df['bbl'].iloc[-1]:
                 strategy_name = "BB Breakout"; side = "SHORT"
 
-        # 4. Supertrend Flip
+        # 5. Supertrend Flip (بداية زخم جديد)
         elif strategy_name == "":
-            if df['st_dir'].iloc[-1] == 1 and df['st_dir'].iloc[-2] == -1 and vol_spike:
+            if df['st_dir'].iloc[-1] == 1 and df['st_dir'].iloc[-2] == -1:
                 strategy_name = "SuperTrend"; side = "LONG"
-            elif df['st_dir'].iloc[-1] == -1 and df['st_dir'].iloc[-2] == 1 and vol_spike:
+            elif df['st_dir'].iloc[-1] == -1 and df['st_dir'].iloc[-2] == 1:
                 strategy_name = "SuperTrend"; side = "SHORT"
 
-        # 5. Momentum Cross (EMA 9/21)
-        elif strategy_name == "":
-            if df['ema9'].iloc[-1] > df['ema21'].iloc[-1] and df['ema9'].iloc[-2] <= df['ema21'].iloc[-2] and curr['rsi'] > 50 and vol_spike:
-                strategy_name = "Mom Cross"; side = "LONG"
-            elif df['ema9'].iloc[-1] < df['ema21'].iloc[-1] and df['ema9'].iloc[-2] >= df['ema21'].iloc[-2] and curr['rsi'] < 50 and vol_spike:
-                strategy_name = "Mom Cross"; side = "SHORT"
-
         # ---------------------------------------------------------
-        # التنفيذ إذا تحققت إحدى الاستراتيجيات
+        # التنفيذ
         # ---------------------------------------------------------
         if strategy_name != "":
             atr = df['atr'].iloc[-1]
             
-            # حماية ذكية: حساب الاستوب بناءً على الـ ATR (حجم الشمعة الحقيقي)
+            # أهداف مرنة حسب الـ ATR
             if side == "LONG":
                 sl = entry - (atr * 1.5)
                 tp1 = entry + (atr * 1.5)
@@ -172,7 +178,7 @@ async def get_signal_logic(symbol):
             return {
                 "symbol": symbol, "side": side, "entry": entry, 
                 "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp_final": tp_final, 
-                "sl": sl, "vol_ratio": vol_ratio, "leverage": leverage, "strat": strategy_name
+                "sl": sl, "adx": adx_strength, "leverage": leverage, "strat": strategy_name
             }
 
         return None
@@ -194,7 +200,7 @@ async def safe_check(symbol):
         return await get_signal_logic(symbol)
 
 async def monitor_trades(app_state):
-    cprint("👀 15m Pentagon Tracker Started...", Log.CYAN)
+    cprint("👀 15m Omni-Market Tracker Started...", Log.CYAN)
     while True:
         current_symbols = list(app_state.active_trades.keys())
         for sym in current_symbols:
@@ -246,7 +252,7 @@ async def daily_report_task(app_state):
         await asyncio.sleep(86400) 
         wins = app_state.stats['tp_hits']; losses = app_state.stats['sl_hits']
         win_rate = (wins / (wins + losses)) * 100 if (wins + losses) > 0 else 0.0
-        msg = (f"🏛️ <b>PENTAGON REPORT (24H)</b> 🏛️\n━━━━━━━━━━━━━━━━━━━━\n"
+        msg = (f"🌐 <b>OMNI-MARKET REPORT (24H)</b> 🌐\n━━━━━━━━━━━━━━━━━━━━\n"
                f"📡 <b>Batches:</b> {app_state.stats['signals']}\n✅ <b>Wins:</b> {wins} | ❌ <b>Losses:</b> {losses}\n"
                f"🎯 <b>Accuracy:</b> {win_rate:.1f}%\n━━━━━━━━━━━━━━━━━━━━\n"
                f"📈 <b>Net Leveraged PNL:</b> {app_state.stats['net_pnl']:.2f}%")
@@ -254,11 +260,11 @@ async def daily_report_task(app_state):
         app_state.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 
 # ==========================================
-# 6. المحرك والمفاضلة (The Draft & Sleep) 💤
+# 6. المحرك والمفاضلة بواسطة الـ ADX (الزخم) 🌪️
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V21.0 (THE PENTAGON)", Log.GREEN)
-    await send_telegram_msg("🟢 <b>Fortress V21.0 Pentagon Online.</b>\nHunting with 5 Elite Strategies (15m) 🏛️")
+    cprint("🚀 System Online: V22.0 (OMNI-MARKET)", Log.GREEN)
+    await send_telegram_msg("🟢 <b>Fortress V22.0 Omni-Market Online.</b>\nHunting with 5 Strategies & ADX Ranking 🌐")
     
     try:
         await exchange.load_markets()
@@ -278,13 +284,15 @@ async def start_scanning(app_state):
                 valid_signals = [res for res in results if res is not None]
                 
                 if valid_signals:
-                    # المفاضلة: تصفية أعلى فوليوم من بين الـ 5 استراتيجيات
-                    valid_signals.sort(key=lambda x: x['vol_ratio'], reverse=True)
+                    # 🥇 المفاضلة العبقرية: ترتيب الصفقات حسب الـ ADX (قوة حركة السعر)
+                    # نتخلص من الفوليوم الوهمي ونعتمد على قوة الاتجاه الحقيقية
+                    valid_signals.sort(key=lambda x: x['adx'], reverse=True)
                     top_signals = valid_signals[:MAX_TRADES_AT_ONCE]
-                    cprint(f"🏆 DEPLOYING TOP {len(top_signals)} SETUPS!", Log.GREEN)
+                    
+                    cprint(f"🏆 DEPLOYING TOP {len(top_signals)} SETUPS (High ADX)!", Log.GREEN)
                     
                     for sig in top_signals:
-                        sym, entry, sl, side, lev, strat = sig['symbol'], sig['entry'], sig['sl'], sig['side'], sig['leverage'], sig['strat']
+                        sym, entry, sl, side, lev, strat, adx = sig['symbol'], sig['entry'], sig['sl'], sig['side'], sig['leverage'], sig['strat'], sig['adx']
                         tp1, tp2, tp3, tp_final = sig['tp1'], sig['tp2'], sig['tp3'], sig['tp_final']
                         clean_name = sym.split(':')[0].replace('/', '')
                         icon = "🟢" if side == "LONG" else "🔴"
@@ -296,6 +304,7 @@ async def start_scanning(app_state):
                             f"{icon} <b><code>{clean_name}</code> ({side})</b>\n"
                             f"────────────────\n"
                             f"🧠 <b>Strategy:</b> <b>{strat}</b>\n"
+                            f"🌪️ <b>ADX Score:</b> {adx:.1f} (Trend Power)\n"
                             f"🛒 <b>Entry:</b> <code>{format_price(entry)}</code>\n"
                             f"⚖️ <b>Leverage:</b> <b>{lev}x</b>\n"
                             f"────────────────\n"
@@ -314,8 +323,8 @@ async def start_scanning(app_state):
                             }
                             app_state.stats["signals"] += 1; await asyncio.sleep(1) 
                 else:
-                    cprint("📉 No prime setups detected. Retrying...", Log.BLUE)
-                    await asyncio.sleep(180) # راحة 3 دقائق لأن فريم 15 سريع
+                    cprint("📉 No setups detected. Retrying in 3 minutes...", Log.BLUE)
+                    await asyncio.sleep(180) 
             except: await asyncio.sleep(5)
     except: await asyncio.sleep(10)
 
