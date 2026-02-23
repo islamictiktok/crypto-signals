@@ -17,8 +17,9 @@ TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
-TIMEFRAME = '15m' 
+TIMEFRAME = '1h' # الفريم الذهبي للتصحيحات
 MIN_VOLUME_USDT = 40_000
+MAX_TRADES_AT_ONCE = 3 # أفضل 3 صفقات فقط
 
 app = FastAPI()
 http_client = httpx.AsyncClient(timeout=15.0)
@@ -44,9 +45,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>💼 Fortress V18.0 (HEDGE FUND)</h1>
-            <p>Strategy: SMC Demand + Leveraged PNL</p>
-            <p>Mode: Full Grid Tracking (TP1 to TP4) 🎯</p>
+            <h1>🏹 Fortress V19.0 (PULLBACK SNIPER)</h1>
+            <p>Strategy: Trend Pullback to Value Area (1H)</p>
+            <p>Mode: Top 3 Draft & Sleep until complete 💤</p>
         </body>
     </html>
     """
@@ -77,37 +78,60 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. محرك SMC الشامل 🐋
+# 3. محرك التصحيحات (Pullback Logic) 🏹
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
-        if not ohlcv or len(ohlcv) < 100: return None
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=250)
+        if not ohlcv or len(ohlcv) < 220: return None
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
         if df['vol'].iloc[-1] == 0: return None
 
         curr = df.iloc[-1]
+        prev = df.iloc[-2]
         entry_price = curr['close']
 
-        df['demand_zone'] = df['low'].rolling(window=20).min()
-        df['ema200'] = ta.ema(df['close'], length=200)
+        # المؤشرات الأساسية
+        df['ema200'] = ta.ema(df['close'], length=200) # الترند العام
+        df['ema50'] = ta.ema(df['close'], length=50)   # منطقة القيمة (Value Area)
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        df['rsi'] = ta.rsi(df['close'], length=14)
         
-        if pd.isna(df['demand_zone'].iloc[-1]) or pd.isna(df['ema200'].iloc[-1]): return None
+        if pd.isna(df['ema200'].iloc[-1]) or pd.isna(df['atr'].iloc[-1]): return None
         
-        demand_level = df['demand_zone'].iloc[-1]
-        
-        is_uptrend = curr['close'] > (df['ema200'].iloc[-1] * 0.95)
-        testing_demand = curr['low'] <= (demand_level * 1.015)
-        bounce_rejection = curr['close'] > curr['open']
+        ema200 = df['ema200'].iloc[-1]
+        ema50 = df['ema50'].iloc[-1]
+        atr = df['atr'].iloc[-1]
         
         avg_vol = df['vol'].iloc[-20:-1].mean()
         vol_ratio = curr['vol'] / avg_vol if avg_vol > 0 else 0
-        vol_ok = vol_ratio > 1.2
 
-        if is_uptrend and testing_demand and bounce_rejection and vol_ok:
+        # -----------------------------------------------------------
+        # 🔥 تصحيح الشراء (LONG PULLBACK) 🔥
+        # -----------------------------------------------------------
+        # 1. ترند عام صاعد
+        is_uptrend = ema50 > ema200 and curr['close'] > ema200
+        # 2. السعر نزل ولمس خط الـ 50 أو تحته قليلاً (التصحيح)
+        touched_value_area = curr['low'] <= ema50
+        # 3. إغلاق الشمعة فوق خط الـ 50 (رفض الهبوط والارتداد)
+        bounced_up = curr['close'] > ema50 and curr['close'] > curr['open']
+        # 4. الـ RSI بدأ في الصعود من مناطق التشبع البيعي
+        rsi_bullish = curr['rsi'] > prev['rsi'] and curr['rsi'] < 55
+        
+        # -----------------------------------------------------------
+        # 🔥 تصحيح البيع (SHORT PULLBACK) 🔥
+        # -----------------------------------------------------------
+        is_downtrend = ema50 < ema200 and curr['close'] < ema200
+        touched_value_area_short = curr['high'] >= ema50
+        bounced_down = curr['close'] < ema50 and curr['close'] < curr['open']
+        rsi_bearish = curr['rsi'] < prev['rsi'] and curr['rsi'] > 45
+
+        # التنفيذ (مع تأكيد سيولة بسيطة للارتداد)
+        if is_uptrend and touched_value_area and bounced_up and rsi_bullish and vol_ratio > 1.0:
             
-            sl = demand_level * 0.985 
+            # الستوب: تحت أدنى نقطة وصل لها التصحيح (بمسافة أمان صغيرة)
+            sl = min(curr['low'], prev['low']) * 0.99
             risk = entry_price - sl
             
             tp1 = entry_price + (risk * 1.5)  
@@ -115,25 +139,39 @@ async def get_signal_logic(symbol):
             tp3 = entry_price + (risk * 5.0)  
             tp_final = entry_price + (risk * 8.0) 
             
-            # حساب الرافعة المالية آلياً داخل المحرك
             pnl_sl_base = abs((entry_price - sl) / entry_price) * 100
-            if pnl_sl_base > 0:
-                leverage = max(2, min(int(20.0 / pnl_sl_base), 50))
-            else:
-                leverage = 10
+            leverage = max(2, min(int(20.0 / pnl_sl_base), 50)) if pnl_sl_base > 0 else 10
             
             return {
                 "symbol": symbol, "side": "LONG", "entry": entry_price, 
                 "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp_final": tp_final, 
-                "sl": sl, "vol_ratio": vol_ratio, "demand": demand_level,
-                "leverage": leverage
+                "sl": sl, "vol_ratio": vol_ratio, "leverage": leverage
+            }
+            
+        elif is_downtrend and touched_value_area_short and bounced_down and rsi_bearish and vol_ratio > 1.0:
+            
+            sl = max(curr['high'], prev['high']) * 1.01
+            risk = sl - entry_price
+            
+            tp1 = entry_price - (risk * 1.5)  
+            tp2 = entry_price - (risk * 3.0)  
+            tp3 = entry_price - (risk * 5.0)  
+            tp_final = entry_price - (risk * 8.0) 
+            
+            pnl_sl_base = abs((entry_price - sl) / entry_price) * 100
+            leverage = max(2, min(int(20.0 / pnl_sl_base), 50)) if pnl_sl_base > 0 else 10
+            
+            return {
+                "symbol": symbol, "side": "SHORT", "entry": entry_price, 
+                "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp_final": tp_final, 
+                "sl": sl, "vol_ratio": vol_ratio, "leverage": leverage
             }
 
         return None
     except Exception: return None
 
 # ==========================================
-# 4. إدارة البيانات (PNL & Stats) 📊
+# 4. إدارة البيانات والمراقبة
 # ==========================================
 sem = asyncio.Semaphore(15)
 
@@ -159,17 +197,22 @@ async def monitor_trades(app_state):
                 ticker = await exchange.fetch_ticker(sym)
                 price = ticker['last']
                 
-                # ⚖️ حساب الـ PNL مضروباً في الرافعة المالية (Leveraged ROE)
-                base_pnl = ((price - trade['entry']) / trade['entry']) * 100
+                base_pnl = ((price - trade['entry']) / trade['entry']) * 100 if trade['side'] == "LONG" else ((trade['entry'] - price) / trade['entry']) * 100
                 leveraged_pnl = base_pnl * trade['leverage']
                 
-                hit_tp1 = price >= trade['tp1']
-                hit_tp2 = price >= trade['tp2']
-                hit_tp3 = price >= trade['tp3']
-                hit_tp_final = price >= trade['tp_final']
-                hit_sl = price <= trade['sl']
+                if trade['side'] == "LONG":
+                    hit_tp1 = price >= trade['tp1']
+                    hit_tp2 = price >= trade['tp2']
+                    hit_tp3 = price >= trade['tp3']
+                    hit_tp_final = price >= trade['tp_final']
+                    hit_sl = price <= trade['sl']
+                else:
+                    hit_tp1 = price <= trade['tp1']
+                    hit_tp2 = price <= trade['tp2']
+                    hit_tp3 = price <= trade['tp3']
+                    hit_tp_final = price <= trade['tp_final']
+                    hit_sl = price >= trade['sl']
 
-                # مراقبة الهدف الأول (تأمين الدخول)
                 if hit_tp1 and not trade.get('hit_tp1', False):
                     cprint(f"✅ TP1 HIT: {trade['clean_name']} (+{leveraged_pnl:.1f}%)", Log.GREEN)
                     await reply_telegram_msg(f"✅ <b>TP1 HIT! (+{leveraged_pnl:.1f}% ROE)</b>\n🛡️ Move SL to Entry", trade['msg_id'])
@@ -177,27 +220,23 @@ async def monitor_trades(app_state):
                     trade['sl'] = trade['entry'] 
                     app_state.stats["tp_hits"] += 1
                 
-                # مراقبة الهدف الثاني
                 if hit_tp2 and not trade.get('hit_tp2', False):
                     cprint(f"🔥 TP2 HIT: {trade['clean_name']} (+{leveraged_pnl:.1f}%)", Log.GREEN)
                     await reply_telegram_msg(f"🔥 <b>TP2 HIT! (+{leveraged_pnl:.1f}% ROE)</b>\nProfits are rolling! 💰", trade['msg_id'])
                     trade['hit_tp2'] = True
                 
-                # مراقبة الهدف الثالث
                 if hit_tp3 and not trade.get('hit_tp3', False):
                     cprint(f"🚀 TP3 HIT: {trade['clean_name']} (+{leveraged_pnl:.1f}%)", Log.GREEN)
                     await reply_telegram_msg(f"🚀 <b>TP3 HIT! (+{leveraged_pnl:.1f}% ROE)</b>\nMassive gains! 💎", trade['msg_id'])
                     trade['hit_tp3'] = True
 
-                # مراقبة الهدف النهائي وإغلاق المراقبة
                 if hit_tp_final:
                     cprint(f"🏆 FULL TARGET: {trade['clean_name']} (+{leveraged_pnl:.1f}%)", Log.GREEN)
-                    await reply_telegram_msg(f"🏆 <b>ALL TARGETS HIT! (+{leveraged_pnl:.1f}% ROE)</b> 🐋\nTrade Closed.", trade['msg_id'])
+                    await reply_telegram_msg(f"🏆 <b>ALL TARGETS HIT! (+{leveraged_pnl:.1f}% ROE)</b> 🏹\nTrade Closed.", trade['msg_id'])
                     app_state.stats["tp_hits"] += 1
                     app_state.stats["net_pnl"] += leveraged_pnl
                     del app_state.active_trades[sym]
                 
-                # مراقبة ضرب الاستوب
                 elif hit_sl:
                     if trade.get('hit_tp1', False):
                         status = "Break-Even"
@@ -205,7 +244,7 @@ async def monitor_trades(app_state):
                     else:
                         status = "Stop Loss"
                         app_state.stats["sl_hits"] += 1
-                        app_state.stats["net_pnl"] += leveraged_pnl # سيتم خصم الخسارة (لأنها بالسالب)
+                        app_state.stats["net_pnl"] += leveraged_pnl 
                         
                     cprint(f"🛑 CLOSED: {trade['clean_name']} at {status}", Log.RED)
                     await reply_telegram_msg(f"🛑 <b>Closed at {status}</b> ({leveraged_pnl:.1f}% ROE)", trade['msg_id'])
@@ -216,7 +255,7 @@ async def monitor_trades(app_state):
         await asyncio.sleep(10)
 
 # ==========================================
-# 5. التقرير اليومي الفاخر (Elite Report) 👑
+# 5. التقرير اليومي
 # ==========================================
 async def daily_report_task(app_state):
     while True:
@@ -229,35 +268,39 @@ async def daily_report_task(app_state):
         win_rate = (wins / total_closed) * 100 if total_closed > 0 else 0.0
         
         report_msg = (
-            f"👑 <b>FORTRESS ELITE REPORT (24H)</b> 👑\n"
+            f"👑 <b>PULLBACK SNIPER REPORT (24H)</b> 👑\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📡 <b>Total Signals:</b> {app_state.stats['signals']}\n"
+            f"📡 <b>Total Batches:</b> {app_state.stats['signals']}\n"
             f"✅ <b>Winning Trades:</b> {wins}\n"
             f"❌ <b>Losing Trades:</b> {losses}\n"
             f"🎯 <b>Accuracy:</b> {win_rate:.1f}%\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📈 <b>Net Leveraged PNL:</b> {app_state.stats['net_pnl']:.2f}%\n"
-            f"<i>*(Actual Account Growth)*</i>"
         )
         await send_telegram_msg(report_msg)
-        
         app_state.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 
 # ==========================================
-# 6. محرك البحث 🌊
+# 6. محرك البحث الذكي (Top 3 & Sleep) 💤
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V18.0 (HEDGE FUND)", Log.GREEN)
-    await send_telegram_msg("🟢 <b>Fortress V18.0 Hedge Fund Online.</b>\nHunting Demand Zones & Tracking All TPs 🌊")
+    cprint("🚀 System Online: V19.0 (PULLBACK SNIPER)", Log.GREEN)
+    await send_telegram_msg("🟢 <b>Fortress V19.0 Pullback Sniper Online.</b>\nHunting Top 3 Pullbacks 🏹")
     
     try:
         await exchange.load_markets()
         while True:
+            # 🛑 الميزة الأساسية: الانتظار التام حتى تفرغ المحفظة 🛑
+            if len(app_state.active_trades) > 0:
+                cprint(f"💤 Sleeping... {len(app_state.active_trades)} trades are still active.", Log.YELLOW)
+                await asyncio.sleep(60) 
+                continue 
+            
             try:
                 markets = await exchange.fetch_markets()
                 active_symbols = [m['symbol'] for m in markets if m['swap'] and m['quote'] == 'USDT' and m['active']]
                 
-                cprint(f"🔎 Scanning {len(active_symbols)} Futures pairs...", Log.BLUE)
+                cprint(f"🔎 Scanning {len(active_symbols)} Futures pairs for Pullbacks on 1H...", Log.BLUE)
                 
                 tasks = [safe_check(sym) for sym in active_symbols]
                 results = await asyncio.gather(*tasks)
@@ -265,17 +308,21 @@ async def start_scanning(app_state):
                 valid_signals = [res for res in results if res is not None]
                 
                 if valid_signals:
-                    for sig in valid_signals:
+                    # 🥇 تصفية أفضل 3 ارتدادات حسب الفوليوم الانفجاري
+                    valid_signals.sort(key=lambda x: x['vol_ratio'], reverse=True)
+                    top_signals = valid_signals[:MAX_TRADES_AT_ONCE]
+                    
+                    cprint(f"🏹 DEPLOYING TOP {len(top_signals)} PULLBACKS!", Log.GREEN)
+                    
+                    for sig in top_signals:
                         sym = sig['symbol']
-                        if sym in app_state.active_trades: continue
-                        
                         clean_name = sym.split(':')[0].replace('/', '')
                         entry, sl = sig['entry'], sig['sl']
                         tp1, tp2, tp3, tp_final = sig['tp1'], sig['tp2'], sig['tp3'], sig['tp_final']
-                        demand = sig['demand']
+                        side = sig['side']
                         lev = sig['leverage']
+                        icon = "🟢" if side == "LONG" else "🔴"
                         
-                        # حساب الأهداف مضروبة في الرافعة للرسالة
                         pnl_tp1 = abs((tp1 - entry) / entry) * 100 * lev
                         pnl_tp2 = abs((tp2 - entry) / entry) * 100 * lev
                         pnl_tp3 = abs((tp3 - entry) / entry) * 100 * lev
@@ -283,7 +330,7 @@ async def start_scanning(app_state):
                         pnl_sl = abs((entry - sl) / entry) * 100 * lev
                         
                         msg = (
-                            f"🟢 <b><code>{clean_name}</code> (SMC LONG)</b>\n"
+                            f"{icon} <b><code>{clean_name}</code> (PULLBACK {side})</b>\n"
                             f"────────────────\n"
                             f"🛒 <b>Entry:</b> <code>{format_price(entry)}</code>\n"
                             f"⚖️ <b>Leverage:</b> <b>{lev}x</b> (Iso/Cross)\n"
@@ -300,12 +347,13 @@ async def start_scanning(app_state):
                         if msg_id:
                             app_state.active_trades[sym] = {
                                 "entry": entry, "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp_final": tp_final, "sl": sl,
-                                "side": sig['side'], "msg_id": msg_id, "clean_name": clean_name, "leverage": lev
+                                "side": side, "msg_id": msg_id, "clean_name": clean_name, "leverage": lev
                             }
                             app_state.stats["signals"] += 1
                             await asyncio.sleep(1) 
-                
-                await asyncio.sleep(30)
+                else:
+                    cprint("📉 No pullbacks detected. Retrying in 5 minutes...", Log.BLUE)
+                    await asyncio.sleep(300)
                     
             except: await asyncio.sleep(5)
     except: await asyncio.sleep(10)
