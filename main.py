@@ -40,9 +40,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🌐 Fortress V22.0 (OMNI-MARKET)</h1>
-            <p>5 Strategies for All Markets + ADX Ranking (15m)</p>
-            <p>Mode: Top 3 Trend Strength Draft 🎯</p>
+            <h1>🔥 Fortress V22.1 (UNLEASHED)</h1>
+            <p>5 Strategies (15m) + ADX Drafting (Bug Fixed)</p>
+            <p>Status: Hunting the Market! 🎯</p>
         </body>
     </html>
     """
@@ -70,14 +70,17 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المحرك الشامل (Omni-Market Engine) 🧠
+# 3. المحرك الشامل بعد الإصلاح (Fixed Engine) 🧠
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=200)
-        if not ohlcv or len(ohlcv) < 150: return None
+        # 🚨 [الإصلاح 1] تم رفع السحب لـ 300 شمعة لضمان حساب الـ EMA200 والـ ADX دون أخطاء (NaN)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=300)
+        if not ohlcv or len(ohlcv) < 250: return None
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        if df['vol'].iloc[-1] == 0: return None
+        
+        # 🚨 [الإصلاح 2] فحص فوليوم الشمعة المغلقة (السابقة) لتجنب أخطاء بداية الشمعة الجديدة
+        if df['vol'].iloc[-2] == 0: return None
 
         curr = df.iloc[-1]
         prev = df.iloc[-2]
@@ -89,10 +92,9 @@ async def get_signal_logic(symbol):
         df['rsi'] = ta.rsi(df['close'], length=14)
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         
-        # مؤشر قوة الاتجاه (ADX) كبديل للفوليوم
         adx_data = ta.adx(df['high'], df['low'], df['close'], length=14)
         if adx_data is not None and not adx_data.empty:
-            df['adx'] = adx_data['ADX_14']
+            df['adx'] = adx_data.iloc[:, 0] # استخراج قيمة ADX الأساسية بشكل آمن
         else:
             return None
         
@@ -103,49 +105,49 @@ async def get_signal_logic(symbol):
         sti = ta.supertrend(df['high'], df['low'], df['close'], length=10, multiplier=3)
         df['st_dir'] = sti['SUPERTd_10_3.0']
 
+        # التأكد النهائي أن المؤشرات الأساسية تم حسابها
         if pd.isna(df['ema200'].iloc[-1]) or pd.isna(df['atr'].iloc[-1]) or pd.isna(df['adx'].iloc[-1]): return None
 
-        # تحديد حالة السوق (Trend vs Ranging)
         ema_distance_pct = abs(df['ema50'].iloc[-1] - df['ema200'].iloc[-1]) / entry * 100
-        is_ranging_market = ema_distance_pct < 0.5 # السوق العرضي الميت
+        is_ranging_market = ema_distance_pct < 0.6 # تم توسيع نطاق التذبذب قليلاً ليصطاد أكثر
         
         adx_strength = df['adx'].iloc[-1]
         strategy_name = ""
         side = ""
 
         # ---------------------------------------------------------
-        # 🟢 الاستراتيجيات الخمس (تغطي كل الظروف)
+        # 🟢 الاستراتيجيات الخمس (بشروط مُرخاة بذكاء لزيادة الإشارات)
         # ---------------------------------------------------------
 
-        # 1. SMC Liquidity Grab (لكل الحالات)
+        # 1. SMC Sweep
         if prev['low'] < df['bbl'].iloc[-2] and curr['close'] > prev['high']:
             strategy_name = "SMC Sweep"; side = "LONG"
         elif prev['high'] > df['bbu'].iloc[-2] and curr['close'] < prev['low']:
             strategy_name = "SMC Sweep"; side = "SHORT"
 
-        # 2. Range Bounce (سوق عرضي/متذبذب)
+        # 2. Range Bounce 
         elif is_ranging_market and strategy_name == "":
-            if curr['low'] <= df['bbl'].iloc[-1] and curr['rsi'] < 35 and curr['close'] > curr['open']:
+            if curr['low'] <= df['bbl'].iloc[-1] and curr['rsi'] < 40 and curr['close'] > curr['open']: # RSI مرن
                 strategy_name = "Range Bounce"; side = "LONG"
-            elif curr['high'] >= df['bbu'].iloc[-1] and curr['rsi'] > 65 and curr['close'] < curr['open']:
+            elif curr['high'] >= df['bbu'].iloc[-1] and curr['rsi'] > 60 and curr['close'] < curr['open']:
                 strategy_name = "Range Bounce"; side = "SHORT"
 
-        # 3. Golden Pullback (سوق ذو ترند قوي)
+        # 3. Golden Pullback 
         elif not is_ranging_market and strategy_name == "":
             if curr['close'] > df['ema200'].iloc[-1] and curr['low'] <= df['ema50'].iloc[-1] and curr['close'] > df['ema50'].iloc[-1]:
                 strategy_name = "EMA Pullback"; side = "LONG"
             elif curr['close'] < df['ema200'].iloc[-1] and curr['high'] >= df['ema50'].iloc[-1] and curr['close'] < df['ema50'].iloc[-1]:
                 strategy_name = "EMA Pullback"; side = "SHORT"
 
-        # 4. Bollinger Squeeze (نهاية التذبذب والانفجار)
+        # 4. Bollinger Squeeze 
         elif strategy_name == "":
-            is_squeezing = df['bb_width'].iloc[-10:-1].mean() < 6.0
+            is_squeezing = df['bb_width'].iloc[-10:-1].mean() < 7.0 # توسيع الخنق
             if is_squeezing and curr['close'] > df['bbu'].iloc[-1]:
                 strategy_name = "BB Breakout"; side = "LONG"
             elif is_squeezing and curr['close'] < df['bbl'].iloc[-1]:
                 strategy_name = "BB Breakout"; side = "SHORT"
 
-        # 5. Supertrend Flip (بداية زخم جديد)
+        # 5. Supertrend Flip 
         elif strategy_name == "":
             if df['st_dir'].iloc[-1] == 1 and df['st_dir'].iloc[-2] == -1:
                 strategy_name = "SuperTrend"; side = "LONG"
@@ -153,12 +155,11 @@ async def get_signal_logic(symbol):
                 strategy_name = "SuperTrend"; side = "SHORT"
 
         # ---------------------------------------------------------
-        # التنفيذ
+        # التنفيذ والأهداف 
         # ---------------------------------------------------------
         if strategy_name != "":
             atr = df['atr'].iloc[-1]
             
-            # أهداف مرنة حسب الـ ATR
             if side == "LONG":
                 sl = entry - (atr * 1.5)
                 tp1 = entry + (atr * 1.5)
@@ -263,8 +264,8 @@ async def daily_report_task(app_state):
 # 6. المحرك والمفاضلة بواسطة الـ ADX (الزخم) 🌪️
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V22.0 (OMNI-MARKET)", Log.GREEN)
-    await send_telegram_msg("🟢 <b>Fortress V22.0 Omni-Market Online.</b>\nHunting with 5 Strategies & ADX Ranking 🌐")
+    cprint("🚀 System Online: V22.1 (UNLEASHED)", Log.GREEN)
+    await send_telegram_msg("🟢 <b>Fortress V22.1 (Fixed & Unleashed) Online.</b>\nHunting with 5 Strategies & ADX Ranking 🌐")
     
     try:
         await exchange.load_markets()
@@ -284,8 +285,7 @@ async def start_scanning(app_state):
                 valid_signals = [res for res in results if res is not None]
                 
                 if valid_signals:
-                    # 🥇 المفاضلة العبقرية: ترتيب الصفقات حسب الـ ADX (قوة حركة السعر)
-                    # نتخلص من الفوليوم الوهمي ونعتمد على قوة الاتجاه الحقيقية
+                    # 🥇 المفاضلة العبقرية: ترتيب الصفقات حسب الـ ADX
                     valid_signals.sort(key=lambda x: x['adx'], reverse=True)
                     top_signals = valid_signals[:MAX_TRADES_AT_ONCE]
                     
