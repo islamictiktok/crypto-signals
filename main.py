@@ -17,9 +17,8 @@ TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
-# نزلنا لفريم 15 دقيقة لتوليد صفقات كثيرة للفلترة
 TIMEFRAME = '15m' 
-MAX_TRADES_AT_ONCE = 3 # فلترة واختيار أفضل 3 صفقات فقط
+MIN_VOLUME_USDT = 40_000
 
 app = FastAPI()
 http_client = httpx.AsyncClient(timeout=15.0)
@@ -45,9 +44,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🏆 Fortress V15.0 (DRAFT MASTER)</h1>
-            <p>Strategy: Trend Pullback + ATR Targets (15m)</p>
-            <p>Mode: Top 3 Selection & Wait 🎯</p>
+            <h1>💼 Fortress V18.0 (HEDGE FUND)</h1>
+            <p>Strategy: SMC Demand + Leveraged PNL</p>
+            <p>Mode: Full Grid Tracking (TP1 to TP4) 🎯</p>
         </body>
     </html>
     """
@@ -78,88 +77,70 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. محرك الارتداد الذهبي والـ ATR 🎯
+# 3. محرك SMC الشامل 🐋
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=250)
-        if not ohlcv or len(ohlcv) < 220: return None
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
+        if not ohlcv or len(ohlcv) < 100: return None
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
         if df['vol'].iloc[-1] == 0: return None
 
         curr = df.iloc[-1]
-        prev = df.iloc[-2]
         entry_price = curr['close']
 
-        # المؤشرات الفنية
-        df['ema200'] = ta.ema(df['close'], length=200) # الاتجاه العام
-        df['ema50'] = ta.ema(df['close'], length=50)   # الاتجاه القريب
-        df['rsi'] = ta.rsi(df['close'], length=14)     # الزخم (المومنتوم)
-        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14) # حجم التذبذب للستوب والأهداف
-
-        if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema200'].iloc[-1]): return None
+        df['demand_zone'] = df['low'].rolling(window=20).min()
+        df['ema200'] = ta.ema(df['close'], length=200)
         
-        atr = df['atr'].iloc[-1]
-        avg_vol = df['vol'].iloc[-16:-1].mean()
-        if avg_vol == 0: return None
-        vol_ratio = curr['vol'] / avg_vol
-
-        # -----------------------------------------------------------
-        # 🔥 سيناريو الشراء (LONG) 🔥
-        # -----------------------------------------------------------
-        # 1. الترند صاعد بقوة: السعر فوق 50 و 50 فوق 200
-        uptrend = curr['close'] > df['ema50'].iloc[-1] > df['ema200'].iloc[-1]
-        # 2. الـ RSI يقطع 50 لأعلى (بداية دخول سيولة جديدة بعد استراحة)
-        rsi_bullish_cross = prev['rsi'] <= 50 and curr['rsi'] > 50
-        # 3. شمعة إيجابية قوية
-        bullish_candle = curr['close'] > curr['open']
+        if pd.isna(df['demand_zone'].iloc[-1]) or pd.isna(df['ema200'].iloc[-1]): return None
         
-        # -----------------------------------------------------------
-        # 🔥 سيناريو البيع (SHORT) 🔥
-        # -----------------------------------------------------------
-        downtrend = curr['close'] < df['ema50'].iloc[-1] < df['ema200'].iloc[-1]
-        rsi_bearish_cross = prev['rsi'] >= 50 and curr['rsi'] < 50
-        bearish_candle = curr['close'] < curr['open']
+        demand_level = df['demand_zone'].iloc[-1]
+        
+        is_uptrend = curr['close'] > (df['ema200'].iloc[-1] * 0.95)
+        testing_demand = curr['low'] <= (demand_level * 1.015)
+        bounce_rejection = curr['close'] > curr['open']
+        
+        avg_vol = df['vol'].iloc[-20:-1].mean()
+        vol_ratio = curr['vol'] / avg_vol if avg_vol > 0 else 0
+        vol_ok = vol_ratio > 1.2
 
-        vol_spike = vol_ratio > 1.2 # سيولة أعلى بـ 20% لتأكيد الحركة
-
-        # التنفيذ وتحديد الأهداف بعبقرية الـ ATR
-        if uptrend and rsi_bullish_cross and bullish_candle and vol_spike:
-            # الستوب: مسافة 1.5 ATR تحت نقطة الدخول (يحميك من أي ذيل شمعة عشوائي)
-            sl = entry_price - (atr * 1.5)
-            # الهدف الأول: 1.5 ATR (نسبة مخاطرة 1:1)
-            tp1 = entry_price + (atr * 1.5)
-            # الهدف النهائي: 3.0 ATR (نسبة مخاطرة 1:2)
-            tp_final = entry_price + (atr * 3.0)
+        if is_uptrend and testing_demand and bounce_rejection and vol_ok:
+            
+            sl = demand_level * 0.985 
+            risk = entry_price - sl
+            
+            tp1 = entry_price + (risk * 1.5)  
+            tp2 = entry_price + (risk * 3.0)  
+            tp3 = entry_price + (risk * 5.0)  
+            tp_final = entry_price + (risk * 8.0) 
+            
+            # حساب الرافعة المالية آلياً داخل المحرك
+            pnl_sl_base = abs((entry_price - sl) / entry_price) * 100
+            if pnl_sl_base > 0:
+                leverage = max(2, min(int(20.0 / pnl_sl_base), 50))
+            else:
+                leverage = 10
             
             return {
                 "symbol": symbol, "side": "LONG", "entry": entry_price, 
-                "tp1": tp1, "tp_final": tp_final, "sl": sl, "vol_ratio": vol_ratio
-            }
-            
-        elif downtrend and rsi_bearish_cross and bearish_candle and vol_spike:
-            sl = entry_price + (atr * 1.5)
-            tp1 = entry_price - (atr * 1.5)
-            tp_final = entry_price - (atr * 3.0)
-            
-            return {
-                "symbol": symbol, "side": "SHORT", "entry": entry_price, 
-                "tp1": tp1, "tp_final": tp_final, "sl": sl, "vol_ratio": vol_ratio
+                "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp_final": tp_final, 
+                "sl": sl, "vol_ratio": vol_ratio, "demand": demand_level,
+                "leverage": leverage
             }
 
         return None
     except Exception: return None
 
 # ==========================================
-# 4. إدارة البيانات والمراقبة
+# 4. إدارة البيانات (PNL & Stats) 📊
 # ==========================================
-sem = asyncio.Semaphore(10)
+sem = asyncio.Semaphore(15)
 
 class DataManager:
     def __init__(self):
         self.active_trades = {}
-        self.stats = {"signals": 0, "tp1": 0, "tp_full": 0, "sl": 0}
+        self.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 
 db = DataManager()
 
@@ -178,35 +159,56 @@ async def monitor_trades(app_state):
                 ticker = await exchange.fetch_ticker(sym)
                 price = ticker['last']
                 
-                if trade['side'] == "LONG":
-                    pnl = ((price - trade['entry']) / trade['entry']) * 100
-                    hit_tp1 = price >= trade['tp1']
-                    hit_tp_final = price >= trade['tp_final']
-                    hit_sl = price <= trade['sl']
-                else: 
-                    pnl = ((trade['entry'] - price) / trade['entry']) * 100
-                    hit_tp1 = price <= trade['tp1']
-                    hit_tp_final = price <= trade['tp_final']
-                    hit_sl = price >= trade['sl']
-
-                if hit_tp1 and not trade.get('hit_tp1', False):
-                    cprint(f"✅ TP1 HIT: {trade['clean_name']} ({trade['side']})", Log.GREEN)
-                    await reply_telegram_msg(f"✅ <b>TP1 HIT!</b> (Move SL to Entry) 🛡️", trade['msg_id'])
-                    trade['hit_tp1'] = True
-                    trade['sl'] = trade['entry']
-                    app_state.stats["tp1"] += 1
+                # ⚖️ حساب الـ PNL مضروباً في الرافعة المالية (Leveraged ROE)
+                base_pnl = ((price - trade['entry']) / trade['entry']) * 100
+                leveraged_pnl = base_pnl * trade['leverage']
                 
+                hit_tp1 = price >= trade['tp1']
+                hit_tp2 = price >= trade['tp2']
+                hit_tp3 = price >= trade['tp3']
+                hit_tp_final = price >= trade['tp_final']
+                hit_sl = price <= trade['sl']
+
+                # مراقبة الهدف الأول (تأمين الدخول)
+                if hit_tp1 and not trade.get('hit_tp1', False):
+                    cprint(f"✅ TP1 HIT: {trade['clean_name']} (+{leveraged_pnl:.1f}%)", Log.GREEN)
+                    await reply_telegram_msg(f"✅ <b>TP1 HIT! (+{leveraged_pnl:.1f}% ROE)</b>\n🛡️ Move SL to Entry", trade['msg_id'])
+                    trade['hit_tp1'] = True
+                    trade['sl'] = trade['entry'] 
+                    app_state.stats["tp_hits"] += 1
+                
+                # مراقبة الهدف الثاني
+                if hit_tp2 and not trade.get('hit_tp2', False):
+                    cprint(f"🔥 TP2 HIT: {trade['clean_name']} (+{leveraged_pnl:.1f}%)", Log.GREEN)
+                    await reply_telegram_msg(f"🔥 <b>TP2 HIT! (+{leveraged_pnl:.1f}% ROE)</b>\nProfits are rolling! 💰", trade['msg_id'])
+                    trade['hit_tp2'] = True
+                
+                # مراقبة الهدف الثالث
+                if hit_tp3 and not trade.get('hit_tp3', False):
+                    cprint(f"🚀 TP3 HIT: {trade['clean_name']} (+{leveraged_pnl:.1f}%)", Log.GREEN)
+                    await reply_telegram_msg(f"🚀 <b>TP3 HIT! (+{leveraged_pnl:.1f}% ROE)</b>\nMassive gains! 💎", trade['msg_id'])
+                    trade['hit_tp3'] = True
+
+                # مراقبة الهدف النهائي وإغلاق المراقبة
                 if hit_tp_final:
-                    cprint(f"🏆 FULL TARGET: {trade['clean_name']} (+{pnl:.1f}%)", Log.GREEN)
-                    await reply_telegram_msg(f"🏆 <b>FULL TARGET HIT! (+{pnl:.1f}%)</b> 🚀", trade['msg_id'])
-                    app_state.stats["tp_full"] += 1
+                    cprint(f"🏆 FULL TARGET: {trade['clean_name']} (+{leveraged_pnl:.1f}%)", Log.GREEN)
+                    await reply_telegram_msg(f"🏆 <b>ALL TARGETS HIT! (+{leveraged_pnl:.1f}% ROE)</b> 🐋\nTrade Closed.", trade['msg_id'])
+                    app_state.stats["tp_hits"] += 1
+                    app_state.stats["net_pnl"] += leveraged_pnl
                     del app_state.active_trades[sym]
                 
+                # مراقبة ضرب الاستوب
                 elif hit_sl:
-                    status = "Break-Even" if trade.get('hit_tp1', False) else "Stop Loss"
+                    if trade.get('hit_tp1', False):
+                        status = "Break-Even"
+                        leveraged_pnl = 0.0
+                    else:
+                        status = "Stop Loss"
+                        app_state.stats["sl_hits"] += 1
+                        app_state.stats["net_pnl"] += leveraged_pnl # سيتم خصم الخسارة (لأنها بالسالب)
+                        
                     cprint(f"🛑 CLOSED: {trade['clean_name']} at {status}", Log.RED)
-                    await reply_telegram_msg(f"🛑 <b>Closed at {status}</b>", trade['msg_id'])
-                    if not trade.get('hit_tp1', False): app_state.stats["sl"] += 1
+                    await reply_telegram_msg(f"🛑 <b>Closed at {status}</b> ({leveraged_pnl:.1f}% ROE)", trade['msg_id'])
                     del app_state.active_trades[sym]
                     
                 await asyncio.sleep(0.5)
@@ -214,48 +216,48 @@ async def monitor_trades(app_state):
         await asyncio.sleep(10)
 
 # ==========================================
-# 5. التقرير اليومي
+# 5. التقرير اليومي الفاخر (Elite Report) 👑
 # ==========================================
 async def daily_report_task(app_state):
     while True:
         await asyncio.sleep(86400) 
-        total_closed = app_state.stats['tp1'] + app_state.stats['tp_full'] + app_state.stats['sl']
-        win_rate = ((app_state.stats['tp1'] + app_state.stats['tp_full']) / total_closed) * 100 if total_closed > 0 else 0.0
+        cprint("📊 Generating Leveraged Daily Report...", Log.CYAN)
+        
+        wins = app_state.stats['tp_hits']
+        losses = app_state.stats['sl_hits']
+        total_closed = wins + losses
+        win_rate = (wins / total_closed) * 100 if total_closed > 0 else 0.0
         
         report_msg = (
-            f"📋 <b>FUTURES DAILY SUMMARY</b>\n"
-            f"────────────────\n"
+            f"👑 <b>FORTRESS ELITE REPORT (24H)</b> 👑\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📡 <b>Total Signals:</b> {app_state.stats['signals']}\n"
-            f"🏆 <b>TP2 Hit:</b> {app_state.stats['tp_full']}\n"
-            f"✅ <b>TP1 Hit:</b> {app_state.stats['tp1']}\n"
-            f"🛑 <b>Stop Loss:</b> {app_state.stats['sl']}\n"
-            f"🎯 <b>Est. Win Rate: {win_rate:.1f}%</b>\n"
-            f"────────────────"
+            f"✅ <b>Winning Trades:</b> {wins}\n"
+            f"❌ <b>Losing Trades:</b> {losses}\n"
+            f"🎯 <b>Accuracy:</b> {win_rate:.1f}%\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📈 <b>Net Leveraged PNL:</b> {app_state.stats['net_pnl']:.2f}%\n"
+            f"<i>*(Actual Account Growth)*</i>"
         )
         await send_telegram_msg(report_msg)
-        app_state.stats = {"signals": 0, "tp1": 0, "tp_full": 0, "sl": 0}
+        
+        app_state.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 
 # ==========================================
-# 6. محرك البحث والفلترة (The Draft) 🏆
+# 6. محرك البحث 🌊
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V15.0 (DRAFT MASTER)", Log.GREEN)
-    await send_telegram_msg("🟢 <b>Fortress V15.0 Online.</b>\nHunting Top 3 Momentum Setups (15m) 🎯")
+    cprint("🚀 System Online: V18.0 (HEDGE FUND)", Log.GREEN)
+    await send_telegram_msg("🟢 <b>Fortress V18.0 Hedge Fund Online.</b>\nHunting Demand Zones & Tracking All TPs 🌊")
     
     try:
         await exchange.load_markets()
         while True:
-            # 🛑 وضع السبات: إذا كان هناك صفقات مفتوحة، ينام البوت 🛑
-            if len(app_state.active_trades) > 0:
-                cprint(f"⏳ Waiting... {len(app_state.active_trades)} active trades running. No new scans.", Log.YELLOW)
-                await asyncio.sleep(60) 
-                continue 
-            
             try:
                 markets = await exchange.fetch_markets()
                 active_symbols = [m['symbol'] for m in markets if m['swap'] and m['quote'] == 'USDT' and m['active']]
                 
-                cprint(f"🔎 Scanning {len(active_symbols)} Futures pairs on 15m...", Log.BLUE)
+                cprint(f"🔎 Scanning {len(active_symbols)} Futures pairs...", Log.BLUE)
                 
                 tasks = [safe_check(sym) for sym in active_symbols]
                 results = await asyncio.gather(*tasks)
@@ -263,47 +265,47 @@ async def start_scanning(app_state):
                 valid_signals = [res for res in results if res is not None]
                 
                 if valid_signals:
-                    # 🥇 المفاضلة: تصفية أقوى 3 صفقات حسب قوة الفوليوم الانفجاري
-                    valid_signals.sort(key=lambda x: x['vol_ratio'], reverse=True)
-                    top_signals = valid_signals[:MAX_TRADES_AT_ONCE]
-                    
-                    cprint(f"🏆 DRAFT COMPLETE! Selecting top {len(top_signals)} setups...", Log.GREEN)
-                    
-                    for sig in top_signals:
+                    for sig in valid_signals:
                         sym = sig['symbol']
-                        clean_name = sym.split(':')[0].replace('/', '')
-                        side = sig['side']
-                        entry, tp1, tp_final, sl = sig['entry'], sig['tp1'], sig['tp_final'], sig['sl']
+                        if sym in app_state.active_trades: continue
                         
-                        icon = "🟢" if side == "LONG" else "🔴"
-                        pnl_tp1 = abs((tp1 - entry) / entry) * 100
-                        pnl_tp2 = abs((tp_final - entry) / entry) * 100
-                        pnl_sl = abs((entry - sl) / entry) * 100
+                        clean_name = sym.split(':')[0].replace('/', '')
+                        entry, sl = sig['entry'], sig['sl']
+                        tp1, tp2, tp3, tp_final = sig['tp1'], sig['tp2'], sig['tp3'], sig['tp_final']
+                        demand = sig['demand']
+                        lev = sig['leverage']
+                        
+                        # حساب الأهداف مضروبة في الرافعة للرسالة
+                        pnl_tp1 = abs((tp1 - entry) / entry) * 100 * lev
+                        pnl_tp2 = abs((tp2 - entry) / entry) * 100 * lev
+                        pnl_tp3 = abs((tp3 - entry) / entry) * 100 * lev
+                        pnl_final = abs((tp_final - entry) / entry) * 100 * lev
+                        pnl_sl = abs((entry - sl) / entry) * 100 * lev
                         
                         msg = (
-                            f"{icon} <b><code>{clean_name}</code> (15M FUTURES)</b>\n"
+                            f"🟢 <b><code>{clean_name}</code> (SMC LONG)</b>\n"
                             f"────────────────\n"
-                            f"⚡ <b>Side:</b> {side}\n"
                             f"🛒 <b>Entry:</b> <code>{format_price(entry)}</code>\n"
+                            f"⚖️ <b>Leverage:</b> <b>{lev}x</b> (Iso/Cross)\n"
                             f"────────────────\n"
-                            f"🥇 <b>TP1:</b> <code>{format_price(tp1)}</code> (+{pnl_tp1:.1f}%)\n"
-                            f"🚀 <b>TP2:</b> <code>{format_price(tp_final)}</code> (+{pnl_tp2:.1f}%)\n"
+                            f"🎯 <b>TP 1:</b> <code>{format_price(tp1)}</code> (+{pnl_tp1:.1f}% ROE)\n"
+                            f"🎯 <b>TP 2:</b> <code>{format_price(tp2)}</code> (+{pnl_tp2:.1f}% ROE)\n"
+                            f"🎯 <b>TP 3:</b> <code>{format_price(tp3)}</code> (+{pnl_tp3:.1f}% ROE)\n"
+                            f"🚀 <b>TP 4:</b> <code>{format_price(tp_final)}</code> (+{pnl_final:.1f}% ROE)\n"
                             f"────────────────\n"
-                            f"🛑 <b>SL:</b> <code>{format_price(sl)}</code> (-{pnl_sl:.1f}%)\n"
-                            f"<i>(🎯 ATR Adjusted | Vol: {sig['vol_ratio']:.1f}x)</i>"
+                            f"🛑 <b>SL:</b> <code>{format_price(sl)}</code> (-{pnl_sl:.1f}% ROE)\n"
                         )
                         
                         msg_id = await send_telegram_msg(msg)
                         if msg_id:
                             app_state.active_trades[sym] = {
-                                "entry": entry, "tp1": tp1, "tp_final": tp_final, "sl": sl,
-                                "side": side, "msg_id": msg_id, "clean_name": clean_name
+                                "entry": entry, "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp_final": tp_final, "sl": sl,
+                                "side": sig['side'], "msg_id": msg_id, "clean_name": clean_name, "leverage": lev
                             }
                             app_state.stats["signals"] += 1
-                            await asyncio.sleep(1.5) 
-                else:
-                    cprint("📉 No strong setups found. Retrying in 3 minutes...", Log.BLUE)
-                    await asyncio.sleep(180)
+                            await asyncio.sleep(1) 
+                
+                await asyncio.sleep(30)
                     
             except: await asyncio.sleep(5)
     except: await asyncio.sleep(10)
