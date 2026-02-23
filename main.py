@@ -39,8 +39,8 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛡️ Fortress V23.1 (BULLETPROOF)</h1>
-            <p>5 Strategies (15m) | Bulletproof Indicators</p>
+            <h1>🦅 Fortress V24.0 (APEX PREDATOR)</h1>
+            <p>7 Strategies (15m) | Perfect ROE | Trailing SL</p>
             <p>Status: Active & Hunting! 🎯</p>
         </body>
     </html>
@@ -69,7 +69,7 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المحرك الشامل والمضاد للرصاص 🛡️
+# 3. محرك الـ 7 استراتيجيات 🧠
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -83,71 +83,93 @@ async def get_signal_logic(symbol):
         prev = df.iloc[-2]
         entry = curr['close']
 
-        # المؤشرات الأساسية
+        # المؤشرات
         df['ema50'] = ta.ema(df['close'], length=50)
         df['ema100'] = ta.ema(df['close'], length=100) 
         df['rsi'] = ta.rsi(df['close'], length=14)
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         
         adx_data = ta.adx(df['high'], df['low'], df['close'], length=14)
-        if adx_data is not None and not adx_data.empty:
-            df['adx'] = adx_data.iloc[:, 0] 
-        else:
-            return "ERROR: ADX Calc Failed"
+        if adx_data is not None and not adx_data.empty: df['adx'] = adx_data.iloc[:, 0] 
+        else: return "ERROR: ADX Calc Failed"
         
-        # 🚨 [الإصلاح الجذري] سحب البولنجر باند بذكاء مهما كان اسمه
         bb = df.ta.bbands(length=20, std=2)
         if bb is not None and not bb.empty:
             try:
                 df['bbl'] = bb.filter(like='BBL').iloc[:, 0]
                 df['bbu'] = bb.filter(like='BBU').iloc[:, 0]
                 df['bb_width'] = ((df['bbu'] - df['bbl']) / df['close']) * 100
-            except:
-                return "ERROR: BB Columns Error"
-        else:
-            return "ERROR: BB Calc Failed"
+            except: return "ERROR: BB Columns Error"
+        else: return "ERROR: BB Calc Failed"
         
-        # 🚨 [الإصلاح الجذري] سحب السوبر ترند بذكاء
         sti = ta.supertrend(df['high'], df['low'], df['close'], length=10, multiplier=3)
         if sti is not None and not sti.empty:
-            try:
-                df['st_dir'] = sti.filter(like='SUPERTd').iloc[:, 0]
-            except:
-                return "ERROR: ST Columns Error"
-        else:
-            return "ERROR: SuperTrend Failed"
+            try: df['st_dir'] = sti.filter(like='SUPERTd').iloc[:, 0]
+            except: return "ERROR: ST Columns Error"
+        else: return "ERROR: SuperTrend Failed"
 
-        if pd.isna(df['ema100'].iloc[-1]) or pd.isna(df['atr'].iloc[-1]) or pd.isna(df['adx'].iloc[-1]): 
-            return "ERROR: NaN indicators"
+        macd = ta.macd(df['close'])
+        if macd is not None and not macd.empty:
+            try:
+                df['macd_line'] = macd.iloc[:, 0]
+                df['macd_signal'] = macd.iloc[:, 2]
+            except: return "ERROR: MACD Error"
+        else: return "ERROR: MACD Failed"
+
+        if pd.isna(df['ema100'].iloc[-1]) or pd.isna(df['atr'].iloc[-1]) or pd.isna(df['adx'].iloc[-1]): return "ERROR: NaN indicators"
 
         ema_distance_pct = abs(df['ema50'].iloc[-1] - df['ema100'].iloc[-1]) / entry * 100
         is_ranging_market = ema_distance_pct < 0.6 
-        
         adx_strength = df['adx'].iloc[-1]
+        
+        # قوة الفوليوم للاستراتيجيات الجديدة
+        avg_vol = df['vol'].iloc[-20:-1].mean()
+        vol_ratio = curr['vol'] / avg_vol if avg_vol > 0 else 0
+
         strategy_name = ""
         side = ""
 
         # ---------------------------------------------------------
-        # 🟢 الاستراتيجيات الخمس
+        # 🟢 الاستراتيجيات السبع (7 Elite Strategies)
         # ---------------------------------------------------------
 
+        # 1. SMC Sweep (صيد الحيتان)
         if prev['low'] < df['bbl'].iloc[-2] and curr['close'] > prev['open']: 
             strategy_name = "SMC Sweep"; side = "LONG"
         elif prev['high'] > df['bbu'].iloc[-2] and curr['close'] < prev['open']:
             strategy_name = "SMC Sweep"; side = "SHORT"
 
+        # 2. Volume Engulfing (الابتلاع الفوليومي) - جديد 🔥
+        elif strategy_name == "":
+            bullish_engulfing = (prev['close'] < prev['open']) and (curr['close'] > curr['open']) and (curr['close'] > prev['open']) and (curr['open'] < prev['close'])
+            bearish_engulfing = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (curr['close'] < prev['open']) and (curr['open'] > prev['close'])
+            if bullish_engulfing and vol_ratio > 1.5:
+                strategy_name = "Vol Engulfing"; side = "LONG"
+            elif bearish_engulfing and vol_ratio > 1.5:
+                strategy_name = "Vol Engulfing"; side = "SHORT"
+
+        # 3. MACD Momentum (الزخم المبكر) - جديد 🔥
+        elif strategy_name == "":
+            if df['macd_line'].iloc[-1] > df['macd_signal'].iloc[-1] and df['macd_line'].iloc[-2] <= df['macd_signal'].iloc[-2] and df['macd_line'].iloc[-1] < 0:
+                strategy_name = "MACD Momentum"; side = "LONG"
+            elif df['macd_line'].iloc[-1] < df['macd_signal'].iloc[-1] and df['macd_line'].iloc[-2] >= df['macd_signal'].iloc[-2] and df['macd_line'].iloc[-1] > 0:
+                strategy_name = "MACD Momentum"; side = "SHORT"
+
+        # 4. Range Bounce (التذبذب)
         elif is_ranging_market and strategy_name == "":
             if curr['low'] <= df['bbl'].iloc[-1] and curr['close'] > curr['open']: 
                 strategy_name = "Range Bounce"; side = "LONG"
             elif curr['high'] >= df['bbu'].iloc[-1] and curr['close'] < curr['open']:
                 strategy_name = "Range Bounce"; side = "SHORT"
 
+        # 5. Golden Pullback (التصحيح الذهبي)
         elif not is_ranging_market and strategy_name == "":
             if curr['close'] > df['ema100'].iloc[-1] and curr['low'] <= df['ema50'].iloc[-1] and curr['close'] > df['ema50'].iloc[-1]:
                 strategy_name = "EMA Pullback"; side = "LONG"
             elif curr['close'] < df['ema100'].iloc[-1] and curr['high'] >= df['ema50'].iloc[-1] and curr['close'] < df['ema50'].iloc[-1]:
                 strategy_name = "EMA Pullback"; side = "SHORT"
 
+        # 6. Bollinger Breakout (كسر الاختناق)
         elif strategy_name == "":
             is_squeezing = df['bb_width'].iloc[-10:-1].mean() < 8.0 
             if is_squeezing and curr['close'] > df['bbu'].iloc[-1]:
@@ -155,6 +177,7 @@ async def get_signal_logic(symbol):
             elif is_squeezing and curr['close'] < df['bbl'].iloc[-1]:
                 strategy_name = "BB Breakout"; side = "SHORT"
 
+        # 7. Supertrend Flip (السوبر ترند)
         elif strategy_name == "":
             if df['st_dir'].iloc[-1] == 1 and df['st_dir'].iloc[-2] == -1:
                 strategy_name = "SuperTrend"; side = "LONG"
@@ -162,23 +185,17 @@ async def get_signal_logic(symbol):
                 strategy_name = "SuperTrend"; side = "SHORT"
 
         # ---------------------------------------------------------
-        # التنفيذ
+        # التنفيذ وتحديد الأهداف
         # ---------------------------------------------------------
         if strategy_name != "":
             atr = df['atr'].iloc[-1]
             
             if side == "LONG":
                 sl = entry - (atr * 1.5)
-                tp1 = entry + (atr * 1.5)
-                tp2 = entry + (atr * 3.0)
-                tp3 = entry + (atr * 5.0)
-                tp_final = entry + (atr * 8.0)
+                tp1 = entry + (atr * 1.5); tp2 = entry + (atr * 3.0); tp3 = entry + (atr * 5.0); tp_final = entry + (atr * 8.0)
             else:
                 sl = entry + (atr * 1.5)
-                tp1 = entry - (atr * 1.5)
-                tp2 = entry - (atr * 3.0)
-                tp3 = entry - (atr * 5.0)
-                tp_final = entry - (atr * 8.0)
+                tp1 = entry - (atr * 1.5); tp2 = entry - (atr * 3.0); tp3 = entry - (atr * 5.0); tp_final = entry - (atr * 8.0)
 
             pnl_sl_base = abs((entry - sl) / entry) * 100
             leverage = max(2, min(int(20.0 / pnl_sl_base), 50)) if pnl_sl_base > 0 else 10
@@ -193,9 +210,9 @@ async def get_signal_logic(symbol):
     except Exception as e: return f"ERROR: Exception Occurred"
 
 # ==========================================
-# 4. إدارة البيانات والمراقبة
+# 4. إدارة البيانات والمراقبة الدقيقة (Trailing SL)
 # ==========================================
-sem = asyncio.Semaphore(8)
+sem = asyncio.Semaphore(6) # تخفيض بسيط لضمان استقرار MEXC
 class DataManager:
     def __init__(self):
         self.active_trades = {}
@@ -208,7 +225,7 @@ async def safe_check(symbol):
         return await get_signal_logic(symbol)
 
 async def monitor_trades(app_state):
-    cprint("👀 15m Omni-Market Tracker Started...", Log.CYAN)
+    cprint("👀 15m Apex Tracker Started (With Trailing SL)...", Log.CYAN)
     while True:
         current_symbols = list(app_state.active_trades.keys())
         for sym in current_symbols:
@@ -217,8 +234,10 @@ async def monitor_trades(app_state):
                 ticker = await exchange.fetch_ticker(sym)
                 price = ticker['last']
                 
-                base_pnl = ((price - trade['entry']) / trade['entry']) * 100 if trade['side'] == "LONG" else ((trade['entry'] - price) / trade['entry']) * 100
-                leveraged_pnl = base_pnl * trade['leverage']
+                # استخدام المتغيرات المخزنة لضمان تطابق الـ ROE 100%
+                pnl_tp1 = trade['pnl_tp1']; pnl_tp2 = trade['pnl_tp2']
+                pnl_tp3 = trade['pnl_tp3']; pnl_final = trade['pnl_final']
+                pnl_sl = trade['pnl_sl']
                 
                 hit_tp1 = price >= trade['tp1'] if trade['side'] == "LONG" else price <= trade['tp1']
                 hit_tp2 = price >= trade['tp2'] if trade['side'] == "LONG" else price <= trade['tp2']
@@ -226,25 +245,54 @@ async def monitor_trades(app_state):
                 hit_tp_final = price >= trade['tp_final'] if trade['side'] == "LONG" else price <= trade['tp_final']
                 hit_sl = price <= trade['sl'] if trade['side'] == "LONG" else price >= trade['sl']
 
+                # 🎯 الهدف الأول
                 if hit_tp1 and not trade.get('hit_tp1', False):
-                    await reply_telegram_msg(f"✅ <b>TP1 HIT! (+{leveraged_pnl:.1f}% ROE)</b>\n🛡️ Move SL to Entry", trade['msg_id'])
-                    trade['hit_tp1'] = True; trade['sl'] = trade['entry']; app_state.stats["tp_hits"] += 1
+                    await reply_telegram_msg(f"✅ <b>TP1 HIT! (+{pnl_tp1:.1f}% ROE)</b>\n🛡️ Move SL to Entry", trade['msg_id'])
+                    trade['hit_tp1'] = True
+                    trade['sl'] = trade['entry'] # الاستوب إلى الدخول
+                    trade['current_sl_name'] = "Entry"
+                    app_state.stats["tp_hits"] += 1
                 
+                # 🔥 الهدف الثاني
                 if hit_tp2 and not trade.get('hit_tp2', False):
-                    await reply_telegram_msg(f"🔥 <b>TP2 HIT! (+{leveraged_pnl:.1f}% ROE)</b>", trade['msg_id']); trade['hit_tp2'] = True
+                    await reply_telegram_msg(f"🔥 <b>TP2 HIT! (+{pnl_tp2:.1f}% ROE)</b>\n📈 Trailing SL moved to TP1", trade['msg_id'])
+                    trade['hit_tp2'] = True
+                    trade['sl'] = trade['tp1'] # الاستوب يتحرك إلى الهدف الأول
+                    trade['current_sl_name'] = "TP1 Profit"
                 
+                # 🚀 الهدف الثالث
                 if hit_tp3 and not trade.get('hit_tp3', False):
-                    await reply_telegram_msg(f"🚀 <b>TP3 HIT! (+{leveraged_pnl:.1f}% ROE)</b>", trade['msg_id']); trade['hit_tp3'] = True
+                    await reply_telegram_msg(f"🚀 <b>TP3 HIT! (+{pnl_tp3:.1f}% ROE)</b>\n📈 Trailing SL moved to TP2", trade['msg_id'])
+                    trade['hit_tp3'] = True
+                    trade['sl'] = trade['tp2'] # الاستوب يتحرك إلى الهدف الثاني
+                    trade['current_sl_name'] = "TP2 Profit"
 
+                # 🏆 الهدف الأخير
                 if hit_tp_final:
-                    await reply_telegram_msg(f"🏆 <b>ALL TARGETS HIT! (+{leveraged_pnl:.1f}% ROE)</b> 🏦\nTrade Closed.", trade['msg_id'])
-                    app_state.stats["tp_hits"] += 1; app_state.stats["net_pnl"] += leveraged_pnl; del app_state.active_trades[sym]
+                    await reply_telegram_msg(f"🏆 <b>ALL TARGETS HIT! (+{pnl_final:.1f}% ROE)</b> 🏦\nTrade Closed.", trade['msg_id'])
+                    app_state.stats["tp_hits"] += 1; app_state.stats["net_pnl"] += pnl_final; del app_state.active_trades[sym]
                 
+                # 🛑 ضرب الاستوب (الأساسي أو المتحرك)
                 elif hit_sl:
-                    status = "Break-Even" if trade.get('hit_tp1', False) else "Stop Loss"
-                    leveraged_pnl = 0.0 if status == "Break-Even" else leveraged_pnl
-                    if status == "Stop Loss": app_state.stats["sl_hits"] += 1; app_state.stats["net_pnl"] += leveraged_pnl 
-                    await reply_telegram_msg(f"🛑 <b>Closed at {status}</b> ({leveraged_pnl:.1f}% ROE)", trade['msg_id'])
+                    sl_state = trade.get('current_sl_name', 'Stop Loss')
+                    
+                    if sl_state == "Stop Loss":
+                        # استوب لوس حقيقي
+                        msg_text = f"🛑 <b>Closed at Stop Loss</b> (-{pnl_sl:.1f}% ROE)"
+                        app_state.stats["sl_hits"] += 1; app_state.stats["net_pnl"] -= pnl_sl 
+                    elif sl_state == "Entry":
+                        # خروج على الدخول (بدون خسارة)
+                        msg_text = f"🛡️ <b>Closed at Break-Even</b> (0.0% ROE)"
+                    elif sl_state == "TP1 Profit":
+                        # الاستوب المتحرك ضرب (نحسب أرباح TP1)
+                        msg_text = f"🛡️ <b>Stopped out in Profit at TP1</b> (+{pnl_tp1:.1f}% ROE)"
+                        app_state.stats["net_pnl"] += pnl_tp1
+                    elif sl_state == "TP2 Profit":
+                        # الاستوب المتحرك ضرب (نحسب أرباح TP2)
+                        msg_text = f"🛡️ <b>Stopped out in Profit at TP2</b> (+{pnl_tp2:.1f}% ROE)"
+                        app_state.stats["net_pnl"] += pnl_tp2
+
+                    await reply_telegram_msg(msg_text, trade['msg_id'])
                     del app_state.active_trades[sym]
                     
                 await asyncio.sleep(0.5)
@@ -259,7 +307,7 @@ async def daily_report_task(app_state):
         await asyncio.sleep(86400) 
         wins = app_state.stats['tp_hits']; losses = app_state.stats['sl_hits']
         win_rate = (wins / (wins + losses)) * 100 if (wins + losses) > 0 else 0.0
-        msg = (f"🌐 <b>OMNI-MARKET REPORT (24H)</b> 🌐\n━━━━━━━━━━━━━━━━━━━━\n"
+        msg = (f"🦅 <b>APEX PREDATOR REPORT (24H)</b> 🦅\n━━━━━━━━━━━━━━━━━━━━\n"
                f"📡 <b>Batches:</b> {app_state.stats['signals']}\n✅ <b>Wins:</b> {wins} | ❌ <b>Losses:</b> {losses}\n"
                f"🎯 <b>Accuracy:</b> {win_rate:.1f}%\n━━━━━━━━━━━━━━━━━━━━\n"
                f"📈 <b>Net Leveraged PNL:</b> {app_state.stats['net_pnl']:.2f}%")
@@ -270,8 +318,8 @@ async def daily_report_task(app_state):
 # 6. المحرك والمفاضلة
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V23.1 (BULLETPROOF)", Log.GREEN)
-    await send_telegram_msg("🟢 <b>Fortress V23.1 Bulletproof Online.</b>\nHunting with 5 Strategies 🛡️🌐")
+    cprint("🚀 System Online: V24.0 (APEX PREDATOR)", Log.GREEN)
+    await send_telegram_msg("🟢 <b>Fortress V24.0 Apex Predator Online.</b>\nHunting with 7 Elite Strategies 🦅")
     
     try:
         await exchange.load_markets()
@@ -283,7 +331,7 @@ async def start_scanning(app_state):
             try:
                 markets = await exchange.fetch_markets()
                 active_symbols = [m['symbol'] for m in markets if m['swap'] and m['quote'] == 'USDT' and m['active']]
-                cprint(f"🔎 Scanning {len(active_symbols)} pairs using 5 Strategies...", Log.BLUE)
+                cprint(f"🔎 Scanning {len(active_symbols)} pairs using 7 Strategies...", Log.BLUE)
                 
                 tasks = [safe_check(sym) for sym in active_symbols]
                 results = await asyncio.gather(*tasks)
@@ -293,13 +341,10 @@ async def start_scanning(app_state):
                 last_error = ""
                 
                 for res in results:
-                    if isinstance(res, dict):
-                        valid_signals.append(res)
-                    elif isinstance(res, str) and res.startswith("ERROR"):
-                        error_count += 1
-                        last_error = res
+                    if isinstance(res, dict): valid_signals.append(res)
+                    elif isinstance(res, str) and res.startswith("ERROR"): error_count += 1; last_error = res
                 
-                cprint(f"📊 Scan Result: {len(valid_signals)} Signals Found | {error_count} Pairs had Data Errors. (Last Err: {last_error})", Log.YELLOW)
+                cprint(f"📊 Scan Result: {len(valid_signals)} Signals Found | {error_count} Errors.", Log.YELLOW)
 
                 if valid_signals:
                     valid_signals.sort(key=lambda x: x['adx'], reverse=True)
@@ -313,14 +358,14 @@ async def start_scanning(app_state):
                         clean_name = sym.split(':')[0].replace('/', '')
                         icon = "🟢" if side == "LONG" else "🔴"
                         
+                        # 🚨 حساب وتخزين الـ ROE بدقة 100% 🚨
                         pnl_tp1, pnl_tp2, pnl_tp3, pnl_final = [abs((tp - entry) / entry) * 100 * lev for tp in (tp1, tp2, tp3, tp_final)]
                         pnl_sl = abs((entry - sl) / entry) * 100 * lev
                         
+                        # التنسيق الجديد للرسالة كما طلبت بالضبط
                         msg = (
                             f"{icon} <b><code>{clean_name}</code> ({side})</b>\n"
                             f"────────────────\n"
-                            f"🧠 <b>Strategy:</b> <b>{strat}</b>\n"
-                            f"🌪️ <b>ADX Score:</b> {adx:.1f} (Trend Power)\n"
                             f"🛒 <b>Entry:</b> <code>{format_price(entry)}</code>\n"
                             f"⚖️ <b>Leverage:</b> <b>{lev}x</b>\n"
                             f"────────────────\n"
@@ -330,12 +375,18 @@ async def start_scanning(app_state):
                             f"🚀 <b>TP 4:</b> <code>{format_price(tp_final)}</code> (+{pnl_final:.1f}% ROE)\n"
                             f"────────────────\n"
                             f"🛑 <b>SL:</b> <code>{format_price(sl)}</code> (-{pnl_sl:.1f}% ROE)\n"
+                            f"────────────────\n"
+                            f"🧠 <b>Strategy:</b> <b>{strat}</b>\n"
+                            f"🌪️ <b>ADX Score:</b> {adx:.1f}"
                         )
                         msg_id = await send_telegram_msg(msg)
                         if msg_id:
+                            # 🚨 تخزين الـ ROE في الذاكرة لكي يطبع نفسه عند ضرب الأهداف
                             app_state.active_trades[sym] = {
                                 "entry": entry, "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp_final": tp_final, "sl": sl,
-                                "side": side, "msg_id": msg_id, "clean_name": clean_name, "leverage": lev
+                                "side": side, "msg_id": msg_id, "clean_name": clean_name, "leverage": lev,
+                                "pnl_tp1": pnl_tp1, "pnl_tp2": pnl_tp2, "pnl_tp3": pnl_tp3, "pnl_final": pnl_final, "pnl_sl": pnl_sl,
+                                "current_sl_name": "Stop Loss" # لتعقب نوع الاستوب الحالي
                             }
                             app_state.stats["signals"] += 1; await asyncio.sleep(1) 
                 else:
