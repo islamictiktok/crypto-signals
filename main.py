@@ -17,9 +17,9 @@ TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
-TIMEFRAME = '1h' # الفريم الذهبي للتصحيحات
+TIMEFRAME = '30m' # 🔥 الفريم الذهبي الجديد 🔥
 MIN_VOLUME_USDT = 40_000
-MAX_TRADES_AT_ONCE = 3 # أفضل 3 صفقات فقط
+MAX_TRADES_AT_ONCE = 3 # أفضل 3 صفقات فقط للتركيز
 
 app = FastAPI()
 http_client = httpx.AsyncClient(timeout=15.0)
@@ -45,9 +45,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🏹 Fortress V19.0 (PULLBACK SNIPER)</h1>
-            <p>Strategy: Trend Pullback to Value Area (1H)</p>
-            <p>Mode: Top 3 Draft & Sleep until complete 💤</p>
+            <h1>⚖️ Fortress V20.0 (30M MASTER)</h1>
+            <p>Strategy: Trend Pullback on 30m Timeframe</p>
+            <p>Mode: Top 3 Draft & Sleep Mode 💤</p>
         </body>
     </html>
     """
@@ -78,7 +78,7 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. محرك التصحيحات (Pullback Logic) 🏹
+# 3. محرك التصحيحات (30m Logic) 🏹
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -92,17 +92,14 @@ async def get_signal_logic(symbol):
         prev = df.iloc[-2]
         entry_price = curr['close']
 
-        # المؤشرات الأساسية
-        df['ema200'] = ta.ema(df['close'], length=200) # الترند العام
-        df['ema50'] = ta.ema(df['close'], length=50)   # منطقة القيمة (Value Area)
-        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        df['ema200'] = ta.ema(df['close'], length=200) 
+        df['ema50'] = ta.ema(df['close'], length=50)   
         df['rsi'] = ta.rsi(df['close'], length=14)
         
-        if pd.isna(df['ema200'].iloc[-1]) or pd.isna(df['atr'].iloc[-1]): return None
+        if pd.isna(df['ema200'].iloc[-1]): return None
         
         ema200 = df['ema200'].iloc[-1]
         ema50 = df['ema50'].iloc[-1]
-        atr = df['atr'].iloc[-1]
         
         avg_vol = df['vol'].iloc[-20:-1].mean()
         vol_ratio = curr['vol'] / avg_vol if avg_vol > 0 else 0
@@ -110,13 +107,9 @@ async def get_signal_logic(symbol):
         # -----------------------------------------------------------
         # 🔥 تصحيح الشراء (LONG PULLBACK) 🔥
         # -----------------------------------------------------------
-        # 1. ترند عام صاعد
         is_uptrend = ema50 > ema200 and curr['close'] > ema200
-        # 2. السعر نزل ولمس خط الـ 50 أو تحته قليلاً (التصحيح)
         touched_value_area = curr['low'] <= ema50
-        # 3. إغلاق الشمعة فوق خط الـ 50 (رفض الهبوط والارتداد)
         bounced_up = curr['close'] > ema50 and curr['close'] > curr['open']
-        # 4. الـ RSI بدأ في الصعود من مناطق التشبع البيعي
         rsi_bullish = curr['rsi'] > prev['rsi'] and curr['rsi'] < 55
         
         # -----------------------------------------------------------
@@ -127,13 +120,9 @@ async def get_signal_logic(symbol):
         bounced_down = curr['close'] < ema50 and curr['close'] < curr['open']
         rsi_bearish = curr['rsi'] < prev['rsi'] and curr['rsi'] > 45
 
-        # التنفيذ (مع تأكيد سيولة بسيطة للارتداد)
         if is_uptrend and touched_value_area and bounced_up and rsi_bullish and vol_ratio > 1.0:
-            
-            # الستوب: تحت أدنى نقطة وصل لها التصحيح (بمسافة أمان صغيرة)
             sl = min(curr['low'], prev['low']) * 0.99
             risk = entry_price - sl
-            
             tp1 = entry_price + (risk * 1.5)  
             tp2 = entry_price + (risk * 3.0)  
             tp3 = entry_price + (risk * 5.0)  
@@ -149,10 +138,8 @@ async def get_signal_logic(symbol):
             }
             
         elif is_downtrend and touched_value_area_short and bounced_down and rsi_bearish and vol_ratio > 1.0:
-            
             sl = max(curr['high'], prev['high']) * 1.01
             risk = sl - entry_price
-            
             tp1 = entry_price - (risk * 1.5)  
             tp2 = entry_price - (risk * 3.0)  
             tp3 = entry_price - (risk * 5.0)  
@@ -188,7 +175,7 @@ async def safe_check(symbol):
         return await get_signal_logic(symbol)
 
 async def monitor_trades(app_state):
-    cprint("👀 Trades Tracker Started...", Log.CYAN)
+    cprint("👀 30m Trades Tracker Started...", Log.CYAN)
     while True:
         current_symbols = list(app_state.active_trades.keys())
         for sym in current_symbols:
@@ -260,7 +247,7 @@ async def monitor_trades(app_state):
 async def daily_report_task(app_state):
     while True:
         await asyncio.sleep(86400) 
-        cprint("📊 Generating Leveraged Daily Report...", Log.CYAN)
+        cprint("📊 Generating 30m Leveraged Daily Report...", Log.CYAN)
         
         wins = app_state.stats['tp_hits']
         losses = app_state.stats['sl_hits']
@@ -268,7 +255,7 @@ async def daily_report_task(app_state):
         win_rate = (wins / total_closed) * 100 if total_closed > 0 else 0.0
         
         report_msg = (
-            f"👑 <b>PULLBACK SNIPER REPORT (24H)</b> 👑\n"
+            f"👑 <b>30M PULLBACK REPORT (24H)</b> 👑\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📡 <b>Total Batches:</b> {app_state.stats['signals']}\n"
             f"✅ <b>Winning Trades:</b> {wins}\n"
@@ -284,15 +271,15 @@ async def daily_report_task(app_state):
 # 6. محرك البحث الذكي (Top 3 & Sleep) 💤
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V19.0 (PULLBACK SNIPER)", Log.GREEN)
-    await send_telegram_msg("🟢 <b>Fortress V19.0 Pullback Sniper Online.</b>\nHunting Top 3 Pullbacks 🏹")
+    cprint("🚀 System Online: V20.0 (30M MASTER)", Log.GREEN)
+    await send_telegram_msg("🟢 <b>Fortress V20.0 (30m) Online.</b>\nHunting Top 3 Pullbacks ⚖️🏹")
     
     try:
         await exchange.load_markets()
         while True:
-            # 🛑 الميزة الأساسية: الانتظار التام حتى تفرغ المحفظة 🛑
+            # 🛑 وضع السبات التام 🛑
             if len(app_state.active_trades) > 0:
-                cprint(f"💤 Sleeping... {len(app_state.active_trades)} trades are still active.", Log.YELLOW)
+                cprint(f"💤 Sleeping... {len(app_state.active_trades)} trades are active.", Log.YELLOW)
                 await asyncio.sleep(60) 
                 continue 
             
@@ -300,7 +287,7 @@ async def start_scanning(app_state):
                 markets = await exchange.fetch_markets()
                 active_symbols = [m['symbol'] for m in markets if m['swap'] and m['quote'] == 'USDT' and m['active']]
                 
-                cprint(f"🔎 Scanning {len(active_symbols)} Futures pairs for Pullbacks on 1H...", Log.BLUE)
+                cprint(f"🔎 Scanning {len(active_symbols)} Futures pairs on 30m...", Log.BLUE)
                 
                 tasks = [safe_check(sym) for sym in active_symbols]
                 results = await asyncio.gather(*tasks)
@@ -308,11 +295,10 @@ async def start_scanning(app_state):
                 valid_signals = [res for res in results if res is not None]
                 
                 if valid_signals:
-                    # 🥇 تصفية أفضل 3 ارتدادات حسب الفوليوم الانفجاري
                     valid_signals.sort(key=lambda x: x['vol_ratio'], reverse=True)
                     top_signals = valid_signals[:MAX_TRADES_AT_ONCE]
                     
-                    cprint(f"🏹 DEPLOYING TOP {len(top_signals)} PULLBACKS!", Log.GREEN)
+                    cprint(f"🏹 DEPLOYING TOP {len(top_signals)} 30M PULLBACKS!", Log.GREEN)
                     
                     for sig in top_signals:
                         sym = sig['symbol']
@@ -330,7 +316,7 @@ async def start_scanning(app_state):
                         pnl_sl = abs((entry - sl) / entry) * 100 * lev
                         
                         msg = (
-                            f"{icon} <b><code>{clean_name}</code> (PULLBACK {side})</b>\n"
+                            f"{icon} <b><code>{clean_name}</code> (30M PULLBACK {side})</b>\n"
                             f"────────────────\n"
                             f"🛒 <b>Entry:</b> <code>{format_price(entry)}</code>\n"
                             f"⚖️ <b>Leverage:</b> <b>{lev}x</b> (Iso/Cross)\n"
@@ -352,7 +338,7 @@ async def start_scanning(app_state):
                             app_state.stats["signals"] += 1
                             await asyncio.sleep(1) 
                 else:
-                    cprint("📉 No pullbacks detected. Retrying in 5 minutes...", Log.BLUE)
+                    cprint("📉 No 30m pullbacks detected. Retrying in 5 minutes...", Log.BLUE)
                     await asyncio.sleep(300)
                     
             except: await asyncio.sleep(5)
