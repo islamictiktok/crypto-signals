@@ -39,8 +39,8 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>💯 Fortress V25.0 (APEX SCORING)</h1>
-            <p>7 Strategies | Composite Apex Score (0-100) | Trailing SL</p>
+            <h1>⚖️ Fortress V26.2 (ABSOLUTE FAIRNESS)</h1>
+            <p>10 Elite Strategies | 4 Contextual Pillars</p>
             <p>Status: Active & Hunting! 🎯</p>
         </body>
     </html>
@@ -69,7 +69,7 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. محرك الـ 7 استراتيجيات والتقييم المركب 💯
+# 3. محرك الكوانتوم ذو الـ 4 أبعاد (Absolute Fairness) ⚖️
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -83,101 +83,124 @@ async def get_signal_logic(symbol):
         prev = df.iloc[-2]
         entry = curr['close']
 
-        # المؤشرات
-        df['ema50'] = ta.ema(df['close'], length=50)
-        df['ema100'] = ta.ema(df['close'], length=100) 
+        df['ema9'] = ta.ema(df['close'], length=9)
+        df['ema21'] = ta.ema(df['close'], length=21)
+        df['vwma'] = ta.vwma(df['close'], df['vol'], length=20)
         df['rsi'] = ta.rsi(df['close'], length=14)
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         
         adx_data = ta.adx(df['high'], df['low'], df['close'], length=14)
-        if adx_data is not None and not adx_data.empty: df['adx'] = adx_data.iloc[:, 0] 
-        else: return "ERROR: ADX Calc Failed"
-        
+        if adx_data is not None and not adx_data.empty: df['adx'] = adx_data.iloc[:, 0]
+        else: return "ERROR: ADX Failed"
+
         bb = df.ta.bbands(length=20, std=2)
         if bb is not None and not bb.empty:
-            try:
-                df['bbl'] = bb.filter(like='BBL').iloc[:, 0]
-                df['bbu'] = bb.filter(like='BBU').iloc[:, 0]
-                df['bb_width'] = ((df['bbu'] - df['bbl']) / df['close']) * 100
-            except: return "ERROR: BB Columns Error"
-        else: return "ERROR: BB Calc Failed"
-        
-        sti = ta.supertrend(df['high'], df['low'], df['close'], length=10, multiplier=3)
-        if sti is not None and not sti.empty:
-            try: df['st_dir'] = sti.filter(like='SUPERTd').iloc[:, 0]
-            except: return "ERROR: ST Columns Error"
-        else: return "ERROR: SuperTrend Failed"
+            df['bbl'] = bb.filter(like='BBL').iloc[:, 0]
+            df['bbu'] = bb.filter(like='BBU').iloc[:, 0]
+            df['bb_width'] = ((df['bbu'] - df['bbl']) / df['close']) * 100
+        else: return "ERROR: BB Failed"
 
+        kc = ta.kc(df['high'], df['low'], df['close'], length=20, scalar=1.5)
+        if kc is not None and not kc.empty:
+            df['kcl'] = kc.filter(like='KCL').iloc[:, 0]
+            df['kcu'] = kc.filter(like='KCU').iloc[:, 0]
+        else: return "ERROR: KC Failed"
+
+        sti = ta.supertrend(df['high'], df['low'], df['close'], length=10, multiplier=3)
+        if sti is not None and not sti.empty: df['st_dir'] = sti.filter(like='SUPERTd').iloc[:, 0]
+        
         macd = ta.macd(df['close'])
         if macd is not None and not macd.empty:
-            try:
-                df['macd_line'] = macd.iloc[:, 0]
-                df['macd_signal'] = macd.iloc[:, 2]
-            except: return "ERROR: MACD Error"
-        else: return "ERROR: MACD Failed"
+            df['macd_h'] = macd.iloc[:, 1]
+            
+        psar = ta.psar(df['high'], df['low'], df['close'])
+        if psar is not None and not psar.empty: df['psar_dir'] = psar.iloc[:, 1]
 
-        if pd.isna(df['ema100'].iloc[-1]) or pd.isna(df['atr'].iloc[-1]) or pd.isna(df['adx'].iloc[-1]): return "ERROR: NaN indicators"
+        if pd.isna(df['atr'].iloc[-1]): return "ERROR: NaN indicators"
 
-        ema_distance_pct = abs(df['ema50'].iloc[-1] - df['ema100'].iloc[-1]) / entry * 100
-        is_ranging_market = ema_distance_pct < 0.6 
-        adx_strength = df['adx'].iloc[-1]
-        
         avg_vol = df['vol'].iloc[-20:-1].mean()
         vol_ratio = curr['vol'] / avg_vol if avg_vol > 0 else 0
 
         strategy_name = ""
         side = ""
+        strat_category = "" 
 
         # ---------------------------------------------------------
-        # 🟢 الاستراتيجيات السبع
+        # 🟢 الـ 10 استراتيجيات (التصنيف الدقيق)
         # ---------------------------------------------------------
 
-        if prev['low'] < df['bbl'].iloc[-2] and curr['close'] > prev['open']: 
-            strategy_name = "SMC Sweep"; side = "LONG"
-        elif prev['high'] > df['bbu'].iloc[-2] and curr['close'] < prev['open']:
-            strategy_name = "SMC Sweep"; side = "SHORT"
+        # 1. TTM Squeeze Breakout (Volatility)
+        is_sqz = (df['bbu'].iloc[-2] < df['kcu'].iloc[-2]) and (df['bbl'].iloc[-2] > df['kcl'].iloc[-2])
+        if is_sqz and curr['close'] > df['bbu'].iloc[-1]:
+            strategy_name = "TTM Squeeze"; side = "LONG"; strat_category = "Volatility"
+        elif is_sqz and curr['close'] < df['bbl'].iloc[-1]:
+            strategy_name = "TTM Squeeze"; side = "SHORT"; strat_category = "Volatility"
 
+        # 2. SMC Liquidity Sweep (Reversal)
         elif strategy_name == "":
-            bullish_engulfing = (prev['close'] < prev['open']) and (curr['close'] > curr['open']) and (curr['close'] > prev['open']) and (curr['open'] < prev['close'])
-            bearish_engulfing = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (curr['close'] < prev['open']) and (curr['open'] > prev['close'])
-            if bullish_engulfing and vol_ratio > 1.5:
-                strategy_name = "Vol Engulfing"; side = "LONG"
-            elif bearish_engulfing and vol_ratio > 1.5:
-                strategy_name = "Vol Engulfing"; side = "SHORT"
+            if prev['low'] < df['bbl'].iloc[-2] and curr['close'] > prev['high'] and curr['close'] > curr['open']: 
+                strategy_name = "SMC Sweep"; side = "LONG"; strat_category = "Reversal"
+            elif prev['high'] > df['bbu'].iloc[-2] and curr['close'] < prev['low'] and curr['close'] < curr['open']:
+                strategy_name = "SMC Sweep"; side = "SHORT"; strat_category = "Reversal"
 
+        # 3. RSI Divergence Proxy (Reversal)
         elif strategy_name == "":
-            if df['macd_line'].iloc[-1] > df['macd_signal'].iloc[-1] and df['macd_line'].iloc[-2] <= df['macd_signal'].iloc[-2] and df['macd_line'].iloc[-1] < 0:
-                strategy_name = "MACD Momentum"; side = "LONG"
-            elif df['macd_line'].iloc[-1] < df['macd_signal'].iloc[-1] and df['macd_line'].iloc[-2] >= df['macd_signal'].iloc[-2] and df['macd_line'].iloc[-1] > 0:
-                strategy_name = "MACD Momentum"; side = "SHORT"
+            if curr['close'] < df['close'].iloc[-4] and curr['rsi'] > df['rsi'].iloc[-4] and curr['rsi'] < 45:
+                strategy_name = "RSI Divergence"; side = "LONG"; strat_category = "Reversal"
+            elif curr['close'] > df['close'].iloc[-4] and curr['rsi'] < df['rsi'].iloc[-4] and curr['rsi'] > 55:
+                strategy_name = "RSI Divergence"; side = "SHORT"; strat_category = "Reversal"
 
-        elif is_ranging_market and strategy_name == "":
-            if curr['low'] <= df['bbl'].iloc[-1] and curr['close'] > curr['open']: 
-                strategy_name = "Range Bounce"; side = "LONG"
-            elif curr['high'] >= df['bbu'].iloc[-1] and curr['close'] < curr['open']:
-                strategy_name = "Range Bounce"; side = "SHORT"
-
-        elif not is_ranging_market and strategy_name == "":
-            if curr['close'] > df['ema100'].iloc[-1] and curr['low'] <= df['ema50'].iloc[-1] and curr['close'] > df['ema50'].iloc[-1]:
-                strategy_name = "EMA Pullback"; side = "LONG"
-            elif curr['close'] < df['ema100'].iloc[-1] and curr['high'] >= df['ema50'].iloc[-1] and curr['close'] < df['ema50'].iloc[-1]:
-                strategy_name = "EMA Pullback"; side = "SHORT"
-
+        # 4. Deep Exhaustion (Reversal)
         elif strategy_name == "":
-            is_squeezing = df['bb_width'].iloc[-10:-1].mean() < 8.0 
-            if is_squeezing and curr['close'] > df['bbu'].iloc[-1]:
-                strategy_name = "BB Breakout"; side = "LONG"
-            elif is_squeezing and curr['close'] < df['bbl'].iloc[-1]:
-                strategy_name = "BB Breakout"; side = "SHORT"
+            if prev['rsi'] < 25 and prev['close'] < df['bbl'].iloc[-2] and curr['close'] > df['bbl'].iloc[-1]:
+                strategy_name = "Deep Exhaustion"; side = "LONG"; strat_category = "Reversal"
+            elif prev['rsi'] > 75 and prev['close'] > df['bbu'].iloc[-2] and curr['close'] < df['bbu'].iloc[-1]:
+                strategy_name = "Deep Exhaustion"; side = "SHORT"; strat_category = "Reversal"
 
+        # 5. VWMA Pullback Bounce (Trend)
+        elif strategy_name == "":
+            if df['close'].iloc[-3] > df['vwma'].iloc[-3] and curr['low'] <= df['vwma'].iloc[-1] and curr['close'] > df['vwma'].iloc[-1]:
+                strategy_name = "VWMA Bounce"; side = "LONG"; strat_category = "Trend"
+            elif df['close'].iloc[-3] < df['vwma'].iloc[-3] and curr['high'] >= df['vwma'].iloc[-1] and curr['close'] < df['vwma'].iloc[-1]:
+                strategy_name = "VWMA Bounce"; side = "SHORT"; strat_category = "Trend"
+
+        # 6. MACD Zero-Cross (Momentum) ⚡ تم تصحيح الفئة 
+        elif strategy_name == "":
+            if df['macd_h'].iloc[-1] > 0 and df['macd_h'].iloc[-2] <= 0:
+                strategy_name = "MACD Flip"; side = "LONG"; strat_category = "Momentum"
+            elif df['macd_h'].iloc[-1] < 0 and df['macd_h'].iloc[-2] >= 0:
+                strategy_name = "MACD Flip"; side = "SHORT"; strat_category = "Momentum"
+
+        # 7. SuperTrend Surge (Trend)
         elif strategy_name == "":
             if df['st_dir'].iloc[-1] == 1 and df['st_dir'].iloc[-2] == -1:
-                strategy_name = "SuperTrend"; side = "LONG"
+                strategy_name = "SuperTrend"; side = "LONG"; strat_category = "Trend"
             elif df['st_dir'].iloc[-1] == -1 and df['st_dir'].iloc[-2] == 1:
-                strategy_name = "SuperTrend"; side = "SHORT"
+                strategy_name = "SuperTrend"; side = "SHORT"; strat_category = "Trend"
+
+        # 8. Parabolic SAR Acceleration (Trend)
+        elif strategy_name == "":
+            if df['psar_dir'].iloc[-1] > 0 and df['psar_dir'].iloc[-2] < 0:
+                strategy_name = "Parabolic SAR"; side = "LONG"; strat_category = "Trend"
+            elif df['psar_dir'].iloc[-1] < 0 and df['psar_dir'].iloc[-2] > 0:
+                strategy_name = "Parabolic SAR"; side = "SHORT"; strat_category = "Trend"
+
+        # 9. Golden Cross Scalp (Momentum) ⚡ تم تصحيح الفئة
+        elif strategy_name == "":
+            if df['ema9'].iloc[-1] > df['ema21'].iloc[-1] and df['ema9'].iloc[-2] <= df['ema21'].iloc[-2]:
+                strategy_name = "Golden Cross"; side = "LONG"; strat_category = "Momentum"
+            elif df['ema9'].iloc[-1] < df['ema21'].iloc[-1] and df['ema9'].iloc[-2] >= df['ema21'].iloc[-2]:
+                strategy_name = "Death Cross"; side = "SHORT"; strat_category = "Momentum"
+
+        # 10. Pure Price Action Engulfing (Reversal)
+        elif strategy_name == "":
+            if (curr['close'] > curr['open']) and (curr['close'] > df['high'].iloc[-2]) and (curr['close'] > df['high'].iloc[-3]):
+                strategy_name = "Price Action"; side = "LONG"; strat_category = "Reversal"
+            elif (curr['close'] < curr['open']) and (curr['close'] < df['low'].iloc[-2]) and (curr['close'] < df['low'].iloc[-3]):
+                strategy_name = "Price Action"; side = "SHORT"; strat_category = "Reversal"
 
         # ---------------------------------------------------------
-        # التنفيذ ونظام التقييم المركب (Apex Score) 💯
+        # ⚖️ نظام التقييم العادل للـ 4 أبعاد ⚖️
         # ---------------------------------------------------------
         if strategy_name != "":
             atr = df['atr'].iloc[-1]
@@ -192,26 +215,36 @@ async def get_signal_logic(symbol):
             pnl_sl_base = abs((entry - sl) / entry) * 100
             leverage = max(2, min(int(20.0 / pnl_sl_base), 50)) if pnl_sl_base > 0 else 10
 
-            # 💯 حساب الـ Apex Score (من 0 إلى 100) 💯
-            # 1. نقاط الاستراتيجية (الحد الأقصى 20 نقطة)
-            strat_bonus = 0
-            if strategy_name in ["SMC Sweep", "Vol Engulfing"]: strat_bonus = 20
-            elif strategy_name in ["EMA Pullback", "BB Breakout"]: strat_bonus = 15
-            else: strat_bonus = 10
-
-            # 2. نقاط الزخم ADX (تقريباً من 0 إلى 40)
-            adx_score = min(40, adx_strength)
-
-            # 3. نقاط الفوليوم (تقريباً من 0 إلى 40)
-            vol_score = min(40, vol_ratio * 10)
-
-            # المجموع الكلي:
-            apex_score = min(100, int(strat_bonus + adx_score + vol_score))
+            base_score = 50
+            context_bonus = 0
+            
+            if strat_category == "Trend":
+                context_bonus = min(25, df['adx'].iloc[-1] * 0.6) 
+                
+            elif strat_category == "Reversal":
+                rsi_distance = abs(df['rsi'].iloc[-1] - 50)
+                candle_size = abs(curr['close'] - curr['open']) / atr * 10 
+                context_bonus = min(25, (rsi_distance * 0.5) + candle_size)
+                
+            elif strat_category == "Volatility":
+                past_compression = df['bb_width'].iloc[-11:-1].mean()
+                compression_factor = max(0, 10 - past_compression)
+                context_bonus = min(25, compression_factor * 4) 
+                
+            elif strat_category == "Momentum":
+                # ⚡ قياس قوة الانفراج اللحظي للماكد كدليل على الزخم القوي، متجاهلين الـ ADX
+                macd_power = abs(df['macd_h'].iloc[-1]) / atr * 50
+                context_bonus = min(25, macd_power * 2)
+                
+            vol_bonus = min(25, vol_ratio * 12)
+            
+            quantum_score = min(100, int(base_score + context_bonus + vol_bonus))
 
             return {
                 "symbol": symbol, "side": side, "entry": entry, 
                 "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp_final": tp_final, 
-                "sl": sl, "apex_score": apex_score, "leverage": leverage, "strat": strategy_name
+                "sl": sl, "quantum_score": quantum_score, "leverage": leverage, 
+                "strat": strategy_name, "category": strat_category
             }
 
         return "NO_SIGNAL"
@@ -233,7 +266,7 @@ async def safe_check(symbol):
         return await get_signal_logic(symbol)
 
 async def monitor_trades(app_state):
-    cprint("👀 15m Apex Scoring Tracker Started...", Log.CYAN)
+    cprint("👀 15m Fair Scoring Tracker Started...", Log.CYAN)
     while True:
         current_symbols = list(app_state.active_trades.keys())
         for sym in current_symbols:
@@ -297,7 +330,7 @@ async def daily_report_task(app_state):
         await asyncio.sleep(86400) 
         wins = app_state.stats['tp_hits']; losses = app_state.stats['sl_hits']
         win_rate = (wins / (wins + losses)) * 100 if (wins + losses) > 0 else 0.0
-        msg = (f"💯 <b>APEX SCORING REPORT (24H)</b> 💯\n━━━━━━━━━━━━━━━━━━━━\n"
+        msg = (f"⚖️ <b>ABSOLUTE FAIRNESS REPORT (24H)</b> ⚖️\n━━━━━━━━━━━━━━━━━━━━\n"
                f"📡 <b>Batches:</b> {app_state.stats['signals']}\n✅ <b>Wins:</b> {wins} | ❌ <b>Losses:</b> {losses}\n"
                f"🎯 <b>Accuracy:</b> {win_rate:.1f}%\n━━━━━━━━━━━━━━━━━━━━\n"
                f"📈 <b>Net Leveraged PNL:</b> {app_state.stats['net_pnl']:.2f}%")
@@ -305,11 +338,11 @@ async def daily_report_task(app_state):
         app_state.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 
 # ==========================================
-# 6. المحرك والمفاضلة بالـ Apex Score 💯
+# 6. المحرك والمفاضلة
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V25.0 (APEX SCORING)", Log.GREEN)
-    await send_telegram_msg("🟢 <b>Fortress V25.0 Apex Scoring Online.</b>\nHunting with 7 Strategies & Composite Score 💯")
+    cprint("🚀 System Online: V26.2 (ABSOLUTE FAIRNESS)", Log.GREEN)
+    await send_telegram_msg("🟢 <b>Fortress V26.2 Online.</b>\nHunting with 10 Strategies (4 Dimensions) ⚖️")
     
     try:
         await exchange.load_markets()
@@ -321,7 +354,7 @@ async def start_scanning(app_state):
             try:
                 markets = await exchange.fetch_markets()
                 active_symbols = [m['symbol'] for m in markets if m['swap'] and m['quote'] == 'USDT' and m['active']]
-                cprint(f"🔎 Scanning {len(active_symbols)} pairs using 7 Strategies...", Log.BLUE)
+                cprint(f"🔎 Scanning {len(active_symbols)} pairs using 10 Strategies...", Log.BLUE)
                 
                 tasks = [safe_check(sym) for sym in active_symbols]
                 results = await asyncio.gather(*tasks)
@@ -336,14 +369,14 @@ async def start_scanning(app_state):
                 cprint(f"📊 Scan Result: {len(valid_signals)} Signals Found | {error_count} Errors.", Log.YELLOW)
 
                 if valid_signals:
-                    # 🥇 المفاضلة الشاملة (التقييم من 100) بدلاً من ADX لوحده
-                    valid_signals.sort(key=lambda x: x['apex_score'], reverse=True)
+                    # 🥇 المفاضلة العادلة التامة
+                    valid_signals.sort(key=lambda x: x['quantum_score'], reverse=True)
                     top_signals = valid_signals[:MAX_TRADES_AT_ONCE]
                     
                     cprint(f"🏆 DEPLOYING TOP {len(top_signals)} SETUPS!", Log.GREEN)
                     
                     for sig in top_signals:
-                        sym, entry, sl, side, lev, strat, apex = sig['symbol'], sig['entry'], sig['sl'], sig['side'], sig['leverage'], sig['strat'], sig['apex_score']
+                        sym, entry, sl, side, lev, strat, cat, q_score = sig['symbol'], sig['entry'], sig['sl'], sig['side'], sig['leverage'], sig['strat'], sig['category'], sig['quantum_score']
                         tp1, tp2, tp3, tp_final = sig['tp1'], sig['tp2'], sig['tp3'], sig['tp_final']
                         clean_name = sym.split(':')[0].replace('/', '')
                         icon = "🟢" if side == "LONG" else "🔴"
@@ -351,7 +384,6 @@ async def start_scanning(app_state):
                         pnl_tp1, pnl_tp2, pnl_tp3, pnl_final = [abs((tp - entry) / entry) * 100 * lev for tp in (tp1, tp2, tp3, tp_final)]
                         pnl_sl = abs((entry - sl) / entry) * 100 * lev
                         
-                        # رسالة تليجرام أنيقة مع الـ Apex Score في الأسفل
                         msg = (
                             f"{icon} <b><code>{clean_name}</code> ({side})</b>\n"
                             f"────────────────\n"
@@ -365,8 +397,8 @@ async def start_scanning(app_state):
                             f"────────────────\n"
                             f"🛑 <b>SL:</b> <code>{format_price(sl)}</code> (-{pnl_sl:.1f}% ROE)\n"
                             f"────────────────\n"
-                            f"🧠 <b>Strategy:</b> <b>{strat}</b>\n"
-                            f"💯 <b>Apex Score:</b> <b>{apex}/100</b>"
+                            f"🧠 <b>Strategy:</b> <b>{strat}</b> ({cat})\n"
+                            f"💯 <b>Apex Score:</b> <b>{q_score}/100</b>"
                         )
                         msg_id = await send_telegram_msg(msg)
                         if msg_id:
