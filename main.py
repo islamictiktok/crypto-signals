@@ -18,7 +18,6 @@ CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 TIMEFRAME = '15m' 
-MIN_VOLUME_USDT = 40_000
 MAX_TRADES_AT_ONCE = 3 
 
 app = FastAPI()
@@ -40,9 +39,9 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🔥 Fortress V22.1 (UNLEASHED)</h1>
-            <p>5 Strategies (15m) + ADX Drafting (Bug Fixed)</p>
-            <p>Status: Hunting the Market! 🎯</p>
+            <h1>🔥 Fortress V23.0 (DIAGNOSTIC ENGINE)</h1>
+            <p>5 Strategies (15m) + Error Diagnostics</p>
+            <p>Status: Active & Hunting! 🎯</p>
         </body>
     </html>
     """
@@ -70,33 +69,32 @@ def format_price(price):
     return f"{price:.8f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# 3. المحرك الشامل بعد الإصلاح (Fixed Engine) 🧠
+# 3. المحرك الشامل (مع نظام كشف الأخطاء) 🧠
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        # 🚨 [الإصلاح 1] تم رفع السحب لـ 300 شمعة لضمان حساب الـ EMA200 والـ ADX دون أخطاء (NaN)
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=300)
-        if not ohlcv or len(ohlcv) < 250: return None
-        df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        # طلب 150 شمعة فقط (مضمون وصولها من المنصة)
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
+        if not ohlcv or len(ohlcv) < 120: return "ERROR: Not enough candles"
         
-        # 🚨 [الإصلاح 2] فحص فوليوم الشمعة المغلقة (السابقة) لتجنب أخطاء بداية الشمعة الجديدة
-        if df['vol'].iloc[-2] == 0: return None
+        df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        if df['vol'].iloc[-2] == 0: return "ERROR: Zero Volume"
 
         curr = df.iloc[-1]
         prev = df.iloc[-2]
         entry = curr['close']
 
-        # حساب المؤشرات
+        # حساب المؤشرات (تم استبدال 200 بـ 100 لتسريع وضمان الحساب)
         df['ema50'] = ta.ema(df['close'], length=50)
-        df['ema200'] = ta.ema(df['close'], length=200)
+        df['ema100'] = ta.ema(df['close'], length=100) 
         df['rsi'] = ta.rsi(df['close'], length=14)
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         
         adx_data = ta.adx(df['high'], df['low'], df['close'], length=14)
         if adx_data is not None and not adx_data.empty:
-            df['adx'] = adx_data.iloc[:, 0] # استخراج قيمة ADX الأساسية بشكل آمن
+            df['adx'] = adx_data.iloc[:, 0] 
         else:
-            return None
+            return "ERROR: ADX calculation failed"
         
         bb = df.ta.bbands(length=20, std=2)
         df['bbu'] = bb['BBU_20_2.0']; df['bbl'] = bb['BBL_20_2.0']
@@ -105,43 +103,43 @@ async def get_signal_logic(symbol):
         sti = ta.supertrend(df['high'], df['low'], df['close'], length=10, multiplier=3)
         df['st_dir'] = sti['SUPERTd_10_3.0']
 
-        # التأكد النهائي أن المؤشرات الأساسية تم حسابها
-        if pd.isna(df['ema200'].iloc[-1]) or pd.isna(df['atr'].iloc[-1]) or pd.isna(df['adx'].iloc[-1]): return None
+        if pd.isna(df['ema100'].iloc[-1]) or pd.isna(df['atr'].iloc[-1]) or pd.isna(df['adx'].iloc[-1]): 
+            return "ERROR: NaN indicators"
 
-        ema_distance_pct = abs(df['ema50'].iloc[-1] - df['ema200'].iloc[-1]) / entry * 100
-        is_ranging_market = ema_distance_pct < 0.6 # تم توسيع نطاق التذبذب قليلاً ليصطاد أكثر
+        ema_distance_pct = abs(df['ema50'].iloc[-1] - df['ema100'].iloc[-1]) / entry * 100
+        is_ranging_market = ema_distance_pct < 0.6 
         
         adx_strength = df['adx'].iloc[-1]
         strategy_name = ""
         side = ""
 
         # ---------------------------------------------------------
-        # 🟢 الاستراتيجيات الخمس (بشروط مُرخاة بذكاء لزيادة الإشارات)
+        # 🟢 الاستراتيجيات الخمس (مرنة جداً)
         # ---------------------------------------------------------
 
         # 1. SMC Sweep
-        if prev['low'] < df['bbl'].iloc[-2] and curr['close'] > prev['high']:
+        if prev['low'] < df['bbl'].iloc[-2] and curr['close'] > prev['open']: # تليين الشرط
             strategy_name = "SMC Sweep"; side = "LONG"
-        elif prev['high'] > df['bbu'].iloc[-2] and curr['close'] < prev['low']:
+        elif prev['high'] > df['bbu'].iloc[-2] and curr['close'] < prev['open']:
             strategy_name = "SMC Sweep"; side = "SHORT"
 
         # 2. Range Bounce 
         elif is_ranging_market and strategy_name == "":
-            if curr['low'] <= df['bbl'].iloc[-1] and curr['rsi'] < 40 and curr['close'] > curr['open']: # RSI مرن
+            if curr['low'] <= df['bbl'].iloc[-1] and curr['close'] > curr['open']: 
                 strategy_name = "Range Bounce"; side = "LONG"
-            elif curr['high'] >= df['bbu'].iloc[-1] and curr['rsi'] > 60 and curr['close'] < curr['open']:
+            elif curr['high'] >= df['bbu'].iloc[-1] and curr['close'] < curr['open']:
                 strategy_name = "Range Bounce"; side = "SHORT"
 
         # 3. Golden Pullback 
         elif not is_ranging_market and strategy_name == "":
-            if curr['close'] > df['ema200'].iloc[-1] and curr['low'] <= df['ema50'].iloc[-1] and curr['close'] > df['ema50'].iloc[-1]:
+            if curr['close'] > df['ema100'].iloc[-1] and curr['low'] <= df['ema50'].iloc[-1] and curr['close'] > df['ema50'].iloc[-1]:
                 strategy_name = "EMA Pullback"; side = "LONG"
-            elif curr['close'] < df['ema200'].iloc[-1] and curr['high'] >= df['ema50'].iloc[-1] and curr['close'] < df['ema50'].iloc[-1]:
+            elif curr['close'] < df['ema100'].iloc[-1] and curr['high'] >= df['ema50'].iloc[-1] and curr['close'] < df['ema50'].iloc[-1]:
                 strategy_name = "EMA Pullback"; side = "SHORT"
 
         # 4. Bollinger Squeeze 
         elif strategy_name == "":
-            is_squeezing = df['bb_width'].iloc[-10:-1].mean() < 7.0 # توسيع الخنق
+            is_squeezing = df['bb_width'].iloc[-10:-1].mean() < 8.0 # توسيع الخنق
             if is_squeezing and curr['close'] > df['bbu'].iloc[-1]:
                 strategy_name = "BB Breakout"; side = "LONG"
             elif is_squeezing and curr['close'] < df['bbl'].iloc[-1]:
@@ -182,13 +180,14 @@ async def get_signal_logic(symbol):
                 "sl": sl, "adx": adx_strength, "leverage": leverage, "strat": strategy_name
             }
 
-        return None
-    except Exception: return None
+        return "NO_SIGNAL"
+    except Exception as e: return f"ERROR: {str(e)[:30]}"
 
 # ==========================================
 # 4. إدارة البيانات والمراقبة
 # ==========================================
-sem = asyncio.Semaphore(15)
+# 🚨 خفضنا عدد الطلبات المتزامنة من 15 إلى 8 لتجنب حظر MEXC المؤقت (Rate Limit)
+sem = asyncio.Semaphore(8)
 class DataManager:
     def __init__(self):
         self.active_trades = {}
@@ -197,7 +196,7 @@ db = DataManager()
 
 async def safe_check(symbol):
     async with sem:
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.15) # فاصل زمني بسيط جداً لحماية السيرفر
         return await get_signal_logic(symbol)
 
 async def monitor_trades(app_state):
@@ -220,7 +219,6 @@ async def monitor_trades(app_state):
                 hit_sl = price <= trade['sl'] if trade['side'] == "LONG" else price >= trade['sl']
 
                 if hit_tp1 and not trade.get('hit_tp1', False):
-                    cprint(f"✅ TP1 HIT: {trade['clean_name']} (+{leveraged_pnl:.1f}%)", Log.GREEN)
                     await reply_telegram_msg(f"✅ <b>TP1 HIT! (+{leveraged_pnl:.1f}% ROE)</b>\n🛡️ Move SL to Entry", trade['msg_id'])
                     trade['hit_tp1'] = True; trade['sl'] = trade['entry']; app_state.stats["tp_hits"] += 1
                 
@@ -261,16 +259,15 @@ async def daily_report_task(app_state):
         app_state.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 
 # ==========================================
-# 6. المحرك والمفاضلة بواسطة الـ ADX (الزخم) 🌪️
+# 6. المحرك والمفاضلة بواسطة الـ ADX 🌪️
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V22.1 (UNLEASHED)", Log.GREEN)
-    await send_telegram_msg("🟢 <b>Fortress V22.1 (Fixed & Unleashed) Online.</b>\nHunting with 5 Strategies & ADX Ranking 🌐")
+    cprint("🚀 System Online: V23.0 (DIAGNOSTIC ENGINE)", Log.GREEN)
+    await send_telegram_msg("🟢 <b>Fortress V23.0 Online.</b>\nHunting with 5 Strategies 🌐")
     
     try:
         await exchange.load_markets()
         while True:
-            # 🛑 السبات العميق: لا بحث جديد حتى تفرغ المحفظة
             if len(app_state.active_trades) > 0:
                 cprint(f"💤 Sleeping... {len(app_state.active_trades)} trades active.", Log.YELLOW)
                 await asyncio.sleep(60); continue 
@@ -282,14 +279,26 @@ async def start_scanning(app_state):
                 
                 tasks = [safe_check(sym) for sym in active_symbols]
                 results = await asyncio.gather(*tasks)
-                valid_signals = [res for res in results if res is not None]
                 
+                # 🚨 نظام كشف الأخطاء الجديد 🚨
+                valid_signals = []
+                error_count = 0
+                last_error = ""
+                
+                for res in results:
+                    if isinstance(res, dict):
+                        valid_signals.append(res)
+                    elif isinstance(res, str) and res.startswith("ERROR"):
+                        error_count += 1
+                        last_error = res
+                
+                cprint(f"📊 Scan Result: {len(valid_signals)} Signals Found | {error_count} Pairs had Data Errors. (Last Err: {last_error})", Log.YELLOW)
+
                 if valid_signals:
-                    # 🥇 المفاضلة العبقرية: ترتيب الصفقات حسب الـ ADX
                     valid_signals.sort(key=lambda x: x['adx'], reverse=True)
                     top_signals = valid_signals[:MAX_TRADES_AT_ONCE]
                     
-                    cprint(f"🏆 DEPLOYING TOP {len(top_signals)} SETUPS (High ADX)!", Log.GREEN)
+                    cprint(f"🏆 DEPLOYING TOP {len(top_signals)} SETUPS!", Log.GREEN)
                     
                     for sig in top_signals:
                         sym, entry, sl, side, lev, strat, adx = sig['symbol'], sig['entry'], sig['sl'], sig['side'], sig['leverage'], sig['strat'], sig['adx']
