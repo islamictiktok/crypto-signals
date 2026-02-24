@@ -11,14 +11,14 @@ from datetime import datetime
 import httpx
 
 # ==========================================
-# 1. الإعدادات الأساسية (The Sniper Rules)
+# 1. الإعدادات الأساسية
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
 RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 TIMEFRAME = '15m' 
-MAX_TRADES_AT_ONCE = 1 # 🚨 صفقة واحدة فقط! (القناص المنفرد)
+MAX_TRADES_AT_ONCE = 1 
 MIN_24H_VOLUME_USDT = 40_000 
 
 app = FastAPI()
@@ -37,8 +37,8 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🎯 Fortress V30.0 (SOLO SNIPER)</h1>
-            <p>10 Precise Strategies | 1 Ultimate Trade | Structural Targets</p>
+            <h1>👑 Fortress V31.0 (APEX ALGORITHM)</h1>
+            <p>10 Precise Strategies | 5D Confluence Scoring | Solo Sniper</p>
             <p>Status: Active & Hunting! 🎯</p>
         </body>
     </html>
@@ -60,12 +60,13 @@ async def reply_telegram_msg(message, reply_to_msg_id):
     except: pass
 
 # ==========================================
-# 3. محرك الاستراتيجيات والأهداف الهيكلية 🎯
+# 3. محرك الاستراتيجيات والتقييم الخماسي 👑
 # ==========================================
 async def get_signal_logic(symbol):
     try:
-        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
-        if not ohlcv or len(ohlcv) < 120: return "ERROR"
+        # 250 شمعة لحساب الـ EMA 200 بدقة
+        ohlcv = await exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=250)
+        if not ohlcv or len(ohlcv) < 200: return "ERROR"
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         df['time'] = pd.to_datetime(df['time'], unit='ms')
@@ -79,6 +80,9 @@ async def get_signal_logic(symbol):
         df['atr_pct'] = (df['atr'] / df['close']) * 100
         if pd.isna(df['atr_pct'].iloc[-1]) or df['atr_pct'].iloc[-1] < 0.4: return "ERROR: Too Slow" 
 
+        # 🚨 إضافة الترند الأكبر (الماكرو)
+        df['ema200'] = ta.ema(df['close'], length=200)
+        
         df['vwap'] = ta.vwap(df['high'], df['low'], df['close'], df['vol'])
         df['ema21'] = ta.ema(df['close'], length=21)
         df['ema50'] = ta.ema(df['close'], length=50)
@@ -87,6 +91,10 @@ async def get_signal_logic(symbol):
         df['sma20'] = ta.sma(df['close'], length=20)
         df['std20'] = ta.stdev(df['close'], length=20)
         df['z_score'] = (df['close'] - df['sma20']) / df['std20'] 
+        
+        adx_data = ta.adx(df['high'], df['low'], df['close'], length=14)
+        if adx_data is not None and not adx_data.empty: df['adx'] = adx_data.iloc[:, 0]
+        else: return "ERROR"
         
         macd = ta.macd(df['close'])
         if macd is not None and not macd.empty: df['macd_h'] = macd.iloc[:, 1]
@@ -106,10 +114,6 @@ async def get_signal_logic(symbol):
 
         recent_low = df['low'].rolling(15).min().iloc[-2]
         recent_high = df['high'].rolling(15).max().iloc[-2]
-
-        # ---------------------------------------------------------
-        # 🟢 الاستراتيجيات مع (نقطة الاستوب) و (نقطة الهدف الهيكلي الأساسي)
-        # ---------------------------------------------------------
 
         # 1. Liquidity Sweep
         if curr['low'] < recent_low and curr['close'] > recent_low and curr['close'] > curr['open']:
@@ -189,7 +193,7 @@ async def get_signal_logic(symbol):
                 strategy_name = "Pin Bar Exhaustion"; side = "SHORT"; smart_sl = curr['high'] * 1.005; tp_base = df['sma20'].iloc[-1]; strat_tier = 1
 
         # ---------------------------------------------------------
-        # ⚖️ حساب الأهداف الهيكلية والديناميكية (Market Structure TPs)
+        # ⚖️ التقييم الخماسي الأبعاد (5D Confluence)
         # ---------------------------------------------------------
         if strategy_name != "":
             atr = df['atr'].iloc[-1]
@@ -199,32 +203,40 @@ async def get_signal_logic(symbol):
             if risk < (atr * 0.5): risk = atr * 0.8 
             if risk > (atr * 3.0): risk = atr * 2.0 
 
-            # 🚨 بناء الأهداف انطلاقاً من الهدف الهيكلي الأساسي (tp_base)
             if side == "LONG":
                 sl = entry - risk
-                # صمام أمان: لو الهدف الهيكلي أقرب من المخاطرة، نرفعه ليكون مجدياً (1.5R على الأقل)
                 if tp_base <= entry + (risk * 1.2): tp_base = entry + (risk * 1.5)
-                
-                tp1 = tp_base # الهدف الأول هو القمة، أو خط المنتصف، أو الاختراق
-                tp2 = tp1 + (risk * 1.5) # الهدف الثاني للمتابعة
-                tp3 = tp1 + (risk * 3.0) 
-                tp_final = tp1 + (risk * 5.0)
+                tp1 = tp_base; tp2 = tp1 + (risk * 1.5); tp3 = tp1 + (risk * 3.0); tp_final = tp1 + (risk * 5.0)
             else:
                 sl = entry + risk
                 if tp_base >= entry - (risk * 1.2): tp_base = entry - (risk * 1.5)
-                
-                tp1 = tp_base
-                tp2 = tp1 - (risk * 1.5)
-                tp3 = tp1 - (risk * 3.0)
-                tp_final = tp1 - (risk * 5.0)
+                tp1 = tp_base; tp2 = tp1 - (risk * 1.5); tp3 = tp1 - (risk * 3.0); tp_final = tp1 - (risk * 5.0)
 
             pnl_sl_base = abs((entry - sl) / entry) * 100
             leverage = max(2, min(int(20.0 / pnl_sl_base), 50)) if pnl_sl_base > 0 else 10
 
-            vol_score = min(40, vol_ratio * 15)
-            velocity_score = min(30, atr_pct * 15)
-            strat_bonus = 30 if strat_tier == 1 else 20
-            quantum_score = min(100, int(strat_bonus + vol_score + velocity_score))
+            # 👑 حساب النقاط (100 نقطة موزعة بذكاء مؤسساتي)
+            
+            # 1. قوة الاستراتيجية (20 نقطة)
+            strat_score = 20 if strat_tier == 1 else 10
+            
+            # 2. الفوليوم والسيولة (30 نقطة)
+            vol_score = min(30, vol_ratio * 15)
+            
+            # 3. السرعة ATR (20 نقطة)
+            velocity_score = min(20, atr_pct * 10)
+            
+            # 4. التوافق الماكرو / الترند الأكبر (20 نقطة) 🚨 السلاح السري
+            macro_score = 0
+            if not pd.isna(df['ema200'].iloc[-1]):
+                if side == "LONG" and entry > df['ema200'].iloc[-1]: macro_score = 20
+                elif side == "SHORT" and entry < df['ema200'].iloc[-1]: macro_score = 20
+                
+            # 5. زخم الاتجاه اللحظي (10 نقاط)
+            momentum_score = 10 if df['adx'].iloc[-1] > 25 else 0
+
+            # المجموع النهائي
+            quantum_score = min(100, int(strat_score + vol_score + velocity_score + macro_score + momentum_score))
 
             return {
                 "symbol": symbol, "side": side, "entry": entry, 
@@ -252,7 +264,7 @@ async def safe_check(symbol):
         return await get_signal_logic(symbol)
 
 async def monitor_trades(app_state):
-    cprint("👀 15m Solo Sniper Tracker Started...", Log.CYAN)
+    cprint("👀 15m Apex Tracker Started...", Log.CYAN)
     while True:
         current_symbols = list(app_state.active_trades.keys())
         for sym in current_symbols:
@@ -302,7 +314,7 @@ async def monitor_trades(app_state):
         await asyncio.sleep(10)
 
 # ==========================================
-# 5. التقرير اليومي 📊 
+# 5. التقرير اليومي
 # ==========================================
 async def daily_report_task(app_state):
     while True:
@@ -313,7 +325,7 @@ async def daily_report_task(app_state):
         win_rate = (wins / total) * 100 if total > 0 else 0.0
         
         msg = (
-            f"🎯 <b>SOLO SNIPER REPORT (24H)</b> 🎯\n"
+            f"👑 <b>APEX ALGORITHM REPORT (24H)</b> 👑\n"
             f"────────────────\n"
             f"📡 <b>Signals Sent:</b> {app_state.stats['signals']}\n"
             f"✅ <b>Wins (TP Hits):</b> {wins}\n"
@@ -326,16 +338,15 @@ async def daily_report_task(app_state):
         app_state.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 
 # ==========================================
-# 6. المحرك الأساسي (The Grand Draft) 🚀
+# 6. المحرك الأساسي (The Apex Draft)
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V30.0 (SOLO SNIPER)", Log.GREEN)
-    await send_telegram_msg(f"🟢 <b>Fortress V30.0 Online.</b>\n1 Ultimate Trade Rule | Structural Targets 🎯")
+    cprint("🚀 System Online: V31.0 (APEX ALGORITHM)", Log.GREEN)
+    await send_telegram_msg(f"🟢 <b>Fortress V31.0 Online.</b>\n1 Ultimate Trade | 5D Confluence Scoring 👑")
     
     try:
         await exchange.load_markets()
         while True:
-            # 🚨 إذا كان هناك صفقة واحدة نشطة، البوت ينام ولن يبحث عن غيرها حتى تقفل!
             if len(app_state.active_trades) >= MAX_TRADES_AT_ONCE:
                 cprint(f"💤 Sleeping... {len(app_state.active_trades)} trade active.", Log.YELLOW)
                 await asyncio.sleep(60); continue 
@@ -359,9 +370,8 @@ async def start_scanning(app_state):
                 cprint(f"📊 Scan Result: {len(valid_signals)} Smart Signals Found.", Log.YELLOW)
 
                 if valid_signals:
-                    # يفرز كل الصفقات من 100
+                    # يفرز كل الصفقات من 100 بناءً على التوافق الخماسي
                     valid_signals.sort(key=lambda x: x['quantum_score'], reverse=True)
-                    # 🚨 يختار المركز الأول فقط! 🥇
                     top_signals = valid_signals[:MAX_TRADES_AT_ONCE] 
                     
                     cprint(f"🏆 DEPLOYING THE #1 APEX SETUP!", Log.GREEN)
@@ -397,7 +407,7 @@ async def start_scanning(app_state):
                             f"🛑 <b>SL:</b> <code>{fmt_sl}</code> (-{pnl_sl:.1f}% ROE)\n"
                             f"────────────────\n"
                             f"🧠 <b>Strategy:</b> <b>{strat}</b>\n"
-                            f"⚡ <b>Power Score:</b> <b>{q_score}/100</b>"
+                            f"👑 <b>Apex Score:</b> <b>{q_score}/100</b>"
                         )
                         msg_id = await send_telegram_msg(msg)
                         if msg_id:
