@@ -19,7 +19,7 @@ RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 TIMEFRAME = '15m' 
 MAX_TRADES_AT_ONCE = 3 
-MIN_24H_VOLUME_USDT = 15_000_000 
+MIN_24H_VOLUME_USDT = 40_000 # 🚨 تم التخفيض إلى 40 ألف دولار لاصطياد الفرص السريعة
 
 app = FastAPI()
 http_client = httpx.AsyncClient(timeout=15.0)
@@ -37,8 +37,8 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🧠 Fortress V28.1 (MASTERMIND)</h1>
-            <p>10 Elite Strategies | Smart Structure SL/TP | Daily Report Active 📊</p>
+            <h1>🧠 Fortress V28.3 (LOW-CAP SNIPER)</h1>
+            <p>10 Elite Strategies | Smart Structure SL/TP | Low Cap Enabled 🎯</p>
             <p>Status: Active & Hunting! 🎯</p>
         </body>
     </html>
@@ -60,7 +60,7 @@ async def reply_telegram_msg(message, reply_to_msg_id):
     except: pass
 
 # ==========================================
-# 3. محرك الـ 10 استراتيجيات بهيكلة السوق 🧠
+# 3. محرك الـ 10 استراتيجيات 🧠
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -68,6 +68,12 @@ async def get_signal_logic(symbol):
         if not ohlcv or len(ohlcv) < 120: return "ERROR"
         
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        
+        # تحويل الوقت إلى DatetimeIndex ليعمل VWAP بسلاسة
+        df['time'] = pd.to_datetime(df['time'], unit='ms')
+        df.set_index('time', inplace=True)
+        # -------------------------------------------------------------
+
         if df['vol'].iloc[-2] == 0: return "ERROR"
 
         curr = df.iloc[-1]; prev = df.iloc[-2]; entry = curr['close']
@@ -189,7 +195,7 @@ async def get_signal_logic(symbol):
                 strategy_name = "RSI Divergence"; side = "SHORT"; smart_sl = df['high'].rolling(5).max().iloc[-1] * 1.002
 
         # ---------------------------------------------------------
-        # ⚖️ حساب المخاطرة (R/R) والأهداف
+        # ⚖️ حساب المخاطرة والأهداف
         # ---------------------------------------------------------
         if strategy_name != "":
             atr = df['atr'].iloc[-1]
@@ -291,11 +297,11 @@ async def monitor_trades(app_state):
         await asyncio.sleep(10)
 
 # ==========================================
-# 5. التقرير اليومي 📊 (تم إرجاعه بنجاح!)
+# 5. التقرير اليومي 📊 
 # ==========================================
 async def daily_report_task(app_state):
     while True:
-        await asyncio.sleep(86400) # يرسل التقرير كل 24 ساعة 
+        await asyncio.sleep(86400) 
         wins = app_state.stats['tp_hits']
         losses = app_state.stats['sl_hits']
         total = wins + losses
@@ -312,15 +318,14 @@ async def daily_report_task(app_state):
             f"📈 <b>Net Leveraged PNL:</b> {app_state.stats['net_pnl']:.2f}%\n"
         )
         await send_telegram_msg(msg)
-        # تصفير العداد لليوم التالي
         app_state.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 
 # ==========================================
 # 6. المحرك الأساسي 🚀
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V28.1 (MASTERMIND)", Log.GREEN)
-    await send_telegram_msg("🟢 <b>Fortress V28.1 Online.</b>\n10 Elite Strategies | Smart Structure SL/TP | Daily Report Active 📊")
+    cprint("🚀 System Online: V28.3 (LOW-CAP SNIPER)", Log.GREEN)
+    await send_telegram_msg(f"🟢 <b>Fortress V28.3 Online.</b>\nVWAP Fixed | Low Cap Enabled (>{MIN_24H_VOLUME_USDT}$)")
     
     try:
         await exchange.load_markets()
@@ -338,7 +343,7 @@ async def start_scanning(app_state):
                         if vol_24h >= MIN_24H_VOLUME_USDT: 
                             high_liquid_symbols.append(sym)
                 
-                cprint(f"🔎 Scanning Top {len(high_liquid_symbols)} Highly Liquid Pairs...", Log.BLUE)
+                cprint(f"🔎 Scanning Top {len(high_liquid_symbols)} Pairs...", Log.BLUE)
                 
                 tasks = [safe_check(sym) for sym in high_liquid_symbols]
                 results = await asyncio.gather(*tasks)
@@ -412,11 +417,11 @@ async def lifespan(app: FastAPI):
     t1 = asyncio.create_task(start_scanning(db))
     t2 = asyncio.create_task(keep_alive_task())
     t3 = asyncio.create_task(monitor_trades(db))
-    t4 = asyncio.create_task(daily_report_task(db)) # 🚨 تم إرجاع محرك التقرير للعمل
+    t4 = asyncio.create_task(daily_report_task(db)) 
     yield
     await http_client.aclose()
     await exchange.close()
-    t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel() # 🚨 إيقاف التقرير عند إعادة التشغيل
+    t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel() 
 
 app.router.lifespan_context = lifespan
 exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
