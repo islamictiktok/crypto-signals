@@ -19,7 +19,7 @@ RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
 
 TIMEFRAME = '15m' 
 MAX_TRADES_AT_ONCE = 3 
-MIN_24H_VOLUME_USDT = 15_000_000 # سيولة عالية فقط
+MIN_24H_VOLUME_USDT = 15_000_000 
 
 app = FastAPI()
 http_client = httpx.AsyncClient(timeout=15.0)
@@ -37,8 +37,8 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🧠 Fortress V28.0 (MASTERMIND)</h1>
-            <p>10 Elite Strategies | Smart Market Structure SL/TP</p>
+            <h1>🧠 Fortress V28.1 (MASTERMIND)</h1>
+            <p>10 Elite Strategies | Smart Structure SL/TP | Daily Report Active 📊</p>
             <p>Status: Active & Hunting! 🎯</p>
         </body>
     </html>
@@ -72,7 +72,6 @@ async def get_signal_logic(symbol):
 
         curr = df.iloc[-1]; prev = df.iloc[-2]; entry = curr['close']
 
-        # 📊 المؤشرات المؤسساتية الشاملة
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         df['atr_pct'] = (df['atr'] / df['close']) * 100
         
@@ -114,118 +113,92 @@ async def get_signal_logic(symbol):
 
         strategy_name = ""; side = ""; smart_sl = 0.0
 
-        # ---------------------------------------------------------
-        # 🟢 الـ 10 استراتيجيات + تحديد نقطة الاستوب الذكية 🧠
-        # ---------------------------------------------------------
-
-        # 1. Z-Score Mean Reversion (الارتداد من التطرف)
+        # 1. Z-Score Mean Reversion
         if df['z_score'].iloc[-2] < -2.5 and df['z_score'].iloc[-1] > -2.0 and curr['close'] > curr['open']:
-            strategy_name = "Z-Score Reversion"; side = "LONG"
-            smart_sl = min(prev['low'], curr['low']) * 0.998 # تحت ذيل شمعة التطرف
+            strategy_name = "Z-Score Reversion"; side = "LONG"; smart_sl = min(prev['low'], curr['low']) * 0.998 
         elif df['z_score'].iloc[-2] > 2.5 and df['z_score'].iloc[-1] < 2.0 and curr['close'] < curr['open']:
-            strategy_name = "Z-Score Reversion"; side = "SHORT"
-            smart_sl = max(prev['high'], curr['high']) * 1.002 # فوق ذيل شمعة التطرف
+            strategy_name = "Z-Score Reversion"; side = "SHORT"; smart_sl = max(prev['high'], curr['high']) * 1.002 
 
-        # 2. Institutional VWAP Cross (دخول السيولة)
+        # 2. Institutional VWAP Cross
         elif strategy_name == "":
             if prev['close'] < df['vwap'].iloc[-2] and curr['close'] > df['vwap'].iloc[-1] and vol_ratio > 1.8:
-                strategy_name = "VWAP Cross"; side = "LONG"
-                smart_sl = df['vwap'].iloc[-1] * 0.995 # أسفل خط السيولة (VWAP)
+                strategy_name = "VWAP Cross"; side = "LONG"; smart_sl = df['vwap'].iloc[-1] * 0.995 
             elif prev['close'] > df['vwap'].iloc[-2] and curr['close'] < df['vwap'].iloc[-1] and vol_ratio > 1.8:
-                strategy_name = "VWAP Cross"; side = "SHORT"
-                smart_sl = df['vwap'].iloc[-1] * 1.005 # أعلى خط السيولة
+                strategy_name = "VWAP Cross"; side = "SHORT"; smart_sl = df['vwap'].iloc[-1] * 1.005 
 
-        # 3. FVG Sniper (الفجوات السعرية)
+        # 3. FVG Sniper
         elif strategy_name == "":
             up_fvg = df['low'].iloc[-3] > df['high'].iloc[-5]
             if up_fvg and curr['low'] <= df['low'].iloc[-3] and curr['close'] > curr['open']:
-                strategy_name = "FVG Sniper"; side = "LONG"
-                smart_sl = df['high'].iloc[-5] * 0.998 # أسفل الفجوة السعرية بالكامل
+                strategy_name = "FVG Sniper"; side = "LONG"; smart_sl = df['high'].iloc[-5] * 0.998 
             
             down_fvg = df['high'].iloc[-3] < df['low'].iloc[-5]
             if down_fvg and curr['high'] >= df['high'].iloc[-3] and curr['close'] < curr['open']:
-                strategy_name = "FVG Sniper"; side = "SHORT"
-                smart_sl = df['low'].iloc[-5] * 1.002 # أعلى الفجوة بالكامل
+                strategy_name = "FVG Sniper"; side = "SHORT"; smart_sl = df['low'].iloc[-5] * 1.002 
 
-        # 4. Volatility Expansion Breakout (اختراق الاختناق)
+        # 4. Volatility Expansion Breakout
         elif strategy_name == "":
             is_squeezed = df['bb_width'].iloc[-10:-1].mean() < 6.0
             if is_squeezed and df['adx'].iloc[-1] > 25 and curr['close'] > df['bbu'].iloc[-1] and vol_ratio > 1.5:
-                strategy_name = "BB Expansion"; side = "LONG"
-                smart_sl = df['sma20'].iloc[-1] # العودة لمنتصف البولنجر تلغي الاختراق
+                strategy_name = "BB Expansion"; side = "LONG"; smart_sl = df['sma20'].iloc[-1] 
             elif is_squeezed and df['adx'].iloc[-1] > 25 and curr['close'] < df['bbl'].iloc[-1] and vol_ratio > 1.5:
-                strategy_name = "BB Expansion"; side = "SHORT"
-                smart_sl = df['sma20'].iloc[-1]
+                strategy_name = "BB Expansion"; side = "SHORT"; smart_sl = df['sma20'].iloc[-1]
 
-        # 5. Algorithmic Pullback (تصحيح الماكد مع الترند)
+        # 5. Algorithmic Pullback
         elif strategy_name == "":
             if df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and curr['low'] <= df['sma20'].iloc[-1] and curr['close'] > df['sma20'].iloc[-1]:
-                strategy_name = "Algo Pullback"; side = "LONG"
-                smart_sl = df['low'].rolling(3).min().iloc[-1] * 0.998 # أسفل قاع التصحيح
+                strategy_name = "Algo Pullback"; side = "LONG"; smart_sl = df['low'].rolling(3).min().iloc[-1] * 0.998 
             elif df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and curr['high'] >= df['sma20'].iloc[-1] and curr['close'] < df['sma20'].iloc[-1]:
-                strategy_name = "Algo Pullback"; side = "SHORT"
-                smart_sl = df['high'].rolling(3).max().iloc[-1] * 1.002
+                strategy_name = "Algo Pullback"; side = "SHORT"; smart_sl = df['high'].rolling(3).max().iloc[-1] * 1.002
 
-        # 6. Order Block / Support Bounce (الارتداد من البلوك)
+        # 6. Order Block / Support Bounce
         elif strategy_name == "":
             recent_low = df['low'].rolling(15).min().iloc[-2]
             if curr['low'] <= recent_low * 1.005 and curr['close'] > curr['open'] and curr['rsi'] < 40:
-                strategy_name = "Order Block Bounce"; side = "LONG"
-                smart_sl = recent_low * 0.995 # أسفل القاع الأخير مباشرة
+                strategy_name = "Order Block Bounce"; side = "LONG"; smart_sl = recent_low * 0.995 
             recent_high = df['high'].rolling(15).max().iloc[-2]
             if curr['high'] >= recent_high * 0.995 and curr['close'] < curr['open'] and curr['rsi'] > 60:
-                strategy_name = "Order Block Bounce"; side = "SHORT"
-                smart_sl = recent_high * 1.005
+                strategy_name = "Order Block Bounce"; side = "SHORT"; smart_sl = recent_high * 1.005
 
-        # 7. SuperTrend Surge (انعكاس السوبر ترند)
+        # 7. SuperTrend Surge
         elif strategy_name == "":
             if df['st_dir'].iloc[-1] == 1 and df['st_dir'].iloc[-2] == -1:
-                strategy_name = "SuperTrend Surge"; side = "LONG"
-                smart_sl = df['st_line'].iloc[-1] # خط السوبر ترند نفسه هو الاستوب
+                strategy_name = "SuperTrend Surge"; side = "LONG"; smart_sl = df['st_line'].iloc[-1] 
             elif df['st_dir'].iloc[-1] == -1 and df['st_dir'].iloc[-2] == 1:
-                strategy_name = "SuperTrend Surge"; side = "SHORT"
-                smart_sl = df['st_line'].iloc[-1]
+                strategy_name = "SuperTrend Surge"; side = "SHORT"; smart_sl = df['st_line'].iloc[-1]
 
-        # 8. Golden Cross Momentum (تقاطع الزخم السريع)
+        # 8. Golden Cross Momentum
         elif strategy_name == "":
             if df['ema9'].iloc[-1] > df['ema21'].iloc[-1] and df['ema9'].iloc[-2] <= df['ema21'].iloc[-2]:
-                strategy_name = "Golden Cross"; side = "LONG"
-                smart_sl = df['ema21'].iloc[-1] * 0.998 # أسفل المتوسط البطيء
+                strategy_name = "Golden Cross"; side = "LONG"; smart_sl = df['ema21'].iloc[-1] * 0.998 
             elif df['ema9'].iloc[-1] < df['ema21'].iloc[-1] and df['ema9'].iloc[-2] >= df['ema21'].iloc[-2]:
-                strategy_name = "Death Cross"; side = "SHORT"
-                smart_sl = df['ema21'].iloc[-1] * 1.002
+                strategy_name = "Death Cross"; side = "SHORT"; smart_sl = df['ema21'].iloc[-1] * 1.002
 
-        # 9. Deep Exhaustion (الإنهاك السعري - صيد الذيول)
+        # 9. Deep Exhaustion 
         elif strategy_name == "":
             if prev['rsi'] < 25 and prev['close'] < df['bbl'].iloc[-2] and curr['close'] > df['bbl'].iloc[-1]:
-                strategy_name = "Deep Exhaustion"; side = "LONG"
-                smart_sl = min(prev['low'], curr['low']) * 0.995 # ستوب ضيق جداً أسفل الذيل
+                strategy_name = "Deep Exhaustion"; side = "LONG"; smart_sl = min(prev['low'], curr['low']) * 0.995 
             elif prev['rsi'] > 75 and prev['close'] > df['bbu'].iloc[-2] and curr['close'] < df['bbu'].iloc[-1]:
-                strategy_name = "Deep Exhaustion"; side = "SHORT"
-                smart_sl = max(prev['high'], curr['high']) * 1.005
+                strategy_name = "Deep Exhaustion"; side = "SHORT"; smart_sl = max(prev['high'], curr['high']) * 1.005
 
-        # 10. RSI Divergence Proxy (الدايفرجنس)
+        # 10. RSI Divergence Proxy
         elif strategy_name == "":
             if curr['close'] < df['close'].iloc[-4] and curr['rsi'] > df['rsi'].iloc[-4] and curr['rsi'] < 40 and curr['close'] > curr['open']:
-                strategy_name = "RSI Divergence"; side = "LONG"
-                smart_sl = df['low'].rolling(5).min().iloc[-1] * 0.998 # أسفل قاع الدايفرجنس
+                strategy_name = "RSI Divergence"; side = "LONG"; smart_sl = df['low'].rolling(5).min().iloc[-1] * 0.998 
             elif curr['close'] > df['close'].iloc[-4] and curr['rsi'] < df['rsi'].iloc[-4] and curr['rsi'] > 60 and curr['close'] < curr['open']:
-                strategy_name = "RSI Divergence"; side = "SHORT"
-                smart_sl = df['high'].rolling(5).max().iloc[-1] * 1.002
+                strategy_name = "RSI Divergence"; side = "SHORT"; smart_sl = df['high'].rolling(5).max().iloc[-1] * 1.002
 
         # ---------------------------------------------------------
-        # ⚖️ حساب المخاطرة (R/R) والأهداف بناءً على الاستوب الذكي
+        # ⚖️ حساب المخاطرة (R/R) والأهداف
         # ---------------------------------------------------------
         if strategy_name != "":
             atr = df['atr'].iloc[-1]
             atr_pct = df['atr_pct'].iloc[-1]
             
-            # حماية برمجية: التأكد أن الاستوب منطقي (ليس قريباً جداً أو مساوياً للدخول)
             risk = abs(entry - smart_sl)
-            if risk < (atr * 0.5): risk = atr * 0.8 # حد أدنى للمخاطرة يحميك من التذبذب
-            if risk > (atr * 3.0): risk = atr * 2.0 # حد أقصى للمخاطرة
+            if risk < (atr * 0.5): risk = atr * 0.8 
+            if risk > (atr * 3.0): risk = atr * 2.0 
 
-            # الأهداف تُحسب كمضاعفات للمخاطرة (Risk Multipliers - 1.5R, 3R, 5R, 8R)
             if side == "LONG":
                 sl = entry - risk
                 tp1 = entry + (risk * 1.5); tp2 = entry + (risk * 3.0); tp3 = entry + (risk * 5.0); tp_final = entry + (risk * 8.0)
@@ -233,7 +206,6 @@ async def get_signal_logic(symbol):
                 sl = entry + risk
                 tp1 = entry - (risk * 1.5); tp2 = entry - (risk * 3.0); tp3 = entry - (risk * 5.0); tp_final = entry - (risk * 8.0)
 
-            # الرافعة المالية الديناميكية تحسب بناءً على بُعد الاستوب الذكي
             pnl_sl_base = abs((entry - sl) / entry) * 100
             leverage = max(2, min(int(20.0 / pnl_sl_base), 50)) if pnl_sl_base > 0 else 10
 
@@ -254,7 +226,7 @@ async def get_signal_logic(symbol):
     except Exception as e: return f"ERROR"
 
 # ==========================================
-# 4. إدارة البيانات والمراقبة الدقيقة 🎯
+# 4. إدارة البيانات والمراقبة
 # ==========================================
 sem = asyncio.Semaphore(5) 
 class DataManager:
@@ -319,11 +291,36 @@ async def monitor_trades(app_state):
         await asyncio.sleep(10)
 
 # ==========================================
-# 5. المحرك الأساسي 🚀
+# 5. التقرير اليومي 📊 (تم إرجاعه بنجاح!)
+# ==========================================
+async def daily_report_task(app_state):
+    while True:
+        await asyncio.sleep(86400) # يرسل التقرير كل 24 ساعة 
+        wins = app_state.stats['tp_hits']
+        losses = app_state.stats['sl_hits']
+        total = wins + losses
+        win_rate = (wins / total) * 100 if total > 0 else 0.0
+        
+        msg = (
+            f"🧠 <b>MASTERMIND REPORT (24H)</b> 🧠\n"
+            f"────────────────\n"
+            f"📡 <b>Signals Sent:</b> {app_state.stats['signals']}\n"
+            f"✅ <b>Wins (TP Hits):</b> {wins}\n"
+            f"❌ <b>Losses (SL Hits):</b> {losses}\n"
+            f"🎯 <b>Win Rate:</b> {win_rate:.1f}%\n"
+            f"────────────────\n"
+            f"📈 <b>Net Leveraged PNL:</b> {app_state.stats['net_pnl']:.2f}%\n"
+        )
+        await send_telegram_msg(msg)
+        # تصفير العداد لليوم التالي
+        app_state.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
+
+# ==========================================
+# 6. المحرك الأساسي 🚀
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V28.0 (MASTERMIND)", Log.GREEN)
-    await send_telegram_msg("🟢 <b>Fortress V28.0 Online.</b>\n10 Elite Strategies with Smart Structure SL/TP 🧠")
+    cprint("🚀 System Online: V28.1 (MASTERMIND)", Log.GREEN)
+    await send_telegram_msg("🟢 <b>Fortress V28.1 Online.</b>\n10 Elite Strategies | Smart Structure SL/TP | Daily Report Active 📊")
     
     try:
         await exchange.load_markets()
@@ -412,11 +409,14 @@ async def keep_alive_task():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    t1 = asyncio.create_task(start_scanning(db)); t2 = asyncio.create_task(keep_alive_task())
-    t3 = asyncio.create_task(monitor_trades(db)) 
+    t1 = asyncio.create_task(start_scanning(db))
+    t2 = asyncio.create_task(keep_alive_task())
+    t3 = asyncio.create_task(monitor_trades(db))
+    t4 = asyncio.create_task(daily_report_task(db)) # 🚨 تم إرجاع محرك التقرير للعمل
     yield
-    await http_client.aclose(); await exchange.close()
-    t1.cancel(); t2.cancel(); t3.cancel()
+    await http_client.aclose()
+    await exchange.close()
+    t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel() # 🚨 إيقاف التقرير عند إعادة التشغيل
 
 app.router.lifespan_context = lifespan
 exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
