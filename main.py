@@ -38,8 +38,8 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>📡 Fortress V37.0 (RADAR ENGINE)</h1>
-            <p>Smart Radar Pre-Filter | Confluence Matrix Scoring | Lightning Fast</p>
+            <h1>🛸 Fortress V38.0 (BATCHED ENGINE)</h1>
+            <p>Full Market Batched Sweep | Zero Timeout | Fair Scoring</p>
             <p>Status: Active & Hunting 24/7! 🎯</p>
         </body>
     </html>
@@ -61,7 +61,7 @@ async def reply_telegram_msg(message, reply_to_msg_id):
     except: pass
 
 # ==========================================
-# 3. محرك الـ 20 استراتيجية 🧠 (بدون تعديل)
+# 3. محرك الـ 20 استراتيجية 🧠 (بدون أي تعديل)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -86,7 +86,7 @@ async def get_signal_logic(symbol):
         
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         df['atr_pct'] = (df['atr'] / df['close']) * 100
-        if pd.isna(df['atr_pct'].iloc[-1]) or df['atr_pct'].iloc[-1] < 0.4: return "ERROR: Too Slow" 
+        if pd.isna(df['atr_pct'].iloc[-1]) or df['atr_pct'].iloc[-1] < 0.4: return "ERROR"
 
         macd = ta.macd(df['close'])
         if macd is not None and not macd.empty: df['macd_h'] = macd.iloc[:, 1]
@@ -239,13 +239,13 @@ async def get_signal_logic(symbol):
             elif curr['close'] < df['ema21'].iloc[-1] and prev['close'] > df['ema21'].iloc[-2] and body > (df['atr'].iloc[-1] * 1.5):
                 strategy_name = "Momentum Kicker"; side = "SHORT"; smart_sl = curr['high']; target_origin = entry - (df['atr'].iloc[-1] * 2.5); score_boost = 7
 
-
         # ---------------------------------------------------------
-        # 📐 مصفوفة التوافق والتقييم العادل (Confluence Matrix)
+        # 📐 التقييم العادل والمخاطرة الآمنة
         # ---------------------------------------------------------
         if strategy_name != "":
-            # 🚨 حماية الستوب لوس من تذبذب الشموع عبر ATR
             atr = df['atr'].iloc[-1]
+            atr_pct = df['atr_pct'].iloc[-1]
+            
             buffer = entry * 0.0015 
             if side == "LONG": smart_sl = smart_sl - buffer
             else: smart_sl = smart_sl + buffer
@@ -279,16 +279,10 @@ async def get_signal_logic(symbol):
             pnl_sl_base = abs((entry - sl) / entry) * 100
             leverage = max(2, min(int(20.0 / pnl_sl_base), 50)) if pnl_sl_base > 0 else 10
 
-            # 💯 نظام التقييم العادل والمصفوفة (100 نقطة)
-            base_score = 30 + score_boost # الاستراتيجية (تصل لـ 50)
-            
-            # 1. شذوذ الفوليوم (25 نقطة كحد أقصى)
+            base_score = 30 + score_boost 
             vol_points = min(25, vol_ratio * 6)
-            
-            # 2. توافق الترند (15 نقطة)
             trend_points = 15 if (side=="LONG" and entry>df['ema200'].iloc[-1]) or (side=="SHORT" and entry<df['ema200'].iloc[-1]) else 0
             
-            # 3. الزخم اللحظي MACD/RSI (10 نقاط)
             mom_points = 0
             if side == "LONG" and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and curr['rsi'] < 70: mom_points = 10
             if side == "SHORT" and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and curr['rsi'] > 30: mom_points = 10
@@ -316,6 +310,14 @@ class DataManager:
         self.active_trades = {}
         self.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 db = DataManager()
+
+# 🚨 دالة تغليف لحماية العملة من التجمد
+async def safe_fetch(symbol):
+    try:
+        res = await asyncio.wait_for(get_signal_logic(symbol), timeout=6.0)
+        return res
+    except:
+        return "ERROR"
 
 async def monitor_trades(app_state):
     cprint("👀 15m Tracker Started...", Log.CYAN)
@@ -379,7 +381,7 @@ async def daily_report_task(app_state):
         win_rate = (wins / total) * 100 if total > 0 else 0.0
         
         msg = (
-            f"📡 <b>RADAR ENGINE REPORT (24H)</b> 📡\n"
+            f"🛸 <b>BATCHED ENGINE REPORT (24H)</b> 🛸\n"
             f"────────────────\n"
             f"🎯 <b>Signals Sent:</b> {app_state.stats['signals']}\n"
             f"✅ <b>Wins (TP Hits):</b> {wins}\n"
@@ -392,11 +394,11 @@ async def daily_report_task(app_state):
         app_state.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 
 # ==========================================
-# 6. المحرك الأساسي (نظام الرادار السريع) 📡
+# 6. المحرك الأساسي (نظام المسح الكتلي - Batched Sweep) 🛸
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V37.0 (RADAR ENGINE)", Log.GREEN)
-    await send_telegram_msg(f"🟢 <b>Fortress V37.0 Online.</b>\nSmart Radar Engine | Confluence Matrix 📡")
+    cprint("🚀 System Online: V38.0 (BATCHED ENGINE)", Log.GREEN)
+    await send_telegram_msg(f"🟢 <b>Fortress V38.0 Online.</b>\nBatched Sweep Active | Full Market Analysis 🛸")
     
     try:
         await exchange.load_markets()
@@ -406,9 +408,8 @@ async def start_scanning(app_state):
                 await asyncio.sleep(10); continue 
             
             try:
-                # 🚨 التقنية الجديدة (الرادار): سحب كل بيانات السوق بطلبة واحدة فقط 🚨
                 tickers = await exchange.fetch_tickers()
-                valid_tickers = []
+                high_liquid_symbols = []
                 
                 for sym, data in tickers.items():
                     if 'USDT' in sym and ':' in sym: 
@@ -416,29 +417,33 @@ async def start_scanning(app_state):
                             continue
                         vol_24h = data.get('quoteVolume', 0)
                         if vol_24h >= MIN_24H_VOLUME_USDT: 
-                            valid_tickers.append(data)
+                            high_liquid_symbols.append(sym)
                 
-                # ترتيب العملات حسب أكبر حركة مئوية (Trend/Volatility Radar)
-                valid_tickers.sort(key=lambda x: abs(x.get('percentage', 0) or 0), reverse=True)
+                cprint(f"🛸 Batched Sweep Started on {len(high_liquid_symbols)} Pairs...", Log.BLUE)
                 
-                # أخذ أفضل 40 عملة نشطة فقط لفحصها (بدلاً من 740)
-                top_40_symbols = [t['symbol'] for t in valid_tickers[:40]]
+                # 🚨 التقنية الجديدة كلياً: المسح عبر دفعات (Batches) لتجنب حظر المنصة وفحص السوق بالكامل
+                batch_size = 25 # سحب 25 عملة في كل دفعة
+                valid_signals = []
                 
-                cprint(f"📡 Radar Locked on Top {len(top_40_symbols)} Volatile Pairs...", Log.BLUE)
+                for i in range(0, len(high_liquid_symbols), batch_size):
+                    batch = high_liquid_symbols[i:i + batch_size]
+                    tasks = [asyncio.create_task(safe_fetch(sym)) for sym in batch]
+                    results = await asyncio.gather(*tasks)
+                    
+                    for res in results:
+                        if isinstance(res, dict) and "ERROR" not in str(res):
+                            valid_signals.append(res)
+                    
+                    # 🚨 استراحة المحارب: نصف ثانية بين كل كتيبة وأخرى لكي لا تشك المنصة أننا بوت
+                    await asyncio.sleep(0.5) 
                 
-                # فحص الـ 40 عملة بالتوازي المطلق بدون طوابير معقدة
-                tasks = [asyncio.create_task(get_signal_logic(sym)) for sym in top_40_symbols]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                valid_signals = [res for res in results if isinstance(res, dict) and "ERROR" not in str(res)]
-                
-                cprint(f"📊 Scan Result: {len(valid_signals)} Confluence Signals Found.", Log.YELLOW)
+                cprint(f"📊 Scan Result: {len(valid_signals)} Valid Signals Found.", Log.YELLOW)
 
                 if valid_signals:
                     valid_signals.sort(key=lambda x: x['quantum_score'], reverse=True)
                     top_signals = valid_signals[:MAX_TRADES_AT_ONCE] 
                     
-                    cprint(f"🏆 DEPLOYING THE #1 CONFLUENCE SETUP!", Log.GREEN)
+                    cprint(f"🏆 DEPLOYING THE #1 BATCHED SETUP!", Log.GREEN)
                     
                     for sig in top_signals:
                         sym, entry, sl, side, lev, strat, q_score = sig['symbol'], sig['entry'], sig['sl'], sig['side'], sig['leverage'], sig['strat'], sig['quantum_score']
@@ -471,7 +476,7 @@ async def start_scanning(app_state):
                             f"🛑 <b>SL:</b> <code>{fmt_sl}</code> (-{pnl_sl:.1f}% ROE)\n"
                             f"────────────────\n"
                             f"🧠 <b>Strategy:</b> <b>{strat}</b>\n"
-                            f"⚖️ <b>Confluence Score:</b> <b>{q_score}/100</b>"
+                            f"⚖️ <b>Fair Score:</b> <b>{q_score}/100</b>"
                         )
                         msg_id = await send_telegram_msg(msg)
                         if msg_id:
@@ -483,7 +488,7 @@ async def start_scanning(app_state):
                             }
                             app_state.stats["signals"] += 1; await asyncio.sleep(1) 
                 else:
-                    cprint("📉 No Confluence setups detected. Radar retrying...", Log.BLUE)
+                    cprint("📉 No setups detected. Batched retrying...", Log.BLUE)
                     await asyncio.sleep(15) 
             except: await asyncio.sleep(5)
     except: await asyncio.sleep(10)
@@ -506,7 +511,7 @@ async def lifespan(app: FastAPI):
     t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel() 
 
 app.router.lifespan_context = lifespan
-# 🚨 إغلاق فرامل CCXT (RateLimit) للسماح بالسرعة القصوى للرادار
+# 🚨 إغلاق فرامل CCXT للسماح للكتائب بالعمل بكفاءة
 exchange = ccxt.mexc({'enableRateLimit': False, 'options': {'defaultType': 'swap'}})
 if __name__ == "__main__":
     import uvicorn; uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
