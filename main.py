@@ -22,8 +22,9 @@ TIMEFRAME = '15m'
 MAX_TRADES_AT_ONCE = 1 
 MIN_24H_VOLUME_USDT = 50_000 
 
-app = FastAPI()
-http_client = httpx.AsyncClient(timeout=30.0)
+# تعريف المتغيرات العالمية فارغة ليتم شحنها لاحقاً بآمان
+http_client = None
+exchange = None
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -32,18 +33,11 @@ def cprint(msg, color=Log.RESET):
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
 
-@app.get("/", response_class=HTMLResponse)
-@app.head("/")
-async def root():
-    return """
-    <html>
-        <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>⚡ Fortress V36.3 (ANTI-FREEZE ENGINE)</h1>
-            <p>20 Flawless Strategies | Timeout Protocol | Zero Hang Scans</p>
-            <p>Status: Active & Hunting 24/7! 🎯</p>
-        </body>
-    </html>
-    """
+class DataManager:
+    def __init__(self):
+        self.active_trades = {}
+        self.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
+db = DataManager()
 
 # ==========================================
 # 2. دوال التليجرام
@@ -61,7 +55,7 @@ async def reply_telegram_msg(message, reply_to_msg_id):
     except: pass
 
 # ==========================================
-# 3. محرك الـ 20 استراتيجية 🧠 (بدون أي تغيير)
+# 3. محرك الـ 20 استراتيجية 🧠 (بدون أي تغيير في القوة)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -238,6 +232,7 @@ async def get_signal_logic(symbol):
             elif curr['close'] < df['ema21'].iloc[-1] and prev['close'] > df['ema21'].iloc[-2] and body > (df['atr'].iloc[-1] * 1.5):
                 strategy_name = "Momentum Kicker"; side = "SHORT"; smart_sl = curr['high']; target_origin = entry - (df['atr'].iloc[-1] * 2.5); score_boost = 7
 
+
         if strategy_name != "":
             buffer = entry * 0.0015 
             if side == "LONG": smart_sl = smart_sl - buffer
@@ -296,13 +291,12 @@ async def get_signal_logic(symbol):
 # ==========================================
 # 4. محرك الهروب الزمني (TIMEOUT PROTOCOL) ⚡
 # ==========================================
-sem = asyncio.Semaphore(20) # خفضناها لـ 20 لكي لا نتلقى حظر من MEXC
+sem = asyncio.Semaphore(20) 
 
 async def safe_check(symbol):
     async with sem:
         await asyncio.sleep(0.05) 
         try:
-            # 🚨 السحر هنا: إذا المنصة لم ترد في 7 ثواني، البوت يهرب من العملة ولا يتجمد!
             return await asyncio.wait_for(get_signal_logic(symbol), timeout=7.0)
         except asyncio.TimeoutError:
             return "ERROR: TIMEOUT"
@@ -310,7 +304,7 @@ async def safe_check(symbol):
             return "ERROR"
 
 async def monitor_trades(app_state):
-    cprint("👀 15m Anti-Freeze Tracker Started...", Log.CYAN)
+    cprint("👀 15m Stable Tracker Started...", Log.CYAN)
     while True:
         current_symbols = list(app_state.active_trades.keys())
         for sym in current_symbols:
@@ -371,7 +365,7 @@ async def daily_report_task(app_state):
         win_rate = (wins / total) * 100 if total > 0 else 0.0
         
         msg = (
-            f"⚡ <b>SPEED ENGINE REPORT (24H)</b> ⚡\n"
+            f"👁️ <b>GOD MODE REPORT (24H)</b> 👁️\n"
             f"────────────────\n"
             f"📡 <b>Signals Sent:</b> {app_state.stats['signals']}\n"
             f"✅ <b>Wins (TP Hits):</b> {wins}\n"
@@ -387,8 +381,8 @@ async def daily_report_task(app_state):
 # 6. المحرك الأساسي 
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V36.3 (ANTI-FREEZE ENGINE)", Log.GREEN)
-    await send_telegram_msg(f"🟢 <b>Fortress V36.3 Online.</b>\nTimeout Protocol Active | Zero Hang Scans ⚡")
+    cprint("🚀 System Online: V36.4 (STABLE ENGINE)", Log.GREEN)
+    await send_telegram_msg(f"🟢 <b>Fortress V36.4 Online.</b>\nStability Protocol Active | Zero Crash Engine 👁️")
     
     try:
         await exchange.load_markets()
@@ -409,7 +403,6 @@ async def start_scanning(app_state):
                 
                 cprint(f"🔎 Scanning Top {len(high_liquid_symbols)} Clean Pairs FAST...", Log.BLUE)
                 
-                # إطلاق جيش الفحص مع بروتوكول التايم أوت
                 tasks = [safe_check(sym) for sym in high_liquid_symbols]
                 results = await asyncio.gather(*tasks)
                 
@@ -475,8 +468,16 @@ async def keep_alive_task():
         except: pass
         await asyncio.sleep(300)
 
+# ==========================================
+# 7. الإقلاع الآمن للسيرفر 🚀
+# ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global http_client, exchange
+    # تعريفهم بالداخل يمنع السيرفر من الانهيار (Status 3 Fix)
+    http_client = httpx.AsyncClient(timeout=30.0)
+    exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+    
     t1 = asyncio.create_task(start_scanning(db))
     t2 = asyncio.create_task(keep_alive_task())
     t3 = asyncio.create_task(monitor_trades(db))
@@ -486,7 +487,8 @@ async def lifespan(app: FastAPI):
     await exchange.close()
     t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel() 
 
-app.router.lifespan_context = lifespan
-exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+app = FastAPI(lifespan=lifespan)
+
 if __name__ == "__main__":
-    import uvicorn; uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
