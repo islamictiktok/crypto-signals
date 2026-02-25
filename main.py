@@ -19,9 +19,9 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     TIMEFRAME = '15m' 
-    MAX_TRADES_AT_ONCE = 3  # 🚨 السماح بـ 3 صفقات سكالبينج متزامنة
-    MIN_24H_VOLUME_USDT = 50_000 # سيولة ممتازة لضمان سرعة الهدف
-    MIN_SCORE_THRESHOLD = 85 # 🚨 لن يقبل أي صفقة تقييمها أقل من 85
+    MAX_TRADES_AT_ONCE = 3  
+    MIN_24H_VOLUME_USDT = 50_000 
+    MIN_SCORE_THRESHOLD = 85 
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -62,6 +62,12 @@ class StrategyEngine:
     def analyze_data(symbol, ohlcv):
         try:
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            
+            # 🚨 الحل الجذري لمشكلة تحذير الـ VWAP
+            df['time'] = pd.to_datetime(df['time'], unit='ms')
+            df.set_index('time', inplace=True)
+            df.sort_index(inplace=True) # <--- هذا السطر يمنع ظهور التحذير نهائياً
+            
             if len(df) < 50 or df['vol'].iloc[-2] == 0: 
                 return None
 
@@ -84,7 +90,7 @@ class StrategyEngine:
 
             if pd.isna(df['atr'].iloc[-1]): return None
 
-            # الفوليوم الديناميكي (يأخذ الأكبر لتفادي الشموع غير المكتملة)
+            # الفوليوم الديناميكي 
             avg_vol = df['vol'].iloc[-15:-1].mean()
             vol_ratio = max(curr['vol'], prev['vol']) / avg_vol if avg_vol > 0 else 0
 
@@ -128,12 +134,11 @@ class StrategyEngine:
                 strat = "RSI Snapback Drop"; side = "SHORT"; base_score = 35
 
             # ==========================================
-            # 📐 حسابات السكالبينج (هدف واحد سريع)
+            # 📐 حسابات السكالبينج 
             # ==========================================
             if strat != "":
                 atr = df['atr'].iloc[-1]
                 
-                # تقييم ديناميكي صارم (يجب أن يصل لـ 85 ليرسل الصفقة)
                 vol_score = min(40, vol_ratio * 10)
                 trend_score = 15 if (side == "LONG" and entry > df['ema200'].iloc[-1]) or (side == "SHORT" and entry < df['ema200'].iloc[-1]) else 0
                 final_score = min(100, int(base_score + vol_score + trend_score))
@@ -141,16 +146,14 @@ class StrategyEngine:
                 if final_score < Config.MIN_SCORE_THRESHOLD:
                     del df; return None
 
-                # الستوب لوس: قريب جداً ومحمي بـ ATR (1.5x ATR)
                 if side == "LONG":
                     sl = entry - (atr * 1.5)
-                    tp = entry + (atr * 2.5) # هدف سريع 1.6 Risk to Reward
+                    tp = entry + (atr * 2.5) 
                 else:
                     sl = entry + (atr * 1.5)
                     tp = entry - (atr * 2.5)
 
                 risk_pct = abs((entry - sl) / entry) * 100
-                # رافعة مالية تتناسب مع الستوب السريع (بين 10x و 30x)
                 lev = max(10, min(int(15.0 / risk_pct), 30)) if risk_pct > 0 else 10 
 
                 del df
@@ -188,7 +191,7 @@ class TradingSystem:
 
     async def fetch_and_analyze(self, symbol):
         try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=100) # تقليل الشموع للسرعة
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=100) 
             if ohlcv:
                 res = await asyncio.to_thread(StrategyEngine.analyze_data, symbol, ohlcv)
                 if res:
@@ -220,12 +223,11 @@ class TradingSystem:
                 
                 Log.print(f"⚡ As-Completed Scan Started on {len(targets)} Pairs...", Log.BLUE)
                 
-                # 🚨 التقنية الجديدة (عملة بعملة بسرعة البرق)
                 tasks = [asyncio.create_task(self.fetch_and_analyze(sym)) for sym in targets]
                 
                 for coro in asyncio.as_completed(tasks):
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
-                        break # توقف عن الفحص فور امتلاء الصفقات
+                        break 
                     
                     res = await coro
                     if res and res['symbol'] not in self.active_trades:
@@ -294,7 +296,7 @@ class TradingSystem:
                         del self.active_trades[sym]
                         
                 except: pass
-            await asyncio.sleep(2) # فحص الأهداف كل ثانيتين لسرعة الخروج
+            await asyncio.sleep(2) 
 
     async def daily_report(self):
         while self.running:
