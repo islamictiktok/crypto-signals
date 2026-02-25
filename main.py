@@ -12,18 +12,16 @@ import uvicorn
 from contextlib import asynccontextmanager
 
 # ==========================================
-# 1. الإعدادات المركزية (CONFIG)
+# 1. الإعدادات المركزية (CONFIG) - الهجوم الشامل
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    # 🚨 تم التغيير لفريم 30 دقيقة للفلترة القوية للضوضاء
-    TIMEFRAME = '30m'
-    MAX_TRADES_AT_ONCE = 1
-    MIN_24H_VOLUME_USDT = 10_000 
-    TOP_VOLATILE_COINS = 80 
-    CHUNK_SIZE = 15 
+    TIMEFRAME = '15m' # عودة للـ 15 دقيقة لغزارة الإشارات
+    MAX_TRADES_AT_ONCE = 2 # السماح بصفقتين معاً لكثرة الفرص
+    MIN_24H_VOLUME_USDT = 25_000 # اصطياد العملات النائمة والانفجارية
+    CHUNK_SIZE = 20 # فحص 20 عملة في الدفعة لسرعة المسح
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -57,7 +55,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك الـ 30 استراتيجية الجبارة 🧠
+# 3. محرك الاستراتيجيات الشامل (THE 50+ ARSENAL) 🧠
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -73,19 +71,26 @@ class StrategyEngine:
             curr, prev, prev2, prev3 = df.iloc[-1], df.iloc[-2], df.iloc[-3], df.iloc[-4]
             entry = curr['close']
 
+            # 📊 المؤشرات الشاملة (Indicators Dictionary)
             df['ema9'] = ta.ema(df['close'], length=9)
             df['ema21'] = ta.ema(df['close'], length=21)
             df['ema50'] = ta.ema(df['close'], length=50)
             df['ema200'] = ta.ema(df['close'], length=200)
+            df['sma20'] = ta.sma(df['close'], length=20)
             df['vwap'] = ta.vwap(df['high'], df['low'], df['close'], df['vol'])
+            
             df['rsi'] = ta.rsi(df['close'], length=14)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
             
-            if pd.isna(df['atr'].iloc[-1]): return None
-            
             macd = ta.macd(df['close'])
+            df['macd_m'] = macd.iloc[:, 0] if macd is not None and not macd.empty else 0.0
+            df['macd_s'] = macd.iloc[:, 2] if macd is not None and not macd.empty else 0.0
             df['macd_h'] = macd.iloc[:, 1] if macd is not None and not macd.empty else 0.0
-            
+
+            stoch = ta.stoch(df['high'], df['low'], df['close'])
+            df['stoch_k'] = stoch.iloc[:, 0] if stoch is not None and not stoch.empty else 50.0
+            df['stoch_d'] = stoch.iloc[:, 1] if stoch is not None and not stoch.empty else 50.0
+
             bb = df.ta.bbands(length=20, std=2)
             if bb is not None and not bb.empty:
                 df['bbl'], df['bbu'] = bb.filter(like='BBL').iloc[:, 0], bb.filter(like='BBU').iloc[:, 0]
@@ -93,171 +98,120 @@ class StrategyEngine:
             else:
                 df['bb_width'] = 100
 
+            if pd.isna(df['atr'].iloc[-1]): return None
+
             avg_vol = df['vol'].iloc[-20:-1].mean()
             vol_ratio = curr['vol'] / avg_vol if avg_vol > 0 else 0
 
-            swing_high = df['high'].rolling(20).max().iloc[-2]
-            swing_low = df['low'].rolling(20).min().iloc[-2]
-            macro_high = df['high'].rolling(50).max().iloc[-2]
-
+            # 📈 هيكل السوق والشموع (Price Action)
+            swing_high = df['high'].rolling(15).max().shift(1).iloc[-1]
+            swing_low = df['low'].rolling(15).min().shift(1).iloc[-1]
+            
             body = abs(curr['close'] - curr['open'])
+            prev_body = abs(prev['close'] - prev['open'])
             lower_wick = min(curr['open'], curr['close']) - curr['low']
             upper_wick = curr['high'] - max(curr['open'], curr['close'])
-            prev_body = abs(prev['close'] - prev['open'])
-            
+
+            is_green = curr['close'] > curr['open']
+            is_red = curr['close'] < curr['open']
+            prev_green = prev['close'] > prev['open']
+            prev_red = prev['close'] < prev['open']
+
             strat = ""; side = ""; smart_sl = 0.0; target_orig = 0.0; boost = 0
 
             # ========================================================
-            # 🚀 ترسانة الـ 30 استراتيجية (أقوى فلاتر السوق)
+            # 🧨 موسوعة الاستراتيجيات (The 50 Scenarios Arsenal)
             # ========================================================
 
-            # 1. SMC Liquidity Purge (Sweep)
-            if curr['low'] < swing_low and curr['close'] > swing_low and lower_wick > (body * 2) and vol_ratio > 1.5:
-                strat = "1. SMC Liquidity Sweep (Bull)"; side = "LONG"; smart_sl = curr['low']; target_orig = swing_high; boost = 25
-            elif curr['high'] > swing_high and curr['close'] < swing_high and upper_wick > (body * 2) and vol_ratio > 1.5:
-                strat = "1. SMC Liquidity Sweep (Bear)"; side = "SHORT"; smart_sl = curr['high']; target_orig = swing_low; boost = 25
-
-            # 2. Extreme Rubber Band 
-            elif curr['close'] < df['bbl'].iloc[-1] and curr['rsi'] < 25 and curr['close'] > curr['open'] and lower_wick > body and vol_ratio > 1.5:
-                strat = "2. Rubber Band Reversal"; side = "LONG"; smart_sl = curr['low']; target_orig = df['ema21'].iloc[-1]; boost = 20
-            elif curr['close'] > df['bbu'].iloc[-1] and curr['rsi'] > 75 and curr['close'] < curr['open'] and upper_wick > body and vol_ratio > 1.5:
-                strat = "2. Rubber Band Reversal"; side = "SHORT"; smart_sl = curr['high']; target_orig = df['ema21'].iloc[-1]; boost = 20
-
-            # 3. Sleeper Squeeze Breakout
-            elif df['bb_width'].iloc[-5:-1].mean() < 3.0 and curr['close'] > df['bbu'].iloc[-1] and vol_ratio > 3.0 and entry > df['ema50'].iloc[-1]:
-                strat = "3. Squeeze Breakout"; side = "LONG"; smart_sl = df['ema21'].iloc[-1]; target_orig = macro_high; boost = 22
-            elif df['bb_width'].iloc[-5:-1].mean() < 3.0 and curr['close'] < df['bbl'].iloc[-1] and vol_ratio > 3.0 and entry < df['ema50'].iloc[-1]:
-                strat = "3. Squeeze Breakout"; side = "SHORT"; smart_sl = df['ema21'].iloc[-1]; target_orig = swing_low; boost = 22
-
-            # 4. Institutional VWAP Rejection
-            elif prev['low'] <= df['vwap'].iloc[-2] and curr['close'] > df['vwap'].iloc[-1] and lower_wick > body and entry > df['ema200'].iloc[-1]:
-                strat = "4. VWAP Sniper Bounce"; side = "LONG"; smart_sl = min(curr['low'], prev['low']); target_orig = swing_high; boost = 18
-            elif prev['high'] >= df['vwap'].iloc[-2] and curr['close'] < df['vwap'].iloc[-1] and upper_wick > body and entry < df['ema200'].iloc[-1]:
-                strat = "4. VWAP Sniper Bounce"; side = "SHORT"; smart_sl = max(curr['high'], prev['high']); target_orig = swing_low; boost = 18
-
-            # 5. Golden FVG Fill
-            elif df['low'].iloc[-3] > df['high'].iloc[-5] and curr['low'] <= df['low'].iloc[-3] and curr['close'] > curr['open'] and entry > df['ema50'].iloc[-1]:
-                strat = "5. Golden FVG Fill"; side = "LONG"; smart_sl = df['high'].iloc[-5]; target_orig = swing_high; boost = 15
-            elif df['high'].iloc[-3] < df['low'].iloc[-5] and curr['high'] >= df['high'].iloc[-3] and curr['close'] < curr['open'] and entry < df['ema50'].iloc[-1]:
-                strat = "5. Golden FVG Fill"; side = "SHORT"; smart_sl = df['low'].iloc[-5]; target_orig = swing_low; boost = 15
-
-            # 6. Hidden RSI Divergence
-            elif entry > df['ema200'].iloc[-1] and curr['low'] > swing_low and curr['rsi'] < df['rsi'].iloc[-10:-2].min():
-                strat = "6. Hidden Bullish Divergence"; side = "LONG"; smart_sl = curr['low']; target_orig = macro_high; boost = 15
-            elif entry < df['ema200'].iloc[-1] and curr['high'] < swing_high and curr['rsi'] > df['rsi'].iloc[-10:-2].max():
-                strat = "6. Hidden Bearish Divergence"; side = "SHORT"; smart_sl = curr['high']; target_orig = swing_low; boost = 15
-
-            # 7. Bullish/Bearish Order Block Shift
+            # --- [GROUP A: SMC & Liquidity] ---
+            if curr['low'] < swing_low and is_green and lower_wick > body * 1.5 and vol_ratio > 1.2:
+                strat = "SMC: Bullish Liquidity Sweep"; side = "LONG"; smart_sl = curr['low']; target_orig = swing_high; boost = 20
+            elif curr['high'] > swing_high and is_red and upper_wick > body * 1.5 and vol_ratio > 1.2:
+                strat = "SMC: Bearish Liquidity Sweep"; side = "SHORT"; smart_sl = curr['high']; target_orig = swing_low; boost = 20
+            elif df['low'].iloc[-3] > df['high'].iloc[-5] and curr['low'] <= df['low'].iloc[-3] and is_green:
+                strat = "SMC: Bullish FVG Fill"; side = "LONG"; smart_sl = df['high'].iloc[-5]; target_orig = swing_high; boost = 15
+            elif df['high'].iloc[-3] < df['low'].iloc[-5] and curr['high'] >= df['high'].iloc[-3] and is_red:
+                strat = "SMC: Bearish FVG Fill"; side = "SHORT"; smart_sl = df['low'].iloc[-5]; target_orig = swing_low; boost = 15
             elif prev2['close'] < prev2['open'] and prev['close'] > prev['open'] and curr['close'] > prev['high'] and vol_ratio > 1.5:
-                strat = "7. Dynamic Order Block Shift"; side = "LONG"; smart_sl = prev2['low']; target_orig = swing_high; boost = 14
+                strat = "SMC: Bullish Order Block"; side = "LONG"; smart_sl = prev2['low']; target_orig = swing_high; boost = 18
             elif prev2['close'] > prev2['open'] and prev['close'] < prev['open'] and curr['close'] < prev['low'] and vol_ratio > 1.5:
-                strat = "7. Dynamic Order Block Shift"; side = "SHORT"; smart_sl = prev2['high']; target_orig = swing_low; boost = 14
+                strat = "SMC: Bearish Order Block"; side = "SHORT"; smart_sl = prev2['high']; target_orig = swing_low; boost = 18
 
-            # 8. EMA200 Master Bounce
+            # --- [GROUP B: Price Action & Candlesticks] ---
+            elif is_green and prev_red and curr['close'] > prev['open'] and curr['open'] <= prev['close'] and vol_ratio > 1.2:
+                strat = "PA: Bullish Engulfing"; side = "LONG"; smart_sl = curr['low']; target_orig = swing_high; boost = 15
+            elif is_red and prev_green and curr['close'] < prev['open'] and curr['open'] >= prev['close'] and vol_ratio > 1.2:
+                strat = "PA: Bearish Engulfing"; side = "SHORT"; smart_sl = curr['high']; target_orig = swing_low; boost = 15
+            elif lower_wick > body * 3 and is_green and curr['rsi'] < 40:
+                strat = "PA: Extreme Bullish Pinbar"; side = "LONG"; smart_sl = curr['low']; target_orig = df['vwap'].iloc[-1]; boost = 15
+            elif upper_wick > body * 3 and is_red and curr['rsi'] > 60:
+                strat = "PA: Extreme Bearish Pinbar"; side = "SHORT"; smart_sl = curr['high']; target_orig = df['vwap'].iloc[-1]; boost = 15
+            elif prev['high'] < prev2['high'] and prev['low'] > prev2['low'] and curr['close'] > prev['high']:
+                strat = "PA: Inside Bar Bull Breakout"; side = "LONG"; smart_sl = prev['low']; target_orig = swing_high; boost = 12
+            elif prev['high'] < prev2['high'] and prev['low'] > prev2['low'] and curr['close'] < prev['low']:
+                strat = "PA: Inside Bar Bear Breakout"; side = "SHORT"; smart_sl = prev['high']; target_orig = swing_low; boost = 12
+            elif is_green and prev_green and prev2_green := prev2['close'] > prev2['open'] and curr['close'] > swing_high:
+                strat = "PA: 3 White Soldiers Momentum"; side = "LONG"; smart_sl = prev2['low']; target_orig = entry + (df['atr'].iloc[-1]*4); boost = 14
+            elif is_red and prev_red and prev2_red := prev2['close'] < prev2['open'] and curr['close'] < swing_low:
+                strat = "PA: 3 Black Crows Momentum"; side = "SHORT"; smart_sl = prev2['high']; target_orig = entry - (df['atr'].iloc[-1]*4); boost = 14
+
+            # --- [GROUP C: Momentum & Breakouts] ---
+            elif df['bb_width'].iloc[-5:-1].mean() < 3.5 and curr['close'] > df['bbu'].iloc[-1] and vol_ratio > 2.5:
+                strat = "MOM: BB Squeeze Bull Breakout"; side = "LONG"; smart_sl = df['ema21'].iloc[-1]; target_orig = swing_high * 1.05; boost = 20
+            elif df['bb_width'].iloc[-5:-1].mean() < 3.5 and curr['close'] < df['bbl'].iloc[-1] and vol_ratio > 2.5:
+                strat = "MOM: BB Squeeze Bear Breakout"; side = "SHORT"; smart_sl = df['ema21'].iloc[-1]; target_orig = swing_low * 0.95; boost = 20
+            elif curr['close'] > df['ema50'].iloc[-1] and prev['close'] < df['ema50'].iloc[-2] and body > (df['atr'].iloc[-1] * 1.5) and vol_ratio > 1.8:
+                strat = "MOM: Golden Kicker Strike"; side = "LONG"; smart_sl = curr['low']; target_orig = entry + (df['atr'].iloc[-1] * 3); boost = 16
+            elif curr['close'] < df['ema50'].iloc[-1] and prev['close'] > df['ema50'].iloc[-2] and body > (df['atr'].iloc[-1] * 1.5) and vol_ratio > 1.8:
+                strat = "MOM: Death Kicker Strike"; side = "SHORT"; smart_sl = curr['high']; target_orig = entry - (df['atr'].iloc[-1] * 3); boost = 16
+
+            # --- [GROUP D: Oscillators (RSI, MACD, Stoch)] ---
+            elif curr['rsi'] < 30 and df['stoch_k'].iloc[-1] > df['stoch_d'].iloc[-1] and df['stoch_k'].iloc[-2] <= df['stoch_d'].iloc[-2] and is_green:
+                strat = "OSC: Stoch/RSI Oversold Cross"; side = "LONG"; smart_sl = curr['low']; target_orig = df['vwap'].iloc[-1]; boost = 15
+            elif curr['rsi'] > 70 and df['stoch_k'].iloc[-1] < df['stoch_d'].iloc[-1] and df['stoch_k'].iloc[-2] >= df['stoch_d'].iloc[-2] and is_red:
+                strat = "OSC: Stoch/RSI Overbought Cross"; side = "SHORT"; smart_sl = curr['high']; target_orig = df['vwap'].iloc[-1]; boost = 15
+            elif df['macd_m'].iloc[-1] > df['macd_s'].iloc[-1] and df['macd_m'].iloc[-2] <= df['macd_s'].iloc[-2] and df['macd_m'].iloc[-1] < 0:
+                strat = "OSC: MACD Deep Bull Cross"; side = "LONG"; smart_sl = swing_low; target_orig = df['ema200'].iloc[-1]; boost = 12
+            elif df['macd_m'].iloc[-1] < df['macd_s'].iloc[-1] and df['macd_m'].iloc[-2] >= df['macd_s'].iloc[-2] and df['macd_m'].iloc[-1] > 0:
+                strat = "OSC: MACD High Bear Cross"; side = "SHORT"; smart_sl = swing_high; target_orig = df['ema200'].iloc[-1]; boost = 12
+            elif curr['rsi'] > prev['rsi'] and curr['close'] < prev['close'] and curr['low'] <= swing_low:
+                strat = "OSC: Bullish RSI Divergence"; side = "LONG"; smart_sl = curr['low'] * 0.99; target_orig = df['ema50'].iloc[-1]; boost = 18
+            elif curr['rsi'] < prev['rsi'] and curr['close'] > prev['close'] and curr['high'] >= swing_high:
+                strat = "OSC: Bearish RSI Divergence"; side = "SHORT"; smart_sl = curr['high'] * 1.01; target_orig = df['ema50'].iloc[-1]; boost = 18
+
+            # --- [GROUP E: Moving Averages & VWAP] ---
+            elif prev['low'] <= df['vwap'].iloc[-1] and curr['close'] > df['vwap'].iloc[-1] and is_green and df['ema21'].iloc[-1] > df['ema50'].iloc[-1]:
+                strat = "MA: VWAP Trend Bounce"; side = "LONG"; smart_sl = min(curr['low'], prev['low']); target_orig = swing_high; boost = 14
+            elif prev['high'] >= df['vwap'].iloc[-1] and curr['close'] < df['vwap'].iloc[-1] and is_red and df['ema21'].iloc[-1] < df['ema50'].iloc[-1]:
+                strat = "MA: VWAP Trend Reject"; side = "SHORT"; smart_sl = max(curr['high'], prev['high']); target_orig = swing_low; boost = 14
             elif curr['low'] <= df['ema200'].iloc[-1] and curr['close'] > df['ema200'].iloc[-1] and lower_wick > body:
-                strat = "8. EMA200 Master Bounce"; side = "LONG"; smart_sl = curr['low']; target_orig = df['ema50'].iloc[-1]; boost = 18
+                strat = "MA: EMA200 Master Support"; side = "LONG"; smart_sl = curr['low'] * 0.998; target_orig = df['ema50'].iloc[-1]; boost = 18
             elif curr['high'] >= df['ema200'].iloc[-1] and curr['close'] < df['ema200'].iloc[-1] and upper_wick > body:
-                strat = "8. EMA200 Master Bounce"; side = "SHORT"; smart_sl = curr['high']; target_orig = df['ema50'].iloc[-1]; boost = 18
+                strat = "MA: EMA200 Master Resistance"; side = "SHORT"; smart_sl = curr['high'] * 1.002; target_orig = df['ema50'].iloc[-1]; boost = 18
+            elif df['ema9'].iloc[-1] > df['ema21'].iloc[-1] and df['ema9'].iloc[-2] <= df['ema21'].iloc[-2] and vol_ratio > 1.2:
+                strat = "MA: EMA 9/21 Golden Cross"; side = "LONG"; smart_sl = df['ema50'].iloc[-1]; target_orig = swing_high; boost = 10
+            elif df['ema9'].iloc[-1] < df['ema21'].iloc[-1] and df['ema9'].iloc[-2] >= df['ema21'].iloc[-2] and vol_ratio > 1.2:
+                strat = "MA: EMA 9/21 Death Cross"; side = "SHORT"; smart_sl = df['ema50'].iloc[-1]; target_orig = swing_low; boost = 10
 
-            # 9. Momentum Kicker
-            elif curr['close'] > df['ema50'].iloc[-1] and prev['close'] < df['ema50'].iloc[-2] and body > (df['atr'].iloc[-1] * 1.5) and vol_ratio > 2.0:
-                strat = "9. Momentum Kicker Strike"; side = "LONG"; smart_sl = curr['low']; target_orig = entry + (df['atr'].iloc[-1] * 3); boost = 20
-            elif curr['close'] < df['ema50'].iloc[-1] and prev['close'] > df['ema50'].iloc[-2] and body > (df['atr'].iloc[-1] * 1.5) and vol_ratio > 2.0:
-                strat = "9. Momentum Kicker Strike"; side = "SHORT"; smart_sl = curr['high']; target_orig = entry - (df['atr'].iloc[-1] * 3); boost = 20
+            # --- [GROUP F: Volatility Extremes] ---
+            elif curr['close'] < df['bbl'].iloc[-1] and curr['rsi'] < 20 and is_green:
+                strat = "VOL: Extreme Rubber Band Buy"; side = "LONG"; smart_sl = curr['low']; target_orig = df['sma20'].iloc[-1]; boost = 22
+            elif curr['close'] > df['bbu'].iloc[-1] and curr['rsi'] > 80 and is_red:
+                strat = "VOL: Extreme Rubber Band Sell"; side = "SHORT"; smart_sl = curr['high']; target_orig = df['sma20'].iloc[-1]; boost = 22
+            elif curr['rsi'] < 15 and vol_ratio > 2.5:
+                strat = "VOL: Flash Crash Buy"; side = "LONG"; smart_sl = curr['low'] * 0.98; target_orig = entry + (df['atr'].iloc[-1]*3); boost = 25
+            elif curr['rsi'] > 85 and vol_ratio > 2.5:
+                strat = "VOL: Parabolic Top Short"; side = "SHORT"; smart_sl = curr['high'] * 1.02; target_orig = entry - (df['atr'].iloc[-1]*3); boost = 25
 
-            # 10. Exhaustion Pin Bar
-            elif prev['open'] < prev2['close'] and prev['close'] < prev['open'] and lower_wick > (body*2.5) and curr['close'] > prev['high']:
-                strat = "10. Exhaustion Pin Bar Reversal"; side = "LONG"; smart_sl = curr['low']; target_orig = df['vwap'].iloc[-1]; boost = 16
-            elif prev['open'] > prev2['close'] and prev['close'] > prev['open'] and upper_wick > (body*2.5) and curr['close'] < prev['low']:
-                strat = "10. Exhaustion Pin Bar Reversal"; side = "SHORT"; smart_sl = curr['high']; target_orig = df['vwap'].iloc[-1]; boost = 16
-
-            # 11. 3 White Soldiers / Black Crows (Institutional Trend)
-            elif curr['close']>curr['open'] and prev['close']>prev['open'] and prev2['close']>prev2['open'] and curr['close']>swing_high and vol_ratio > 1.2:
-                strat = "11. Three Soldiers (Trend)"; side = "LONG"; smart_sl = prev['low']; target_orig = macro_high; boost = 14
-            elif curr['close']<curr['open'] and prev['close']<prev['open'] and prev2['close']<prev2['open'] and curr['close']<swing_low and vol_ratio > 1.2:
-                strat = "11. Three Crows (Trend)"; side = "SHORT"; smart_sl = prev['high']; target_orig = swing_low; boost = 14
-
-            # 12. EMA 9/21 Cross + Volume
-            elif df['ema9'].iloc[-1] > df['ema21'].iloc[-1] and df['ema9'].iloc[-2] <= df['ema21'].iloc[-2] and vol_ratio > 1.5:
-                strat = "12. Momentum EMA Cross"; side = "LONG"; smart_sl = df['ema21'].iloc[-1]; target_orig = swing_high; boost = 12
-            elif df['ema9'].iloc[-1] < df['ema21'].iloc[-1] and df['ema9'].iloc[-2] >= df['ema21'].iloc[-2] and vol_ratio > 1.5:
-                strat = "12. Momentum EMA Cross"; side = "SHORT"; smart_sl = df['ema21'].iloc[-1]; target_orig = swing_low; boost = 12
-
-            # 13. VWAP + RSI Rejection
-            elif curr['low'] <= df['vwap'].iloc[-1] and curr['close'] > df['vwap'].iloc[-1] and curr['rsi'] > prev['rsi'] and curr['rsi'] < 50:
-                strat = "13. VWAP + RSI Synergy"; side = "LONG"; smart_sl = curr['low'] * 0.998; target_orig = swing_high; boost = 15
-            elif curr['high'] >= df['vwap'].iloc[-1] and curr['close'] < df['vwap'].iloc[-1] and curr['rsi'] < prev['rsi'] and curr['rsi'] > 50:
-                strat = "13. VWAP + RSI Synergy"; side = "SHORT"; smart_sl = curr['high'] * 1.002; target_orig = swing_low; boost = 15
-
-            # 14. Liquidity Void Fill
-            elif prev['close'] < prev['open'] and prev_body > (df['atr'].iloc[-2] * 2) and curr['close'] > prev['high']:
-                strat = "14. Liquidity Void Recovery"; side = "LONG"; smart_sl = prev['low']; target_orig = swing_high; boost = 12
-            elif prev['close'] > prev['open'] and prev_body > (df['atr'].iloc[-2] * 2) and curr['close'] < prev['low']:
-                strat = "14. Liquidity Void Recovery"; side = "SHORT"; smart_sl = prev['high']; target_orig = swing_low; boost = 12
-
-            # 15. Fakeout Trap (Turtle Soup)
-            elif prev['high'] > macro_high and curr['close'] < macro_high and curr['close'] < prev['low'] and vol_ratio > 1.5:
-                strat = "15. Bull Trap (Turtle Soup)"; side = "SHORT"; smart_sl = prev['high']; target_orig = swing_low; boost = 18
-            elif prev['low'] < swing_low and curr['close'] > swing_low and curr['close'] > prev['high'] and vol_ratio > 1.5:
-                strat = "15. Bear Trap (Turtle Soup)"; side = "LONG"; smart_sl = prev['low']; target_orig = swing_high; boost = 18
-
-            # 16. Double Bottom/Top Strike
-            elif abs(curr['low'] - prev2['low']) / entry < 0.002 and curr['close'] > curr['open'] and prev['close'] < prev['open']:
-                strat = "16. Micro Double Bottom"; side = "LONG"; smart_sl = min(curr['low'], prev2['low']); target_orig = df['vwap'].iloc[-1]; boost = 14
-            elif abs(curr['high'] - prev2['high']) / entry < 0.002 and curr['close'] < curr['open'] and prev['close'] > prev['open']:
-                strat = "16. Micro Double Top"; side = "SHORT"; smart_sl = max(curr['high'], prev2['high']); target_orig = df['vwap'].iloc[-1]; boost = 14
-
-            # 17. MACD Zero-Line Bounce
-            elif df['macd_h'].iloc[-1] > 0 and df['macd_h'].iloc[-2] <= 0 and entry > df['ema50'].iloc[-1]:
-                strat = "17. MACD Trend Ignition"; side = "LONG"; smart_sl = df['ema21'].iloc[-1]; target_orig = swing_high; boost = 10
-            elif df['macd_h'].iloc[-1] < 0 and df['macd_h'].iloc[-2] >= 0 and entry < df['ema50'].iloc[-1]:
-                strat = "17. MACD Trend Ignition"; side = "SHORT"; smart_sl = df['ema21'].iloc[-1]; target_orig = swing_low; boost = 10
-
-            # 18. Inside Bar Breakout
-            elif prev['high'] < prev2['high'] and prev['low'] > prev2['low'] and curr['close'] > prev2['high'] and vol_ratio > 1.5:
-                strat = "18. Inside Bar Breakout"; side = "LONG"; smart_sl = prev['low']; target_orig = swing_high; boost = 12
-            elif prev['high'] < prev2['high'] and prev['low'] > prev2['low'] and curr['close'] < prev2['low'] and vol_ratio > 1.5:
-                strat = "18. Inside Bar Breakout"; side = "SHORT"; smart_sl = prev['high']; target_orig = swing_low; boost = 12
-
-            # 19. Triple EMA Alignment Pullback
-            elif df['ema9'].iloc[-1] > df['ema21'].iloc[-1] > df['ema50'].iloc[-1] and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1]:
-                strat = "19. Triple EMA Synergy"; side = "LONG"; smart_sl = df['ema50'].iloc[-1]; target_orig = swing_high; boost = 14
-            elif df['ema9'].iloc[-1] < df['ema21'].iloc[-1] < df['ema50'].iloc[-1] and curr['high'] >= df['ema21'].iloc[-1] and curr['close'] < df['ema21'].iloc[-1]:
-                strat = "19. Triple EMA Synergy"; side = "SHORT"; smart_sl = df['ema50'].iloc[-1]; target_orig = swing_low; boost = 14
-
-            # 20. Overbought/Oversold Re-entry
-            elif prev['rsi'] > 70 and curr['rsi'] < 70 and curr['close'] < curr['open']:
-                strat = "20. Overbought Reversal"; side = "SHORT"; smart_sl = curr['high']; target_orig = df['vwap'].iloc[-1]; boost = 10
-            elif prev['rsi'] < 30 and curr['rsi'] > 30 and curr['close'] > curr['open']:
-                strat = "20. Oversold Reversal"; side = "LONG"; smart_sl = curr['low']; target_orig = df['vwap'].iloc[-1]; boost = 10
-
-            # 21-30. (Extended conditions merged into logical buckets for efficiency)
-            elif curr['close'] > df['vwap'].iloc[-1] and prev['close'] < df['vwap'].iloc[-1] and body > (df['atr'].iloc[-1]):
-                strat = "21. Pure VWAP Cross"; side = "LONG"; smart_sl = curr['low']; target_orig = swing_high; boost = 10
-            elif curr['close'] < df['vwap'].iloc[-1] and prev['close'] > df['vwap'].iloc[-1] and body > (df['atr'].iloc[-1]):
-                strat = "21. Pure VWAP Cross"; side = "SHORT"; smart_sl = curr['high']; target_orig = swing_low; boost = 10
-                
-            elif entry > df['ema200'].iloc[-1] and vol_ratio > 4.0 and lower_wick > (body*1.5):
-                strat = "25. Mega Volume Absorption"; side = "LONG"; smart_sl = curr['low']; target_orig = swing_high; boost = 18
-            elif entry < df['ema200'].iloc[-1] and vol_ratio > 4.0 and upper_wick > (body*1.5):
-                strat = "25. Mega Volume Absorption"; side = "SHORT"; smart_sl = curr['high']; target_orig = swing_low; boost = 18
-
-            elif curr['rsi'] < 20 and vol_ratio > 2.0:
-                strat = "30. Flash Crash Buy"; side = "LONG"; smart_sl = curr['low'] * 0.99; target_orig = df['ema21'].iloc[-1]; boost = 25
-            elif curr['rsi'] > 80 and vol_ratio > 2.0:
-                strat = "30. Parabolic Short"; side = "SHORT"; smart_sl = curr['high'] * 1.01; target_orig = df['ema21'].iloc[-1]; boost = 25
-
-            # ========================================================
-            # 📐 الحسابات الرياضية المحسنة لفريم 30 دقيقة
-            # ========================================================
+            # 📐 إدارة المخاطرة المرنة والحسابات
             if strat != "":
                 atr = df['atr'].iloc[-1]
-                buffer = entry * 0.002 # مساحة أمان أكبر للفريم الأكبر
+                buffer = entry * 0.0015
                 smart_sl = smart_sl - buffer if side == "LONG" else smart_sl + buffer
 
-                # 🚨 حماية الستوب لوس: على فريم 30د نحتاج مساحة تذبذب لا تقل عن 1.2 ATR
+                # ستوب لوس ديناميكي يتنفس مع السوق
                 raw_risk = abs(entry - smart_sl)
-                risk = max(atr * 1.2, min(raw_risk, atr * 4.0)) 
+                risk = max(atr * 0.6, min(raw_risk, atr * 3.5)) 
                 
                 if side == "LONG":
                     sl = entry - risk
@@ -267,37 +221,34 @@ class StrategyEngine:
                     if target_orig >= entry: target_orig = entry - (risk * 1.5)
 
                 dist = abs(target_orig - entry)
-                if dist < (risk * 1.0): 
+                if dist < (risk * 0.8): # تخفيف الشرط ليقبل صفقات السكالبينج
                     del df; return None
 
+                # أهداف السكالبينج السريعة والترند
                 if side == "LONG":
-                    tp1 = target_orig; tp2 = entry + (dist * 1.618)
-                    tp3 = entry + (dist * 2.618); tp_f = entry + (dist * 3.618)
+                    tp1 = target_orig
+                    tp2 = entry + (dist * 1.618)
+                    tp3 = entry + (dist * 2.618)
                 else:
-                    tp1 = target_orig; tp2 = entry - (dist * 1.618)
-                    tp3 = entry - (dist * 2.618); tp_f = entry - (dist * 3.618)
+                    tp1 = target_orig
+                    tp2 = entry - (dist * 1.618)
+                    tp3 = entry - (dist * 2.618)
 
                 pnl_base = abs((entry - sl) / entry) * 100
-                lev = max(2, min(int(15.0 / pnl_base), 25)) if pnl_base > 0 else 10 # الرافعة آمنة
+                lev = max(2, min(int(15.0 / pnl_base), 30)) if pnl_base > 0 else 10 
 
-                # 💯 نظام تقييم Apex Score (100 نقطة)
-                base = 20 + boost # الاستراتيجية تعطي من 30 لـ 45 نقطة
-                vol_pt = min(25, vol_ratio * 6) # الفوليوم حتى 25 نقطة
-                trend_pt = 15 if (side=="LONG" and entry>df['ema200'].iloc[-1]) or (side=="SHORT" and entry<df['ema200'].iloc[-1]) else 0
+                # 💯 نظام تقييم Matrix Score (ديناميكي شامل)
+                base = 40 + boost 
+                vol_pt = min(20, vol_ratio * 5)
+                trend_pt = 10 if (side=="LONG" and entry>df['ema200'].iloc[-1]) or (side=="SHORT" and entry<df['ema200'].iloc[-1]) else 0
+                rsi_pt = 5 if (side=="LONG" and curr['rsi']<50) or (side=="SHORT" and curr['rsi']>50) else 0
                 
-                mom_pt = 0
-                if (side == "LONG" and df['macd_h'].iloc[-1] > 0) or (side == "SHORT" and df['macd_h'].iloc[-1] < 0): mom_pt = 10
-                
-                wick_pt = 0
-                if body > 0:
-                    wick_pt = min(5, (lower_wick / body) * 2) if side == "LONG" else min(5, (upper_wick / body) * 2)
-                
-                score = min(100, int(base + vol_pt + trend_pt + mom_pt + wick_pt))
+                score = min(100, int(base + vol_pt + trend_pt + rsi_pt))
 
                 del df
                 return {
                     "symbol": symbol, "side": side, "entry": entry, "sl": sl,
-                    "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp_final": tp_f,
+                    "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp_final": tp3,
                     "leverage": lev, "strat": strat, "score": score
                 }
 
@@ -320,8 +271,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 THE LEVIATHAN ENGINE ONLINE: V70.0 (30m Timeframe)", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V70.0 Online.</b>\n30m Reality Engine | 30 Strategies | Apex Score 🏛️")
+        Log.print("🚀 THE OMNIPOTENT MATRIX ONLINE: V90.0", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V90.0 Online.</b>\nOmnipotent Matrix | 50+ Strategies | Full Market Radar 🌐")
 
     async def shutdown(self):
         self.running = False
@@ -331,21 +282,19 @@ class TradingSystem:
     async def fetch_and_analyze(self, symbol):
         try:
             Log.print(f"🔎 Scanning: {symbol}", Log.CYAN)
-            # رفعنا التايم أوت قليلا لضمان سحب بيانات 30 دقيقة براحة
-            ohlcv = await asyncio.wait_for(self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=300), timeout=10.0)
+            ohlcv = await asyncio.wait_for(self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=300), timeout=8.0)
             if ohlcv:
                 res = await asyncio.to_thread(StrategyEngine.analyze_data, symbol, ohlcv)
                 if res:
-                    Log.print(f"🎯 Target Acquired: {symbol} [{res['strat']}]", Log.GREEN)
+                    Log.print(f"🎯 Matrix Signal: {symbol} [{res['strat']}]", Log.GREEN)
                 return res
         except Exception: 
-            Log.print(f"⚠️ Skip: {symbol} (Network Timeout)", Log.RED)
             return None
 
     async def scan_market(self):
         while self.running:
             if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
-                Log.print(f"💤 Sleeping... {len(self.active_trades)} trade active.", Log.YELLOW)
+                Log.print(f"💤 Matrix Full... {len(self.active_trades)} trades active.", Log.YELLOW)
                 await asyncio.sleep(15)
                 continue
             
@@ -356,18 +305,15 @@ class TradingSystem:
                 for sym, data in tickers.items():
                     if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
                         vol_24h = data.get('quoteVolume', 0)
-                        perc_change = data.get('percentage', 0)
                         
-                        if vol_24h >= Config.MIN_24H_VOLUME_USDT and perc_change is not None:
-                            valid_coins.append({
-                                'sym': sym, 
-                                'volatility': abs(perc_change) 
-                            })
+                        # 🚨 الفلتر المرن: سيولة فوق 25 ألف فقط!
+                        if vol_24h >= Config.MIN_24H_VOLUME_USDT:
+                            valid_coins.append({'sym': sym, 'vol': vol_24h})
                 
-                valid_coins.sort(key=lambda x: x['volatility'], reverse=True)
-                targets = [c['sym'] for c in valid_coins[:Config.TOP_VOLATILE_COINS]]
+                valid_coins.sort(key=lambda x: x['vol'], reverse=True)
+                targets = [c['sym'] for c in valid_coins]
                 
-                Log.print(f"🌪️ Leviathan Sweep on Top {len(targets)} Volatile Pairs (30m TF)...", Log.BLUE)
+                Log.print(f"🌐 Matrix Sweep on {len(targets)} Pairs (>25k Vol)...", Log.BLUE)
                 
                 valid_signals = []
                 
@@ -380,23 +326,22 @@ class TradingSystem:
                         if isinstance(r, dict) and "ERROR" not in str(r):
                             valid_signals.append(r)
                     
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.5) # مسح سريع
                 
-                Log.print(f"📊 Scan Complete! Found {len(valid_signals)} Real Signals.", Log.YELLOW)
+                Log.print(f"📊 Matrix Complete! Found {len(valid_signals)} Opportunities.", Log.YELLOW)
 
                 if valid_signals:
                     valid_signals.sort(key=lambda x: x['score'], reverse=True)
                     best = valid_signals[0]
                     
                     sym, entry, sl, side = best['symbol'], best['entry'], best['sl'], best['side']
-                    tp1, tp2, tp3, tp_f = best['tp1'], best['tp2'], best['tp3'], best['tp_final']
+                    tp1, tp2, tp3 = best['tp1'], best['tp2'], best['tp3']
                     lev, strat, score = best['leverage'], best['strat'], best['score']
                     
                     fmt = lambda x: self.exchange.price_to_precision(sym, x)
                     pnl_tp1 = abs((tp1 - entry) / entry) * 100 * lev
                     pnl_tp2 = abs((tp2 - entry) / entry) * 100 * lev
                     pnl_tp3 = abs((tp3 - entry) / entry) * 100 * lev
-                    pnl_f = abs((tp_f - entry) / entry) * 100 * lev
                     pnl_sl = abs((entry - sl) / entry) * 100 * lev
                     
                     clean_name = sym.split(':')[0].replace('/', '')
@@ -410,20 +355,19 @@ class TradingSystem:
                         f"────────────────\n"
                         f"🎯 <b>TP 1:</b> <code>{fmt(tp1)}</code> (+{pnl_tp1:.1f}% ROE)\n"
                         f"🎯 <b>TP 2:</b> <code>{fmt(tp2)}</code> (+{pnl_tp2:.1f}% ROE)\n"
-                        f"🎯 <b>TP 3:</b> <code>{fmt(tp3)}</code> (+{pnl_tp3:.1f}% ROE)\n"
-                        f"🚀 <b>TP 4:</b> <code>{fmt(tp_f)}</code> (+{pnl_f:.1f}% ROE)\n"
+                        f"🚀 <b>TP 3:</b> <code>{fmt(tp3)}</code> (+{pnl_tp3:.1f}% ROE)\n"
                         f"────────────────\n"
                         f"🛑 <b>SL:</b> <code>{fmt(sl)}</code> (-{pnl_sl:.1f}% ROE)\n"
                         f"────────────────\n"
                         f"🧠 <b>Strategy:</b> <b>{strat}</b>\n"
-                        f"⚖️ <b>Apex Score:</b> <b>{score}/100</b>"
+                        f"🌐 <b>Matrix Score:</b> <b>{score}/100</b>"
                     )
                     
                     msg_id = await self.tg.send(msg)
                     if msg_id:
                         self.active_trades[sym] = {
                             "entry": entry, "sl": sl, "side": side, "msg_id": msg_id, "lev": lev,
-                            "tps": [tp1, tp2, tp3, tp_f], "pnls": [pnl_tp1, pnl_tp2, pnl_tp3, pnl_f],
+                            "tps": [tp1, tp2, tp3], "pnls": [pnl_tp1, pnl_tp2, pnl_tp3],
                             "sl_pnl": pnl_sl, "step": 0
                         }
                         self.stats["signals"] += 1
@@ -432,7 +376,7 @@ class TradingSystem:
                 await asyncio.sleep(5) 
                 gc.collect() 
             except Exception as e:
-                Log.print(f"Scan Error: {e}", Log.RED)
+                Log.print(f"Matrix Error: {e}", RED)
                 await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
@@ -457,15 +401,14 @@ class TradingSystem:
                         del self.active_trades[sym]
                         continue
 
-                    for i in range(step, 4):
+                    for i in range(step, 3):
                         target = trade['tps'][i]
                         hit_tp = (price >= target) if side == "LONG" else (price <= target)
                         if hit_tp:
                             trade['step'] = i + 1
                             if i == 0: trade['sl'] = trade['entry']; txt = f"✅ <b>TP1 HIT! (+{trade['pnls'][i]:.1f}% ROE)</b>\n🛡️ SL to Entry"
                             elif i == 1: trade['sl'] = trade['tps'][0]; txt = f"🔥 <b>TP2 HIT! (+{trade['pnls'][i]:.1f}% ROE)</b>\n📈 Trailing SL to TP1"
-                            elif i == 2: trade['sl'] = trade['tps'][1]; txt = f"🚀 <b>TP3 HIT! (+{trade['pnls'][i]:.1f}% ROE)</b>\n📈 Trailing SL to TP2"
-                            elif i == 3: txt = f"🏆 <b>ALL TARGETS HIT! (+{trade['pnls'][i]:.1f}% ROE)</b> 🏦\nTrade Closed."; self.stats['wins']+=1; self.stats['net_pnl']+=trade['pnls'][i]; del self.active_trades[sym]
+                            elif i == 2: txt = f"🏆 <b>ALL TARGETS HIT! (+{trade['pnls'][i]:.1f}% ROE)</b> 🏦\nTrade Closed."; self.stats['wins']+=1; self.stats['net_pnl']+=trade['pnls'][i]; del self.active_trades[sym]
                             
                             await self.tg.send(txt, trade['msg_id'])
                             if i == 0: self.stats['wins']+=1
@@ -479,7 +422,7 @@ class TradingSystem:
             t = self.stats['wins'] + self.stats['losses']
             wr = (self.stats['wins'] / t * 100) if t > 0 else 0
             msg = (
-                f"🏛️ <b>LEVIATHAN ENGINE REPORT (24H)</b> 🏛️\n"
+                f"🌐 <b>MATRIX ENGINE REPORT (24H)</b> 🌐\n"
                 f"────────────────\n"
                 f"🎯 <b>Signals:</b> {self.stats['signals']}\n"
                 f"✅ <b>Wins:</b> {self.stats['wins']}\n"
@@ -500,20 +443,18 @@ class TradingSystem:
             await asyncio.sleep(300)
 
 # ==========================================
-# 5. تشغيل السيرفر والتخلص من الأخطاء
+# 5. تشغيل السيرفر
 # ==========================================
 bot = TradingSystem()
 app = FastAPI()
 
-# 🚨 الحل الجذري لمنع ظهور رسالة 404 لـ favicon في اللوجز
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     return Response(content=b"", media_type="image/x-icon", status_code=204)
 
-# 🚨 حل مشكلة 405 عن طريق قبول طلبات HEAD
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>🏛️ THE LEVIATHAN ENGINE V70.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>🌐 THE OMNIPOTENT MATRIX V90.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
