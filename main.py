@@ -21,7 +21,7 @@ class Config:
     TIMEFRAME = '15m' 
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 50_000 
-    MIN_SCORE_THRESHOLD = 85 
+    MIN_SCORE_THRESHOLD = 85 # سيعمل الآن بكفاءة بعد تصحيح الرياضيات
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -55,7 +55,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك السكالبينج الخاطف 🧠 (SCALP ENGINE)
+# 3. محرك السكالبينج (THE FLAWLESS ENGINE) 🧠
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -63,21 +63,19 @@ class StrategyEngine:
         try:
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             
-            # 🚨 الحل الجذري لمشكلة تحذير الـ VWAP
-            df['time'] = pd.to_datetime(df['time'], unit='ms')
-            df.set_index('time', inplace=True)
-            df.sort_index(inplace=True) # <--- هذا السطر يمنع ظهور التحذير نهائياً
-            
             if len(df) < 50 or df['vol'].iloc[-2] == 0: 
                 return None
 
-            curr, prev = df.iloc[-1], df.iloc[-2]
+            curr, prev, prev2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
             entry = curr['close']
 
-            # مؤشرات سريعة للسكالبينج
+            # 🚀 الحل العبقري لمشكلة الـ VWAP: حساب يدوي لحظي بدون أخطاء مكتبات!
+            df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
+            df['vwap'] = (df['typical_price'] * df['vol']).rolling(window=20).sum() / df['vol'].rolling(window=20).sum()
+
+            # المؤشرات الأساسية
             df['ema21'] = ta.ema(df['close'], length=21)
             df['ema200'] = ta.ema(df['close'], length=200)
-            df['vwap'] = ta.vwap(df['high'], df['low'], df['close'], df['vol'])
             df['rsi'] = ta.rsi(df['close'], length=14)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
             
@@ -90,71 +88,82 @@ class StrategyEngine:
 
             if pd.isna(df['atr'].iloc[-1]): return None
 
-            # الفوليوم الديناميكي 
+            # الفوليوم (مخفف لاصطياد الفرص)
             avg_vol = df['vol'].iloc[-15:-1].mean()
             vol_ratio = max(curr['vol'], prev['vol']) / avg_vol if avg_vol > 0 else 0
 
+            # الشموع
             body = abs(curr['close'] - curr['open'])
             lower_wick = min(curr['open'], curr['close']) - curr['low']
             upper_wick = curr['high'] - max(curr['open'], curr['close'])
 
             is_green = curr['close'] > curr['open']
             is_red = curr['close'] < curr['open']
+            
+            swing_low = df['low'].rolling(10).min().shift(1).iloc[-1]
+            swing_high = df['high'].rolling(10).max().shift(1).iloc[-1]
 
-            strat = ""; side = ""; base_score = 0
-
-            # 🚀 1. انفجار الفوليوم (Volume Breakout)
-            if is_green and vol_ratio > 2.5 and curr['close'] > df['ema21'].iloc[-1] and prev['close'] < df['ema21'].iloc[-1]:
-                strat = "Volume Breakout Surge"; side = "LONG"; base_score = 45
-            elif is_red and vol_ratio > 2.5 and curr['close'] < df['ema21'].iloc[-1] and prev['close'] > df['ema21'].iloc[-1]:
-                strat = "Volume Breakout Drop"; side = "SHORT"; base_score = 45
-
-            # 🚀 2. قناص الأذيال (Wick Sniper - Liquidity Grab)
-            elif is_green and lower_wick > (body * 2) and vol_ratio > 1.5:
-                strat = "Wick Sniper (Rejection)"; side = "LONG"; base_score = 40
-            elif is_red and upper_wick > (body * 2) and vol_ratio > 1.5:
-                strat = "Wick Sniper (Rejection)"; side = "SHORT"; base_score = 40
-
-            # 🚀 3. لكمة الـ VWAP (VWAP Tap Scalp)
-            elif prev['low'] <= df['vwap'].iloc[-1] and curr['close'] > df['vwap'].iloc[-1] and is_green and vol_ratio > 1.2:
-                strat = "VWAP Tap Bounce"; side = "LONG"; base_score = 35
-            elif prev['high'] >= df['vwap'].iloc[-1] and curr['close'] < df['vwap'].iloc[-1] and is_red and vol_ratio > 1.2:
-                strat = "VWAP Tap Reject"; side = "SHORT"; base_score = 35
-
-            # 🚀 4. كسر الضغط (Bollinger Squeeze Pop)
-            elif df['bb_width'].iloc[-2] < 3.5 and curr['close'] > df['bbu'].iloc[-1] and vol_ratio > 2.0:
-                strat = "BB Squeeze Pop UP"; side = "LONG"; base_score = 40
-            elif df['bb_width'].iloc[-2] < 3.5 and curr['close'] < df['bbl'].iloc[-1] and vol_ratio > 2.0:
-                strat = "BB Squeeze Pop DOWN"; side = "SHORT"; base_score = 40
-
-            # 🚀 5. ارتداد التشبع (RSI Snapback)
-            elif curr['rsi'] < 25 and is_green and lower_wick > body:
-                strat = "RSI Snapback Bounce"; side = "LONG"; base_score = 35
-            elif curr['rsi'] > 75 and is_red and upper_wick > body:
-                strat = "RSI Snapback Drop"; side = "SHORT"; base_score = 35
+            strat = ""; side = ""; base_score = 65 # 🚨 النتيجة الأساسية العادلة
 
             # ==========================================
-            # 📐 حسابات السكالبينج 
+            # 🧨 استراتيجيات السكالبينج الغزيرة والقوية
+            # ==========================================
+
+            # 1. كسر الضغط المتفجر (Bollinger Squeeze Pop)
+            if df['bb_width'].iloc[-2] < 4.0 and curr['close'] > df['bbu'].iloc[-1] and vol_ratio > 1.3:
+                strat = "BB Squeeze Breakout"; side = "LONG"
+            elif df['bb_width'].iloc[-2] < 4.0 and curr['close'] < df['bbl'].iloc[-1] and vol_ratio > 1.3:
+                strat = "BB Squeeze Breakdown"; side = "SHORT"
+
+            # 2. قناص الأذيال (Liquidity Sweep)
+            elif is_green and curr['low'] < swing_low and lower_wick > body * 1.5:
+                strat = "Liquidity Sweep (Pinbar)"; side = "LONG"
+            elif is_red and curr['high'] > swing_high and upper_wick > body * 1.5:
+                strat = "Liquidity Sweep (Pinbar)"; side = "SHORT"
+
+            # 3. لكمة الـ VWAP (VWAP Bounce)
+            elif prev['low'] <= df['vwap'].iloc[-1] and curr['close'] > df['vwap'].iloc[-1] and is_green:
+                strat = "VWAP Tap Bounce"; side = "LONG"
+            elif prev['high'] >= df['vwap'].iloc[-1] and curr['close'] < df['vwap'].iloc[-1] and is_red:
+                strat = "VWAP Tap Reject"; side = "SHORT"
+
+            # 4. ارتداد التشبع السريع (RSI Snapback)
+            elif curr['rsi'] < 30 and is_green and curr['close'] > prev['high']:
+                strat = "RSI Oversold Snapback"; side = "LONG"
+            elif curr['rsi'] > 70 and is_red and curr['close'] < prev['low']:
+                strat = "RSI Overbought Snapback"; side = "SHORT"
+
+            # 5. ابتلاع الزخم (Momentum Engulfing)
+            elif is_green and curr['close'] > prev['high'] and prev['close'] < prev['open'] and vol_ratio > 1.2:
+                strat = "Momentum Engulfing"; side = "LONG"
+            elif is_red and curr['close'] < prev['low'] and prev['close'] > prev['open'] and vol_ratio > 1.2:
+                strat = "Momentum Engulfing"; side = "SHORT"
+
+            # ==========================================
+            # 📐 حسابات السكالبينج (هدف سريع واستوب دقيق)
             # ==========================================
             if strat != "":
                 atr = df['atr'].iloc[-1]
                 
-                vol_score = min(40, vol_ratio * 10)
-                trend_score = 15 if (side == "LONG" and entry > df['ema200'].iloc[-1]) or (side == "SHORT" and entry < df['ema200'].iloc[-1]) else 0
+                # 🚨 التقييم الآن منطقي: 65 أساس + الفوليوم والترند
+                vol_score = min(20, vol_ratio * 10) # 1.5 فوليوم = 15 نقطة
+                trend_score = 10 if (side == "LONG" and entry > df['ema200'].iloc[-1]) or (side == "SHORT" and entry < df['ema200'].iloc[-1]) else 0
                 final_score = min(100, int(base_score + vol_score + trend_score))
 
+                # إذا كانت الصفقة ضعيفة يتجاهلها
                 if final_score < Config.MIN_SCORE_THRESHOLD:
                     del df; return None
 
+                # الستوب لوس: 1.2 ATR (قريب جداً للسكالبينج)
                 if side == "LONG":
-                    sl = entry - (atr * 1.5)
-                    tp = entry + (atr * 2.5) 
+                    sl = entry - (atr * 1.2)
+                    tp = entry + (atr * 1.8) # هدف 1.5x من المخاطرة
                 else:
-                    sl = entry + (atr * 1.5)
-                    tp = entry - (atr * 2.5)
+                    sl = entry + (atr * 1.2)
+                    tp = entry - (atr * 1.8)
 
                 risk_pct = abs((entry - sl) / entry) * 100
-                lev = max(10, min(int(15.0 / risk_pct), 30)) if risk_pct > 0 else 10 
+                lev = max(5, min(int(15.0 / risk_pct), 25)) if risk_pct > 0 else 10 
 
                 del df
                 return {
@@ -181,8 +190,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 THE SCALP SNIPER ONLINE: V100.0", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V100.0 Online.</b>\nCoin-by-Coin Async Engine | Single Fast Target 🎯")
+        Log.print("🚀 THE FLAWLESS SCALPER ONLINE: V101.0", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V101.0 Online.</b>\nLogic Fixed | Manual VWAP | Aggressive Mode 🎯")
 
     async def shutdown(self):
         self.running = False
@@ -194,8 +203,6 @@ class TradingSystem:
             ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=100) 
             if ohlcv:
                 res = await asyncio.to_thread(StrategyEngine.analyze_data, symbol, ohlcv)
-                if res:
-                    Log.print(f"🎯 Scalp Found: {symbol} [{res['strat']}] - Score: {res['score']}", Log.GREEN)
                 return res
         except Exception: 
             pass
@@ -205,7 +212,7 @@ class TradingSystem:
         while self.running:
             if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
                 Log.print(f"💤 Max Trades Reached ({len(self.active_trades)}). Waiting...", Log.YELLOW)
-                await asyncio.sleep(10)
+                await asyncio.sleep(5)
                 continue
             
             try:
@@ -221,7 +228,7 @@ class TradingSystem:
                 valid_coins.sort(key=lambda x: x['vol'], reverse=True)
                 targets = [c['sym'] for c in valid_coins]
                 
-                Log.print(f"⚡ As-Completed Scan Started on {len(targets)} Pairs...", Log.BLUE)
+                Log.print(f"⚡ Flawless Scan Started on {len(targets)} Pairs...", Log.BLUE)
                 
                 tasks = [asyncio.create_task(self.fetch_and_analyze(sym)) for sym in targets]
                 
@@ -251,7 +258,7 @@ class TradingSystem:
                             f"🛑 <b>Stop:</b> <code>{fmt(sl)}</code> (-{pnl_sl:.1f}% ROE)\n"
                             f"────────────────\n"
                             f"⚡ <b>Setup:</b> <b>{strat}</b>\n"
-                            f"🔥 <b>Sniper Score:</b> <b>{score}/100</b>"
+                            f"🔥 <b>Score:</b> <b>{score}/100</b>"
                         )
                         
                         msg_id = await self.tg.send(msg)
@@ -261,7 +268,7 @@ class TradingSystem:
                                 "msg_id": msg_id, "lev": lev, "pnl_tp": pnl_tp, "pnl_sl": pnl_sl
                             }
                             self.stats["signals"] += 1
-                            Log.print(f"🚀 SIGNAL FIRED: {clean_name} | {strat}", Log.GREEN)
+                            Log.print(f"🚀 SIGNAL FIRED: {clean_name} | {strat} | Score: {score}", Log.GREEN)
 
                 await asyncio.sleep(5) 
                 gc.collect() 
@@ -336,7 +343,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ THE SCALP SNIPER V100.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ THE FLAWLESS SCALPER V101.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
