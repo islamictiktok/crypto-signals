@@ -12,7 +12,7 @@ from datetime import datetime
 import httpx
 
 # ==========================================
-# 1. الإعدادات الأساسية
+# 1. الإعدادات الأساسية 
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
@@ -22,7 +22,7 @@ TIMEFRAME = '15m'
 MAX_TRADES_AT_ONCE = 1 
 MIN_24H_VOLUME_USDT = 50_000 
 
-# تعريف المتغيرات العالمية فارغة ليتم شحنها لاحقاً بآمان
+# 🚨 تعديل استقرار 1: المتغيرات هنا فارغة لتجنب خطأ الإقلاع في Render
 http_client = None
 exchange = None
 
@@ -55,7 +55,7 @@ async def reply_telegram_msg(message, reply_to_msg_id):
     except: pass
 
 # ==========================================
-# 3. محرك الـ 20 استراتيجية 🧠 (بدون أي تغيير في القوة)
+# 3. محرك الـ 20 استراتيجية 🧠 (بدون تعديل في المنطق)
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -232,7 +232,6 @@ async def get_signal_logic(symbol):
             elif curr['close'] < df['ema21'].iloc[-1] and prev['close'] > df['ema21'].iloc[-2] and body > (df['atr'].iloc[-1] * 1.5):
                 strategy_name = "Momentum Kicker"; side = "SHORT"; smart_sl = curr['high']; target_origin = entry - (df['atr'].iloc[-1] * 2.5); score_boost = 7
 
-
         if strategy_name != "":
             buffer = entry * 0.0015 
             if side == "LONG": smart_sl = smart_sl - buffer
@@ -246,7 +245,7 @@ async def get_signal_logic(symbol):
             distance_to_origin = abs(target_origin - entry)
             
             if distance_to_origin < (risk * 1.2): 
-                del df; gc.collect()
+                del df
                 return "ERROR: Bad Risk/Reward"
 
             if side == "LONG":
@@ -274,8 +273,6 @@ async def get_signal_logic(symbol):
             final_score = min(100, final_score)
 
             del df
-            gc.collect()
-
             return {
                 "symbol": symbol, "side": side, "entry": entry, 
                 "tp1": tp1, "tp2": tp2, "tp3": tp3, "tp_final": tp_final, 
@@ -284,19 +281,22 @@ async def get_signal_logic(symbol):
             }
             
         del df
-        gc.collect()
         return "NO_SIGNAL"
-    except Exception as e: return f"ERROR"
+    except Exception: 
+        return "ERROR"
 
 # ==========================================
-# 4. محرك الهروب الزمني (TIMEOUT PROTOCOL) ⚡
+# 4. محرك السرعة المطوّر (Speed & Stability Engine) 🚀
 # ==========================================
+# 🚨 تعديل سرعة 1: فحص 20 عملة معاً (لتجنب حظر المنصة وتسريع الفحص)
 sem = asyncio.Semaphore(20) 
 
 async def safe_check(symbol):
     async with sem:
+        # 🚨 تعديل سرعة 2: تخفيض الانتظار لأجزاء المايكرو ثانية
         await asyncio.sleep(0.05) 
         try:
+            # 🚨 تعديل استقرار 2: البوت لا يتجمد أبداً، إذا تأخرت المنصة يتجاوز العملة بعد 7 ثوانٍ
             return await asyncio.wait_for(get_signal_logic(symbol), timeout=7.0)
         except asyncio.TimeoutError:
             return "ERROR: TIMEOUT"
@@ -304,7 +304,7 @@ async def safe_check(symbol):
             return "ERROR"
 
 async def monitor_trades(app_state):
-    cprint("👀 15m Stable Tracker Started...", Log.CYAN)
+    cprint("👀 15m Omniscient Tracker Started...", Log.CYAN)
     while True:
         current_symbols = list(app_state.active_trades.keys())
         for sym in current_symbols:
@@ -351,7 +351,7 @@ async def monitor_trades(app_state):
                     
                 await asyncio.sleep(0.5)
             except: pass
-        await asyncio.sleep(5)
+        await asyncio.sleep(10)
 
 # ==========================================
 # 5. التقرير اليومي
@@ -365,7 +365,7 @@ async def daily_report_task(app_state):
         win_rate = (wins / total) * 100 if total > 0 else 0.0
         
         msg = (
-            f"👁️ <b>GOD MODE REPORT (24H)</b> 👁️\n"
+            f"👁️ <b>OMNISCIENT REPORT (24H)</b> 👁️\n"
             f"────────────────\n"
             f"📡 <b>Signals Sent:</b> {app_state.stats['signals']}\n"
             f"✅ <b>Wins (TP Hits):</b> {wins}\n"
@@ -378,23 +378,25 @@ async def daily_report_task(app_state):
         app_state.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 
 # ==========================================
-# 6. المحرك الأساسي 
+# 6. المحرك الأساسي
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V36.4 (STABLE ENGINE)", Log.GREEN)
-    await send_telegram_msg(f"🟢 <b>Fortress V36.4 Online.</b>\nStability Protocol Active | Zero Crash Engine 👁️")
+    cprint("🚀 System Online: V36.4 (STABLE & FAST)", Log.GREEN)
+    await send_telegram_msg(f"🟢 <b>Fortress V36.4 Online.</b>\n20 Elite Strategies | Stable Engine Active ⚡")
     
     try:
         await exchange.load_markets()
         while True:
             if len(app_state.active_trades) >= MAX_TRADES_AT_ONCE:
+                # 🚨 تعديل سرعة 3: نوم 10 ثواني فقط بدلاً من دقيقة لتسريع الدخول القادم
                 await asyncio.sleep(10); continue 
             
             try:
                 tickers = await exchange.fetch_tickers()
                 high_liquid_symbols = []
                 for sym, data in tickers.items():
-                    if 'USDT' in sym and ':' in sym:
+                    if 'USDT' in sym and ':' in sym: 
+                        # 🚨 تعديل سرعة 4: تجاهل العملات الميتة لتقليل وقت المسح
                         if any(junk in sym for junk in ['3L', '3S', '5L', '5S', 'USDC', 'TUSD', 'BUSD', 'USDD']):
                             continue
                         vol_24h = data.get('quoteVolume', 0)
@@ -416,7 +418,7 @@ async def start_scanning(app_state):
                     
                     for sig in top_signals:
                         sym, entry, sl, side, lev, strat, q_score = sig['symbol'], sig['entry'], sig['sl'], sig['side'], sig['leverage'], sig['strat'], sig['quantum_score']
-                        tp1, tp2, tp3, tp_final = sig['tp1'], sig['tp2'], sig['tp3'], sig['tp_final']
+                        tp1, tp2, tp3, tp_final = sig['tp1'], tp2, tp3, tp_final
                         
                         fmt_entry = exchange.price_to_precision(sym, entry)
                         fmt_sl = exchange.price_to_precision(sym, sl)
@@ -458,9 +460,13 @@ async def start_scanning(app_state):
                             app_state.stats["signals"] += 1; await asyncio.sleep(1) 
                 else:
                     cprint("📉 No Elite setups detected. Fast Retrying...", Log.BLUE)
+                    # 🚨 تعديل سرعة 5: نوم 15 ثانية فقط بدلاً من 3 دقائق!
                     await asyncio.sleep(15) 
             except: await asyncio.sleep(5)
-    except: await asyncio.sleep(5)
+            
+            # 🚨 تعديل استقرار 3: تنظيف الرام المجمع لمنع السيرفر من الانفجار
+            gc.collect() 
+    except: await asyncio.sleep(10)
 
 async def keep_alive_task():
     while True:
@@ -474,7 +480,7 @@ async def keep_alive_task():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_client, exchange
-    # تعريفهم بالداخل يمنع السيرفر من الانهيار (Status 3 Fix)
+    # 🚨 تعديل استقرار 4: تعريف المتغيرات هنا يمنع الانهيار (Status 3)
     http_client = httpx.AsyncClient(timeout=30.0)
     exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
     
@@ -487,7 +493,11 @@ async def lifespan(app: FastAPI):
     await exchange.close()
     t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel() 
 
-app = FastAPI(lifespan=lifespan)
+app.router.lifespan_context = lifespan
+
+@app.get("/")
+def read_root():
+    return {"status": "Online"}
 
 if __name__ == "__main__":
     import uvicorn
