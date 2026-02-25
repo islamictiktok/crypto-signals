@@ -20,8 +20,10 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     TIMEFRAME = '15m'
     MAX_TRADES_AT_ONCE = 1
-    MIN_24H_VOLUME_USDT = 40_000 
-    EXCHANGE_ID = 'mexc'
+    # 🚨 تم تقليل الفوليوم لـ 10 آلاف لاصطياد العملات النائمة
+    MIN_24H_VOLUME_USDT = 10_000 
+    # 🚨 فحص أفضل 80 عملة متذبذبة ومنفجرة فقط (للسرعة وتقليل الضوضاء)
+    TOP_VOLATILE_COINS = 80 
     CHUNK_SIZE = 15 
 
 class Log:
@@ -32,7 +34,7 @@ class Log:
         print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
 
 # ==========================================
-# 2. نظام الإشعارات (NOTIFIER)
+# 2. نظام الإشعارات
 # ==========================================
 class TelegramNotifier:
     def __init__(self):
@@ -56,7 +58,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك التحليل والاستراتيجيات (QUANTUM SMC) 🧠
+# 3. محرك الاستراتيجيات الواقعية (THE REALITY ENGINE) 🧠
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -69,9 +71,10 @@ class StrategyEngine:
             if len(df) < 250 or df['vol'].iloc[-2] == 0: 
                 return None
 
-            curr, prev, prev2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
+            curr, prev = df.iloc[-1], df.iloc[-2]
             entry = curr['close']
 
+            # المؤشرات الأساسية القوية فقط
             df['ema21'] = ta.ema(df['close'], length=21)
             df['ema50'] = ta.ema(df['close'], length=50)
             df['ema200'] = ta.ema(df['close'], length=200)
@@ -80,9 +83,6 @@ class StrategyEngine:
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
             
             if pd.isna(df['atr'].iloc[-1]): return None
-            
-            macd = ta.macd(df['close'])
-            df['macd_h'] = macd.iloc[:, 1] if macd is not None and not macd.empty else 0.0
             
             bb = df.ta.bbands(length=20, std=2)
             if bb is not None and not bb.empty:
@@ -94,10 +94,9 @@ class StrategyEngine:
             avg_vol = df['vol'].iloc[-20:-1].mean()
             vol_ratio = curr['vol'] / avg_vol if avg_vol > 0 else 0
 
+            # الهيكل وحجم الشموع
             swing_high = df['high'].rolling(20).max().iloc[-2]
             swing_low = df['low'].rolling(20).min().iloc[-2]
-            macro_high = df['high'].rolling(50).max().iloc[-2]
-            macro_low = df['low'].rolling(50).min().iloc[-2]
 
             body = abs(curr['close'] - curr['open'])
             lower_wick = min(curr['open'], curr['close']) - curr['low']
@@ -105,49 +104,45 @@ class StrategyEngine:
             
             strat = ""; side = ""; smart_sl = 0.0; target_orig = 0.0; boost = 0
 
-            if curr['low'] < swing_low and curr['close'] > swing_low and lower_wick > (body * 2) and vol_ratio > 1.5:
-                strat = "SMC Liquidity Purge (Bullish)"; side = "LONG"; smart_sl = curr['low']; target_orig = swing_high; boost = 20
-            elif curr['high'] > swing_high and curr['close'] < swing_high and upper_wick > (body * 2) and vol_ratio > 1.5:
-                strat = "SMC Liquidity Purge (Bearish)"; side = "SHORT"; smart_sl = curr['high']; target_orig = swing_low; boost = 20
+            # 🚀 1. Rubber Band Reversal (صيد الارتداد العنيف)
+            # انهيار السعر تحت البولينجر مع RSI منخفض وظهور شمعة رفض خضراء
+            if curr['close'] < df['bbl'].iloc[-1] and curr['rsi'] < 25 and curr['close'] > curr['open'] and lower_wick > body and vol_ratio > 1.5:
+                strat = "Extreme Rubber Band Bounce"; side = "LONG"; smart_sl = curr['low']; target_orig = df['ema21'].iloc[-1]; boost = 20
+            elif curr['close'] > df['bbu'].iloc[-1] and curr['rsi'] > 75 and curr['close'] < curr['open'] and upper_wick > body and vol_ratio > 1.5:
+                strat = "Extreme Rubber Band Bounce"; side = "SHORT"; smart_sl = curr['high']; target_orig = df['ema21'].iloc[-1]; boost = 20
 
+            # 🚀 2. Sleeper Breakout (انفجار العملة النائمة)
+            # النطاق ضيق جداً وفجأة شمعة قوية تكسر للأعلى مع فوليوم 3 أضعاف
             elif strat == "":
-                sqz = df['bb_width'].iloc[-5:-1].mean() < 3.0
-                if sqz and curr['close'] > df['bbu'].iloc[-1] and vol_ratio > 3.0 and entry > df['ema200'].iloc[-1]:
-                    strat = "Volatility Squeeze Breakout"; side = "LONG"; smart_sl = df['ema21'].iloc[-1]; target_orig = macro_high; boost = 18
-                elif sqz and curr['close'] < df['bbl'].iloc[-1] and vol_ratio > 3.0 and entry < df['ema200'].iloc[-1]:
-                    strat = "Volatility Squeeze Breakout"; side = "SHORT"; smart_sl = df['ema21'].iloc[-1]; target_orig = macro_low; boost = 18
+                is_squeeze = df['bb_width'].iloc[-5:-1].mean() < 3.5
+                if is_squeeze and curr['close'] > df['bbu'].iloc[-1] and curr['close'] > df['ema200'].iloc[-1] and vol_ratio > 3.0:
+                    strat = "Sleeper Breakout (Vol Spike)"; side = "LONG"; smart_sl = df['ema21'].iloc[-1]; target_orig = swing_high * 1.02; boost = 15
+                elif is_squeeze and curr['close'] < df['bbl'].iloc[-1] and curr['close'] < df['ema200'].iloc[-1] and vol_ratio > 3.0:
+                    strat = "Sleeper Breakout (Vol Spike)"; side = "SHORT"; smart_sl = df['ema21'].iloc[-1]; target_orig = swing_low * 0.98; boost = 15
 
+            # 🚀 3. VWAP Sniper (احترام ترند المؤسسات)
+            # الترند صاعد، السعر يلمس خط الـ VWAP ويرتد منه بوضوح
             elif strat == "":
-                if prev['low'] <= df['vwap'].iloc[-2] and curr['close'] > df['vwap'].iloc[-1] and lower_wick > body and curr['close'] > curr['open']:
-                    strat = "Institutional VWAP Rejection"; side = "LONG"; smart_sl = min(curr['low'], prev['low']); target_orig = swing_high; boost = 15
-                elif prev['high'] >= df['vwap'].iloc[-2] and curr['close'] < df['vwap'].iloc[-1] and upper_wick > body and curr['close'] < curr['open']:
-                    strat = "Institutional VWAP Rejection"; side = "SHORT"; smart_sl = max(curr['high'], prev['high']); target_orig = swing_low; boost = 15
+                trend_up = df['ema21'].iloc[-1] > df['ema50'].iloc[-1]
+                if trend_up and prev['low'] <= df['vwap'].iloc[-1] and curr['close'] > df['vwap'].iloc[-1] and lower_wick > body and vol_ratio > 1.2:
+                    strat = "VWAP Sniper Bounce"; side = "LONG"; smart_sl = min(curr['low'], prev['low']); target_orig = swing_high; boost = 10
+                trend_down = df['ema21'].iloc[-1] < df['ema50'].iloc[-1]
+                if trend_down and prev['high'] >= df['vwap'].iloc[-1] and curr['close'] < df['vwap'].iloc[-1] and upper_wick > body and vol_ratio > 1.2:
+                    strat = "VWAP Sniper Bounce"; side = "SHORT"; smart_sl = max(curr['high'], prev['high']); target_orig = swing_low; boost = 10
 
+            # 🚀 4. Momentum Kicker (ركلة الزخم المفاجئة)
+            # شمعة قوية جداً تخترق المتوسط المتحرك مع سيولة عالية
             elif strat == "":
-                fvg_up = df['low'].iloc[-3] > df['high'].iloc[-5]
-                if fvg_up and curr['low'] <= df['low'].iloc[-3] and curr['close'] > curr['open'] and entry > df['ema50'].iloc[-1]:
-                    strat = "Golden FVG Fill"; side = "LONG"; smart_sl = df['high'].iloc[-5]; target_orig = swing_high; boost = 15
-                fvg_dn = df['high'].iloc[-3] < df['low'].iloc[-5]
-                if fvg_dn and curr['high'] >= df['high'].iloc[-3] and curr['close'] < curr['open'] and entry < df['ema50'].iloc[-1]:
-                    strat = "Golden FVG Fill"; side = "SHORT"; smart_sl = df['low'].iloc[-5]; target_orig = swing_low; boost = 15
+                if curr['close'] > df['ema50'].iloc[-1] and prev['close'] < df['ema50'].iloc[-2] and body > (df['atr'].iloc[-1] * 1.5) and vol_ratio > 2.0:
+                    strat = "Momentum Kicker Breakout"; side = "LONG"; smart_sl = curr['low']; target_orig = entry + (df['atr'].iloc[-1] * 2.5); boost = 10
+                elif curr['close'] < df['ema50'].iloc[-1] and prev['close'] > df['ema50'].iloc[-2] and body > (df['atr'].iloc[-1] * 1.5) and vol_ratio > 2.0:
+                    strat = "Momentum Kicker Breakout"; side = "SHORT"; smart_sl = curr['high']; target_orig = entry - (df['atr'].iloc[-1] * 2.5); boost = 10
 
-            elif strat == "":
-                if entry > df['ema200'].iloc[-1] and curr['low'] > swing_low and curr['rsi'] < df['rsi'].iloc[-10:-2].min():
-                    strat = "Hidden Divergence (Trend Follow)"; side = "LONG"; smart_sl = curr['low']; target_orig = macro_high; boost = 12
-                elif entry < df['ema200'].iloc[-1] and curr['high'] < swing_high and curr['rsi'] > df['rsi'].iloc[-10:-2].max():
-                    strat = "Hidden Divergence (Trend Follow)"; side = "SHORT"; smart_sl = curr['high']; target_orig = macro_low; boost = 12
-
-            elif strat == "":
-                if prev2['close'] < prev2['open'] and prev['close'] > prev['open'] and curr['close'] > prev['high'] and vol_ratio > 1.5:
-                    strat = "Bullish Order Block Shift"; side = "LONG"; smart_sl = prev2['low']; target_orig = swing_high; boost = 12
-                elif prev2['close'] > prev2['open'] and prev['close'] < prev['open'] and curr['close'] < prev['low'] and vol_ratio > 1.5:
-                    strat = "Bearish Order Block Shift"; side = "SHORT"; smart_sl = prev2['high']; target_orig = swing_low; boost = 12
-
+            # 📐 الحسابات الرياضية والمخاطرة
             if strat != "":
                 atr = df['atr'].iloc[-1]
-                buffer = entry * 0.0015
-                smart_sl = smart_sl - buffer if side == "LONG" else smart_sl + buffer
-
+                
+                # حماية الستوب لوس: الستوب يجب أن يترك مساحة للسعر ليتنفس (حماية من ذيول الشموع)
                 raw_risk = abs(entry - smart_sl)
                 risk = max(atr * 0.8, min(raw_risk, atr * 3.0)) 
                 
@@ -159,9 +154,10 @@ class StrategyEngine:
                     if target_orig >= entry: target_orig = entry - (risk * 1.5)
 
                 dist = abs(target_orig - entry)
-                if dist < (risk * 1.2): 
+                if dist < (risk * 1.0): 
                     del df; return None
 
+                # أهداف فيبوناتشي
                 if side == "LONG":
                     tp1 = target_orig; tp2 = entry + (dist * 1.618)
                     tp3 = entry + (dist * 2.618); tp_f = entry + (dist * 3.618)
@@ -170,11 +166,14 @@ class StrategyEngine:
                     tp3 = entry - (dist * 2.618); tp_f = entry - (dist * 3.618)
 
                 pnl_base = abs((entry - sl) / entry) * 100
-                lev = max(2, min(int(20.0 / pnl_base), 50)) if pnl_base > 0 else 10
+                lev = max(2, min(int(15.0 / pnl_base), 30)) if pnl_base > 0 else 10 # رافعة متزنة
 
-                base = 30 + boost
-                vol_pt = min(20, vol_ratio * 5)
+                # 💯 التقييم الواقعي (Reality Score) - 100 نقطة
+                base = 40 + boost
+                vol_pt = min(30, vol_ratio * 7) # الفوليوم العالي هو الملك
                 trend_pt = 15 if (side=="LONG" and entry>df['ema200'].iloc[-1]) or (side=="SHORT" and entry<df['ema200'].iloc[-1]) else 0
+                
+                # تقييم ذيل الشمعة (Wick Rejection)
                 wick_pt = 0
                 if body > 0:
                     wick_pt = min(15, (lower_wick / body) * 5) if side == "LONG" else min(15, (upper_wick / body) * 5)
@@ -207,8 +206,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 ROLLING SWEEP ENGINE ONLINE: V52.0", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V52.0 Online.</b>\nRolling Sweep Engine | 100% Safe Fetching 🏛️")
+        Log.print("🚀 THE APEX PREDATOR ONLINE: V60.0", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V60.0 Online.</b>\nVolatility Radar Engine | Real Price Action 🏛️")
 
     async def shutdown(self):
         self.running = False
@@ -216,7 +215,6 @@ class TradingSystem:
         await self.exchange.close()
 
     async def fetch_and_analyze(self, symbol):
-        # 🚨 التعديل هنا: طباعة لوج لكل عملة يتم فحصها 🚨
         try:
             Log.print(f"🔎 Scanning: {symbol}", Log.CYAN)
             ohlcv = await asyncio.wait_for(self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=300), timeout=8.0)
@@ -226,7 +224,6 @@ class TradingSystem:
                     Log.print(f"🎯 Target Acquired: {symbol} [{res['strat']}]", Log.GREEN)
                 return res
         except Exception: 
-            Log.print(f"⚠️ Timeout/Error Skip: {symbol}", Log.RED)
             return None
 
     async def scan_market(self):
@@ -239,23 +236,31 @@ class TradingSystem:
             try:
                 tickers = await self.exchange.fetch_tickers()
                 
-                valid_coins = [
-                    {'sym': sym, 'vol': data.get('quoteVolume', 0)}
-                    for sym, data in tickers.items()
-                    if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC'])
-                    and data.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT
-                ]
+                # 🚨 الرادار الذكي: جلب العملات + الفلترة بالتقلب (Volatility)
+                valid_coins = []
+                for sym, data in tickers.items():
+                    if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
+                        vol_24h = data.get('quoteVolume', 0)
+                        perc_change = data.get('percentage', 0)
+                        
+                        if vol_24h >= Config.MIN_24H_VOLUME_USDT and perc_change is not None:
+                            valid_coins.append({
+                                'sym': sym, 
+                                'volatility': abs(perc_change) # نعتمد على قوة الحركة
+                            })
                 
-                valid_coins.sort(key=lambda x: x['vol'], reverse=True)
-                targets = [c['sym'] for c in valid_coins]
+                # 🚨 ترتيب العملات حسب أقوى حركة صعوداً أو هبوطاً (لصيد العملات المنفجرة)
+                valid_coins.sort(key=lambda x: x['volatility'], reverse=True)
                 
-                Log.print(f"🌪️ Rolling Sweep Started on {len(targets)} Pairs (>40k Vol)...", Log.BLUE)
+                # أخذ أفضل 80 عملة فقط لسرعة الفحص وتركيز القنص
+                targets = [c['sym'] for c in valid_coins[:Config.TOP_VOLATILE_COINS]]
+                
+                Log.print(f"🌪️ Radar Sweep on Top {len(targets)} Volatile Pairs...", Log.BLUE)
                 
                 valid_signals = []
                 
                 for i in range(0, len(targets), Config.CHUNK_SIZE):
                     chunk = targets[i : i + Config.CHUNK_SIZE]
-                    
                     tasks = [asyncio.create_task(self.fetch_and_analyze(sym)) for sym in chunk]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
                     
@@ -265,7 +270,7 @@ class TradingSystem:
                     
                     await asyncio.sleep(1.0)
                 
-                Log.print(f"📊 Scan Complete! Found {len(valid_signals)} SMC Signals.", Log.YELLOW)
+                Log.print(f"📊 Scan Complete! Found {len(valid_signals)} Real Signals.", Log.YELLOW)
 
                 if valid_signals:
                     valid_signals.sort(key=lambda x: x['score'], reverse=True)
@@ -299,7 +304,7 @@ class TradingSystem:
                         f"🛑 <b>SL:</b> <code>{fmt(sl)}</code> (-{pnl_sl:.1f}% ROE)\n"
                         f"────────────────\n"
                         f"🧠 <b>Strategy:</b> <b>{strat}</b>\n"
-                        f"⚖️ <b>SMC Score:</b> <b>{score}/100</b>"
+                        f"⚖️ <b>Reality Score:</b> <b>{score}/100</b>"
                     )
                     
                     msg_id = await self.tg.send(msg)
@@ -362,7 +367,7 @@ class TradingSystem:
             t = self.stats['wins'] + self.stats['losses']
             wr = (self.stats['wins'] / t * 100) if t > 0 else 0
             msg = (
-                f"🏛️ <b>QUANTUM SMC REPORT (24H)</b> 🏛️\n"
+                f"🏛️ <b>APEX ENGINE REPORT (24H)</b> 🏛️\n"
                 f"────────────────\n"
                 f"🎯 <b>Signals:</b> {self.stats['signals']}\n"
                 f"✅ <b>Wins:</b> {self.stats['wins']}\n"
@@ -388,9 +393,11 @@ class TradingSystem:
 bot = TradingSystem()
 app = FastAPI()
 
-@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
+# 🚨 الحل النهائي لخطأ 405 (فصل الـ GET عن الـ HEAD صراحةً)
+@app.get("/", response_class=HTMLResponse)
+@app.head("/", response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>🏛️ ROLLING SWEEP ENGINE V52.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>🏛️ THE APEX PREDATOR V60.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
