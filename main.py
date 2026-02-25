@@ -272,6 +272,219 @@ async def get_signal_logic(symbol):
         # 📐 الحساب الرياضي المثالي (Flawless Math)
         # ---------------------------------------------------------
         if strategy_name != "":
+            atr = df['atr'].iloc[-1]
+            atr_pct = df['atr_pct'].iloc[-1]
+            
+            buffer = entry * 0.0015 
+            if side == "LONG": smart_sl = smart_sl - buffer
+            else: smart_sl = smart_sl + buffer
+
+            raw_risk = abs(entry - smart_sl)
+            risk = max(atr * 0.8, min(raw_risk, atr * 3.0)) 
+            
+            if side == "LONG":
+                sl = entry - risk
+                if target_origin <= entry: target_origin = entry + (risk * 1.5)
+            else:
+                sl = entry + risk
+                if target_origin >= entry: target_origin = entry - (risk * 1.5)
+
+            distance_to_origin = abs(target_origin - entry)
+            
+            if distance_to_origin < (risk * 1.2): 
+                del df; gc.collect()
+                return "ERROR: Bad Risk/Reward"
+
+            if side == "LONG":
+                tp1 = target_origin 
+                tp2 = entry + abs(distance_to_origin * 1.618) 
+                tp3 = entry + abs(distance_to_origin * 2.618) 
+                tp_final = entry + abs(distance_to_origin * 3.618) 
+            else:
+                tp1 = target_origin
+                tp2 = entry - abs(distance_to_origin * 1.618)
+                tp3 = entry - abs(distance_to_origin * 2.618)
+                tp_final = entry - abs(distance_to_origin * 3.618)
+
+            pnl_sl_base = abs((entry - sl) / entry) * 100
+            leverage = max(2, min(int(20.0 / pnl_sl_base), 50)) if pnl_sl_base > 0 else 10
+
+            vol_score = min(30, vol_ratio * 10) 
+            trend_score = 25 if (side=="LONG" and entry>df['ema200'].iloc[-1]) or (side=="SHORT" and entry<df['ema200'].iloc[-1]) else 0
+            velocity_score = min(20, atr_pct * 10) 
+            
+            final_score = int(score_boost + vol_score + trend_score + velocity_score)
+            final_score = min(100, final_score)
+
+                  vol_ratio = curr['vol'] / avg_vol if avg_vol > 0 else 0
+
+        swing_high = df['high'].rolling(20).max().iloc[-2]
+        swing_low = df['low'].rolling(20).min().iloc[-2]
+        macro_high = df['high'].rolling(50).max().iloc[-2]
+        macro_low = df['low'].rolling(50).min().iloc[-2]
+
+        body = abs(curr['close'] - curr['open'])
+        lower_wick = min(curr['open'], curr['close']) - curr['low']
+        upper_wick = curr['high'] - max(curr['open'], curr['close'])
+
+        strategy_name = ""; side = ""; smart_sl = 0.0; target_origin = 0.0; score_boost = 0
+
+        # ---------------------------------------------------------
+        # 🟢 ترسانة الـ 20 استراتيجية (الأقوى في السوق)
+        # ---------------------------------------------------------
+
+        # 1. Silver Bullet Sweep
+        if curr['low'] < swing_low and curr['close'] > prev['open'] and curr['close'] > curr['open'] and vol_ratio > 2.0:
+            strategy_name = "Silver Bullet Sweep"; side = "LONG"; smart_sl = curr['low']; target_origin = swing_high; score_boost = 10
+        elif curr['high'] > swing_high and curr['close'] < prev['open'] and curr['close'] < curr['open'] and vol_ratio > 2.0:
+            strategy_name = "Silver Bullet Sweep"; side = "SHORT"; smart_sl = curr['high']; target_origin = swing_low; score_boost = 10
+
+        # 2. Triple Confluence FVG
+        elif strategy_name == "":
+            up_fvg = df['low'].iloc[-3] > df['high'].iloc[-5]
+            if up_fvg and curr['low'] <= df['low'].iloc[-3] and curr['low'] >= df['ema200'].iloc[-1] and lower_wick > body:
+                strategy_name = "Triple Confluence FVG"; side = "LONG"; smart_sl = df['high'].iloc[-5]; target_origin = swing_high; score_boost = 9
+            down_fvg = df['high'].iloc[-3] < df['low'].iloc[-5]
+            if down_fvg and curr['high'] >= df['high'].iloc[-3] and curr['high'] <= df['ema200'].iloc[-1] and upper_wick > body:
+                strategy_name = "Triple Confluence FVG"; side = "SHORT"; smart_sl = df['low'].iloc[-5]; target_origin = swing_low; score_boost = 9
+
+        # 3. Wyckoff Spring + Divergence
+        elif strategy_name == "":
+            if curr['low'] < swing_low and curr['rsi'] > df['rsi'].iloc[-10:-2].min() and curr['close'] > curr['open'] and lower_wick > (body*1.5):
+                strategy_name = "Wyckoff Spring + Divergence"; side = "LONG"; smart_sl = curr['low']; target_origin = swing_high; score_boost = 9
+            elif curr['high'] > swing_high and curr['rsi'] < df['rsi'].iloc[-10:-2].max() and curr['close'] < curr['open'] and upper_wick > (body*1.5):
+                strategy_name = "Wyckoff Upthrust + Divergence"; side = "SHORT"; smart_sl = curr['high']; target_origin = swing_low; score_boost = 9
+
+        # 4. VWAP Trap Reversal
+        elif strategy_name == "":
+            if prev['close'] < df['vwap'].iloc[-2] and curr['close'] > df['vwap'].iloc[-1] and curr['close'] > prev['high'] and vol_ratio > 2.5:
+                strategy_name = "VWAP Trap Reversal"; side = "LONG"; smart_sl = prev['low']; target_origin = swing_high; score_boost = 8
+            elif prev['close'] > df['vwap'].iloc[-2] and curr['close'] < df['vwap'].iloc[-1] and curr['close'] < prev['low'] and vol_ratio > 2.5:
+                strategy_name = "VWAP Trap Reversal"; side = "SHORT"; smart_sl = prev['high']; target_origin = swing_low; score_boost = 8
+
+        # 5. Breaker Block Flip
+        elif strategy_name == "":
+            if prev2['close'] > swing_high and curr['low'] <= swing_high and curr['close'] > swing_high and lower_wick > body:
+                strategy_name = "Breaker Block Flip"; side = "LONG"; smart_sl = curr['low']; target_origin = macro_high; score_boost = 8
+            elif prev2['close'] < swing_low and curr['high'] >= swing_low and curr['close'] < swing_low and upper_wick > body:
+                strategy_name = "Breaker Block Flip"; side = "SHORT"; smart_sl = curr['high']; target_origin = macro_low; score_boost = 8
+
+        # 6. Apex Squeeze Breakout
+        elif strategy_name == "":
+            is_squeezed = df['bb_width'].iloc[-10:-1].mean() < 3.5 
+            if is_squeezed and curr['close'] > df['bbu'].iloc[-1] and curr['close'] > df['ema200'].iloc[-1] and vol_ratio > 3.0:
+                strategy_name = "Apex Squeeze Breakout"; side = "LONG"; smart_sl = df['ema21'].iloc[-1]; target_origin = macro_high; score_boost = 9
+            elif is_squeezed and curr['close'] < df['bbl'].iloc[-1] and curr['close'] < df['ema200'].iloc[-1] and vol_ratio > 3.0:
+                strategy_name = "Apex Squeeze Breakout"; side = "SHORT"; smart_sl = df['ema21'].iloc[-1]; target_origin = macro_low; score_boost = 9
+
+        # 7. Institutional Momentum (3WS/3BC)
+        elif strategy_name == "":
+            if curr['close']>curr['open'] and prev['close']>prev['open'] and prev2['close']>prev2['open'] and curr['close']>swing_high:
+                strategy_name = "Institutional Momentum (3WS)"; side = "LONG"; smart_sl = prev2['low']; target_origin = macro_high; score_boost = 7
+            elif curr['close']<curr['open'] and prev['close']<prev['open'] and prev2['close']<prev2['open'] and curr['close']<swing_low:
+                strategy_name = "Institutional Momentum (3BC)"; side = "SHORT"; smart_sl = prev2['high']; target_origin = macro_low; score_boost = 7
+
+        # 8. MACD Structural Divergence
+        elif strategy_name == "":
+            if curr['low'] < macro_low and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-10:-2].min() and curr['close'] > curr['open']:
+                strategy_name = "MACD Structural Divergence"; side = "LONG"; smart_sl = curr['low']; target_origin = df['ema50'].iloc[-1]; score_boost = 8
+            elif curr['high'] > macro_high and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-10:-2].max() and curr['close'] < curr['open']:
+                strategy_name = "MACD Structural Divergence"; side = "SHORT"; smart_sl = curr['high']; target_origin = df['ema50'].iloc[-1]; score_boost = 8
+
+        # 9. Turtle Soup (Trap)
+        elif strategy_name == "":
+            if prev['high'] > macro_high and curr['close'] < macro_high and curr['close'] < prev['low'] and vol_ratio > 1.5:
+                strategy_name = "Turtle Soup (Bull Trap)"; side = "SHORT"; smart_sl = prev['high']; target_origin = swing_low; score_boost = 8
+            elif prev['low'] < macro_low and curr['close'] > macro_low and curr['close'] > prev['high'] and vol_ratio > 1.5:
+                strategy_name = "Turtle Soup (Bear Trap)"; side = "LONG"; smart_sl = prev['low']; target_origin = swing_high; score_boost = 8
+
+        # 10. Trend-Aligned Inside Break
+        elif strategy_name == "":
+            if prev['high'] < prev2['high'] and prev['low'] > prev2['low'] and curr['close'] > prev2['high'] and entry > df['ema200'].iloc[-1]:
+                strategy_name = "Trend-Aligned Inside Break"; side = "LONG"; smart_sl = prev2['low']; target_origin = swing_high; score_boost = 7
+            elif prev['high'] < prev2['high'] and prev['low'] > prev2['low'] and curr['close'] < prev2['low'] and entry < df['ema200'].iloc[-1]:
+                strategy_name = "Trend-Aligned Inside Break"; side = "SHORT"; smart_sl = prev2['high']; target_origin = swing_low; score_boost = 7
+
+        # 11. Exhaustion Reversal
+        elif strategy_name == "":
+            if prev['open'] < prev2['close'] and prev['close'] < prev['open'] and curr['close'] > prev['open'] and vol_ratio > 2.0:
+                strategy_name = "Exhaustion Reversal"; side = "LONG"; smart_sl = prev['low']; target_origin = df['vwap'].iloc[-1]; score_boost = 8
+            elif prev['open'] > prev2['close'] and prev['close'] > prev['open'] and curr['close'] < prev['open'] and vol_ratio > 2.0:
+                strategy_name = "Exhaustion Reversal"; side = "SHORT"; smart_sl = prev['high']; target_origin = df['vwap'].iloc[-1]; score_boost = 8
+
+        # 12. Confirmed Golden/Death Cross
+        elif strategy_name == "":
+            if df['ema21'].iloc[-1] > df['ema50'].iloc[-1] and df['ema21'].iloc[-2] <= df['ema50'].iloc[-2] and vol_ratio > 2.0:
+                strategy_name = "Confirmed Golden Cross"; side = "LONG"; smart_sl = df['ema50'].iloc[-1]; target_origin = swing_high; score_boost = 6
+            elif df['ema21'].iloc[-1] < df['ema50'].iloc[-1] and df['ema21'].iloc[-2] >= df['ema50'].iloc[-2] and vol_ratio > 2.0:
+                strategy_name = "Confirmed Death Cross"; side = "SHORT"; smart_sl = df['ema50'].iloc[-1]; target_origin = swing_low; score_boost = 6
+
+        # 13. EMA200 Sniper Bounce
+        elif strategy_name == "":
+            if curr['low'] <= df['ema200'].iloc[-1] and curr['close'] > df['ema200'].iloc[-1] and lower_wick > body:
+                strategy_name = "EMA200 Sniper Bounce"; side = "LONG"; smart_sl = curr['low'] * 0.999; target_origin = df['ema21'].iloc[-1]; score_boost = 7
+            elif curr['high'] >= df['ema200'].iloc[-1] and curr['close'] < df['ema200'].iloc[-1] and upper_wick > body:
+                strategy_name = "EMA200 Sniper Bounce"; side = "SHORT"; smart_sl = curr['high'] * 1.001; target_origin = df['ema21'].iloc[-1]; score_boost = 7
+
+        # 14. Extreme RSI Reversion
+        elif strategy_name == "":
+            if curr['rsi'] < 20 and curr['close'] > curr['open']:
+                strategy_name = "Extreme RSI Reversion"; side = "LONG"; smart_sl = curr['low']; target_origin = df['sma20'].iloc[-1]; score_boost = 7
+            elif curr['rsi'] > 80 and curr['close'] < curr['open']:
+                strategy_name = "Extreme RSI Reversion"; side = "SHORT"; smart_sl = curr['high']; target_origin = df['sma20'].iloc[-1]; score_boost = 7
+
+        # 15. GOD MODE SETUP 👁️
+        elif strategy_name == "":
+            if curr['low'] < swing_low and lower_wick > body and curr['rsi'] < 30 and vol_ratio > 3.0 and curr['close'] > df['vwap'].iloc[-1]:
+                strategy_name = "GOD MODE SETUP 👁️"; side = "LONG"; smart_sl = curr['low']; target_origin = macro_high; score_boost = 20
+            elif curr['high'] > swing_high and upper_wick > body and curr['rsi'] > 70 and vol_ratio > 3.0 and curr['close'] < df['vwap'].iloc[-1]:
+                strategy_name = "GOD MODE SETUP 👁️"; side = "SHORT"; smart_sl = curr['high']; target_origin = macro_low; score_boost = 20
+
+        # 🚨 الاستراتيجيات الخمس الجديدة (للتأكد من صيد كل الفرص) 🚨
+        
+        # 16. Triple EMA Alignment (توافق المتوسطات 9-21-50 مع ارتداد)
+        elif strategy_name == "":
+            trend_up = df['ema9'].iloc[-1] > df['ema21'].iloc[-1] > df['ema50'].iloc[-1]
+            if trend_up and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1]:
+                strategy_name = "Triple EMA Pullback"; side = "LONG"; smart_sl = df['ema50'].iloc[-1]; target_origin = swing_high; score_boost = 8
+            trend_down = df['ema9'].iloc[-1] < df['ema21'].iloc[-1] < df['ema50'].iloc[-1]
+            if trend_down and curr['high'] >= df['ema21'].iloc[-1] and curr['close'] < df['ema21'].iloc[-1]:
+                strategy_name = "Triple EMA Pullback"; side = "SHORT"; smart_sl = df['ema50'].iloc[-1]; target_origin = swing_low; score_boost = 8
+
+        # 17. VWAP + RSI Divergence (رفض مزدوج)
+        elif strategy_name == "":
+            if curr['low'] <= df['vwap'].iloc[-1] and curr['close'] > df['vwap'].iloc[-1] and curr['rsi'] > prev['rsi'] and curr['close'] < prev['close']:
+                strategy_name = "VWAP RSI Divergence"; side = "LONG"; smart_sl = curr['low'] * 0.998; target_origin = swing_high; score_boost = 9
+            elif curr['high'] >= df['vwap'].iloc[-1] and curr['close'] < df['vwap'].iloc[-1] and curr['rsi'] < prev['rsi'] and curr['close'] > prev['close']:
+                strategy_name = "VWAP RSI Divergence"; side = "SHORT"; smart_sl = curr['high'] * 1.002; target_origin = swing_low; score_boost = 9
+
+        # 18. Micro Double Bottom/Top (قاع/قمة مزدوجة لحظية)
+        elif strategy_name == "":
+            if abs(curr['low'] - prev2['low']) / entry < 0.002 and curr['close'] > curr['open'] and prev['close'] < prev['open']:
+                strategy_name = "Micro Double Bottom"; side = "LONG"; smart_sl = min(curr['low'], prev2['low']) * 0.998; target_origin = swing_high; score_boost = 7
+            elif abs(curr['high'] - prev2['high']) / entry < 0.002 and curr['close'] < curr['open'] and prev['close'] > prev['open']:
+                strategy_name = "Micro Double Top"; side = "SHORT"; smart_sl = max(curr['high'], prev2['high']) * 1.002; target_origin = swing_low; score_boost = 7
+
+        # 19. Liquidity Void Fill (ملء شمعة قوية والارتداد)
+        elif strategy_name == "":
+            prev_body = abs(prev['close'] - prev['open'])
+            if prev['close'] < prev['open'] and prev_body > (df['atr'].iloc[-2] * 2) and curr['close'] > prev['high']:
+                strategy_name = "Liquidity Void Fill"; side = "LONG"; smart_sl = prev['low']; target_origin = swing_high; score_boost = 8
+            elif prev['close'] > prev['open'] and prev_body > (df['atr'].iloc[-2] * 2) and curr['close'] < prev['low']:
+                strategy_name = "Liquidity Void Fill"; side = "SHORT"; smart_sl = prev['high']; target_origin = swing_low; score_boost = 8
+
+        # 20. Momentum Kicker (ركلة الزخم المفاجئة)
+        elif strategy_name == "":
+            if curr['close'] > df['ema21'].iloc[-1] and prev['close'] < df['ema21'].iloc[-2] and body > (df['atr'].iloc[-1] * 1.5):
+                strategy_name = "Momentum Kicker"; side = "LONG"; smart_sl = curr['low']; target_origin = entry + (df['atr'].iloc[-1] * 2.5); score_boost = 7
+            elif curr['close'] < df['ema21'].iloc[-1] and prev['close'] > df['ema21'].iloc[-2] and body > (df['atr'].iloc[-1] * 1.5):
+                strategy_name = "Momentum Kicker"; side = "SHORT"; smart_sl = curr['high']; target_origin = entry - (df['atr'].iloc[-1] * 2.5); score_boost = 7
+
+
+        # ---------------------------------------------------------
+        # 📐 الحساب الرياضي المثالي (Flawless Math)
+        # ---------------------------------------------------------
+        if strategy_name != "":
             buffer = entry * 0.0015 
             if side == "LONG": smart_sl = smart_sl - buffer
             else: smart_sl = smart_sl + buffer
