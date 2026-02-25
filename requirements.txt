@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 pandas
-pandas_ta
+pandas-ta
 ccxt
+aiohttp
 httpx
