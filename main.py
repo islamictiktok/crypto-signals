@@ -18,10 +18,10 @@ class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TIMEFRAME = '15m' # عودة للـ 15 دقيقة لغزارة الإشارات
-    MAX_TRADES_AT_ONCE = 2 # السماح بصفقتين معاً لكثرة الفرص
-    MIN_24H_VOLUME_USDT = 25_000 # اصطياد العملات النائمة والانفجارية
-    CHUNK_SIZE = 20 # فحص 20 عملة في الدفعة لسرعة المسح
+    TIMEFRAME = '15m' 
+    MAX_TRADES_AT_ONCE = 2 
+    MIN_24H_VOLUME_USDT = 25_000 
+    CHUNK_SIZE = 20 
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -112,10 +112,13 @@ class StrategyEngine:
             lower_wick = min(curr['open'], curr['close']) - curr['low']
             upper_wick = curr['high'] - max(curr['open'], curr['close'])
 
+            # 🚨 تم تعريف الألوان بشكل صريح ومسبق لمنع خطأ Syntax Error
             is_green = curr['close'] > curr['open']
             is_red = curr['close'] < curr['open']
             prev_green = prev['close'] > prev['open']
             prev_red = prev['close'] < prev['open']
+            prev2_green = prev2['close'] > prev2['open']
+            prev2_red = prev2['close'] < prev2['open']
 
             strat = ""; side = ""; smart_sl = 0.0; target_orig = 0.0; boost = 0
 
@@ -132,9 +135,9 @@ class StrategyEngine:
                 strat = "SMC: Bullish FVG Fill"; side = "LONG"; smart_sl = df['high'].iloc[-5]; target_orig = swing_high; boost = 15
             elif df['high'].iloc[-3] < df['low'].iloc[-5] and curr['high'] >= df['high'].iloc[-3] and is_red:
                 strat = "SMC: Bearish FVG Fill"; side = "SHORT"; smart_sl = df['low'].iloc[-5]; target_orig = swing_low; boost = 15
-            elif prev2['close'] < prev2['open'] and prev['close'] > prev['open'] and curr['close'] > prev['high'] and vol_ratio > 1.5:
+            elif prev2_red and prev_green and curr['close'] > prev['high'] and vol_ratio > 1.5:
                 strat = "SMC: Bullish Order Block"; side = "LONG"; smart_sl = prev2['low']; target_orig = swing_high; boost = 18
-            elif prev2['close'] > prev2['open'] and prev['close'] < prev['open'] and curr['close'] < prev['low'] and vol_ratio > 1.5:
+            elif prev2_green and prev_red and curr['close'] < prev['low'] and vol_ratio > 1.5:
                 strat = "SMC: Bearish Order Block"; side = "SHORT"; smart_sl = prev2['high']; target_orig = swing_low; boost = 18
 
             # --- [GROUP B: Price Action & Candlesticks] ---
@@ -150,9 +153,9 @@ class StrategyEngine:
                 strat = "PA: Inside Bar Bull Breakout"; side = "LONG"; smart_sl = prev['low']; target_orig = swing_high; boost = 12
             elif prev['high'] < prev2['high'] and prev['low'] > prev2['low'] and curr['close'] < prev['low']:
                 strat = "PA: Inside Bar Bear Breakout"; side = "SHORT"; smart_sl = prev['high']; target_orig = swing_low; boost = 12
-            elif is_green and prev_green and prev2_green := prev2['close'] > prev2['open'] and curr['close'] > swing_high:
+            elif is_green and prev_green and prev2_green and curr['close'] > swing_high:
                 strat = "PA: 3 White Soldiers Momentum"; side = "LONG"; smart_sl = prev2['low']; target_orig = entry + (df['atr'].iloc[-1]*4); boost = 14
-            elif is_red and prev_red and prev2_red := prev2['close'] < prev2['open'] and curr['close'] < swing_low:
+            elif is_red and prev_red and prev2_red and curr['close'] < swing_low:
                 strat = "PA: 3 Black Crows Momentum"; side = "SHORT"; smart_sl = prev2['high']; target_orig = entry - (df['atr'].iloc[-1]*4); boost = 14
 
             # --- [GROUP C: Momentum & Breakouts] ---
@@ -306,7 +309,6 @@ class TradingSystem:
                     if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
                         vol_24h = data.get('quoteVolume', 0)
                         
-                        # 🚨 الفلتر المرن: سيولة فوق 25 ألف فقط!
                         if vol_24h >= Config.MIN_24H_VOLUME_USDT:
                             valid_coins.append({'sym': sym, 'vol': vol_24h})
                 
@@ -326,7 +328,7 @@ class TradingSystem:
                         if isinstance(r, dict) and "ERROR" not in str(r):
                             valid_signals.append(r)
                     
-                    await asyncio.sleep(0.5) # مسح سريع
+                    await asyncio.sleep(0.5) 
                 
                 Log.print(f"📊 Matrix Complete! Found {len(valid_signals)} Opportunities.", Log.YELLOW)
 
