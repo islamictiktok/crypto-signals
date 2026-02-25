@@ -1,8 +1,6 @@
 fastapi
 uvicorn
-ccxt
 pandas
-pandas-ta
-numpy
+pandas_ta
+ccxt
 httpx
-scipy
