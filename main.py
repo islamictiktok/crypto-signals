@@ -12,7 +12,7 @@ from datetime import datetime
 import httpx
 
 # ==========================================
-# 1. الإعدادات الأساسية 
+# 1. الإعدادات الأساسية
 # ==========================================
 TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
 CHAT_ID = "-1003653652451"
@@ -38,8 +38,8 @@ async def root():
     return """
     <html>
         <body style='background:#0d1117;color:#00ff00;text-align:center;padding-top:50px;font-family:monospace;'>
-            <h1>🛸 Fortress V38.0 (BATCHED ENGINE)</h1>
-            <p>Full Market Batched Sweep | Zero Timeout | Fair Scoring</p>
+            <h1>🌊 Fortress V39.0 (LIQUIDITY ENGINE)</h1>
+            <p>Top 150 Volume Scan | Wick Rejection Score | Flawless Math</p>
             <p>Status: Active & Hunting 24/7! 🎯</p>
         </body>
     </html>
@@ -61,7 +61,7 @@ async def reply_telegram_msg(message, reply_to_msg_id):
     except: pass
 
 # ==========================================
-# 3. محرك الـ 20 استراتيجية 🧠 (بدون أي تعديل)
+# 3. محرك الـ 20 استراتيجية 🧠
 # ==========================================
 async def get_signal_logic(symbol):
     try:
@@ -86,11 +86,10 @@ async def get_signal_logic(symbol):
         
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         df['atr_pct'] = (df['atr'] / df['close']) * 100
-        if pd.isna(df['atr_pct'].iloc[-1]) or df['atr_pct'].iloc[-1] < 0.4: return "ERROR"
+        if pd.isna(df['atr_pct'].iloc[-1]) or df['atr_pct'].iloc[-1] < 0.4: return "ERROR: Too Slow" 
 
         macd = ta.macd(df['close'])
         if macd is not None and not macd.empty: df['macd_h'] = macd.iloc[:, 1]
-        else: df['macd_h'] = 0.0
         
         bb = df.ta.bbands(length=20, std=2)
         if bb is not None and not bb.empty:
@@ -240,11 +239,11 @@ async def get_signal_logic(symbol):
                 strategy_name = "Momentum Kicker"; side = "SHORT"; smart_sl = curr['high']; target_origin = entry - (df['atr'].iloc[-1] * 2.5); score_boost = 7
 
         # ---------------------------------------------------------
-        # 📐 التقييم العادل والمخاطرة الآمنة
+        # 📐 الحساب الرياضي المثالي (Flawless Math)
         # ---------------------------------------------------------
         if strategy_name != "":
+            # حماية الاستوب لوس بالـ ATR 
             atr = df['atr'].iloc[-1]
-            atr_pct = df['atr_pct'].iloc[-1]
             
             buffer = entry * 0.0015 
             if side == "LONG": smart_sl = smart_sl - buffer
@@ -261,6 +260,7 @@ async def get_signal_logic(symbol):
                 if target_origin >= entry: target_origin = entry - (risk * 1.5)
 
             distance_to_origin = abs(target_origin - entry)
+            
             if distance_to_origin < (risk * 1.2): 
                 del df; gc.collect()
                 return "ERROR: Bad Risk/Reward"
@@ -279,15 +279,19 @@ async def get_signal_logic(symbol):
             pnl_sl_base = abs((entry - sl) / entry) * 100
             leverage = max(2, min(int(20.0 / pnl_sl_base), 50)) if pnl_sl_base > 0 else 10
 
+            # 💯 نظام التقييم الفني الجديد (بدون جودة المخاطرة) 💯
             base_score = 30 + score_boost 
-            vol_points = min(25, vol_ratio * 6)
+            
+            vol_points = min(20, vol_ratio * 5)
             trend_points = 15 if (side=="LONG" and entry>df['ema200'].iloc[-1]) or (side=="SHORT" and entry<df['ema200'].iloc[-1]) else 0
             
-            mom_points = 0
-            if side == "LONG" and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and curr['rsi'] < 70: mom_points = 10
-            if side == "SHORT" and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and curr['rsi'] > 30: mom_points = 10
+            # تقييم رفض السعر (Wick Rejection Score)
+            wick_points = 0
+            if body > 0:
+                if side == "LONG": wick_points = min(15, (lower_wick / body) * 5)
+                elif side == "SHORT": wick_points = min(15, (upper_wick / body) * 5)
             
-            final_score = int(base_score + vol_points + trend_points + mom_points)
+            final_score = int(base_score + vol_points + trend_points + wick_points)
             final_score = min(100, final_score)
 
             del df; gc.collect()
@@ -305,22 +309,25 @@ async def get_signal_logic(symbol):
 # ==========================================
 # 4. إدارة البيانات والمراقبة
 # ==========================================
+# 🚨 20 عاملاً متوازياً (أمان تام للمنصة)
+sem = asyncio.Semaphore(20) 
 class DataManager:
     def __init__(self):
         self.active_trades = {}
         self.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 db = DataManager()
 
-# 🚨 دالة تغليف لحماية العملة من التجمد
-async def safe_fetch(symbol):
-    try:
-        res = await asyncio.wait_for(get_signal_logic(symbol), timeout=6.0)
-        return res
-    except:
-        return "ERROR"
+async def safe_check(symbol):
+    async with sem:
+        await asyncio.sleep(0.05) 
+        try:
+            # 🚨 تايم أوت 10 ثوانٍ لضمان عدم قطع حسابات العملات العميقة
+            return await asyncio.wait_for(get_signal_logic(symbol), timeout=10.0)
+        except Exception:
+            return "ERROR"
 
 async def monitor_trades(app_state):
-    cprint("👀 15m Tracker Started...", Log.CYAN)
+    cprint("👀 15m Omniscient Tracker Started...", Log.CYAN)
     while True:
         current_symbols = list(app_state.active_trades.keys())
         for sym in current_symbols:
@@ -381,12 +388,12 @@ async def daily_report_task(app_state):
         win_rate = (wins / total) * 100 if total > 0 else 0.0
         
         msg = (
-            f"🛸 <b>BATCHED ENGINE REPORT (24H)</b> 🛸\n"
+            f"🌊 <b>LIQUIDITY ENGINE REPORT (24H)</b> 🌊\n"
             f"────────────────\n"
-            f"🎯 <b>Signals Sent:</b> {app_state.stats['signals']}\n"
+            f"📡 <b>Signals Sent:</b> {app_state.stats['signals']}\n"
             f"✅ <b>Wins (TP Hits):</b> {wins}\n"
             f"❌ <b>Losses (SL Hits):</b> {losses}\n"
-            f"📊 <b>Win Rate:</b> {win_rate:.1f}%\n"
+            f"🎯 <b>Win Rate:</b> {win_rate:.1f}%\n"
             f"────────────────\n"
             f"📈 <b>Net Leveraged PNL:</b> {app_state.stats['net_pnl']:.2f}%\n"
         )
@@ -394,56 +401,52 @@ async def daily_report_task(app_state):
         app_state.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 
 # ==========================================
-# 6. المحرك الأساسي (نظام المسح الكتلي - Batched Sweep) 🛸
+# 6. المحرك الأساسي (محرك السيولة العميقة) 🌊
 # ==========================================
 async def start_scanning(app_state):
-    cprint("🚀 System Online: V38.0 (BATCHED ENGINE)", Log.GREEN)
-    await send_telegram_msg(f"🟢 <b>Fortress V38.0 Online.</b>\nBatched Sweep Active | Full Market Analysis 🛸")
+    cprint("🚀 System Online: V39.0 (DEEP LIQUIDITY ENGINE)", Log.GREEN)
+    await send_telegram_msg(f"🟢 <b>Fortress V39.0 Online.</b>\nTop 150 Volume Scan | Wick Rejection Score 🌊")
     
     try:
         await exchange.load_markets()
         while True:
             if len(app_state.active_trades) >= MAX_TRADES_AT_ONCE:
                 cprint(f"💤 Sleeping... {len(app_state.active_trades)} trade active.", Log.YELLOW)
-                await asyncio.sleep(10); continue 
+                await asyncio.sleep(15); continue 
             
             try:
                 tickers = await exchange.fetch_tickers()
-                high_liquid_symbols = []
+                valid_tickers = []
                 
+                # 🚨 تصفية السوق واختيار العملات بناءً على حجم التداول (السيولة)
                 for sym, data in tickers.items():
                     if 'USDT' in sym and ':' in sym: 
                         if any(junk in sym for junk in ['3L', '3S', '5L', '5S', 'USDC', 'TUSD', 'BUSD', 'USDD']):
                             continue
                         vol_24h = data.get('quoteVolume', 0)
                         if vol_24h >= MIN_24H_VOLUME_USDT: 
-                            high_liquid_symbols.append(sym)
+                            valid_tickers.append({'sym': sym, 'vol': vol_24h})
                 
-                cprint(f"🛸 Batched Sweep Started on {len(high_liquid_symbols)} Pairs...", Log.BLUE)
+                # ترتيب العملات من الأعلى للأقل سيولة
+                valid_tickers.sort(key=lambda x: x['vol'], reverse=True)
                 
-                # 🚨 التقنية الجديدة كلياً: المسح عبر دفعات (Batches) لتجنب حظر المنصة وفحص السوق بالكامل
-                batch_size = 25 # سحب 25 عملة في كل دفعة
-                valid_signals = []
+                # 🚨 أخذ أفضل 150 عملة حية (يتواجد فيها الحيتان) وتجاهل الـ 600 عملة الميتة 
+                top_150_symbols = [t['sym'] for t in valid_tickers[:150]]
                 
-                for i in range(0, len(high_liquid_symbols), batch_size):
-                    batch = high_liquid_symbols[i:i + batch_size]
-                    tasks = [asyncio.create_task(safe_fetch(sym)) for sym in batch]
-                    results = await asyncio.gather(*tasks)
-                    
-                    for res in results:
-                        if isinstance(res, dict) and "ERROR" not in str(res):
-                            valid_signals.append(res)
-                    
-                    # 🚨 استراحة المحارب: نصف ثانية بين كل كتيبة وأخرى لكي لا تشك المنصة أننا بوت
-                    await asyncio.sleep(0.5) 
+                cprint(f"🌊 Scanning Top {len(top_150_symbols)} Liquid Pairs...", Log.BLUE)
                 
-                cprint(f"📊 Scan Result: {len(valid_signals)} Valid Signals Found.", Log.YELLOW)
+                tasks = [asyncio.create_task(safe_check(sym)) for sym in top_150_symbols]
+                results = await asyncio.gather(*tasks)
+                
+                valid_signals = [res for res in results if isinstance(res, dict)]
+                
+                cprint(f"📊 Scan Result: {len(valid_signals)} Elite Signals Found.", Log.YELLOW)
 
                 if valid_signals:
                     valid_signals.sort(key=lambda x: x['quantum_score'], reverse=True)
                     top_signals = valid_signals[:MAX_TRADES_AT_ONCE] 
                     
-                    cprint(f"🏆 DEPLOYING THE #1 BATCHED SETUP!", Log.GREEN)
+                    cprint(f"🏆 DEPLOYING THE #1 SETUP!", Log.GREEN)
                     
                     for sig in top_signals:
                         sym, entry, sl, side, lev, strat, q_score = sig['symbol'], sig['entry'], sig['sl'], sig['side'], sig['leverage'], sig['strat'], sig['quantum_score']
@@ -476,7 +479,7 @@ async def start_scanning(app_state):
                             f"🛑 <b>SL:</b> <code>{fmt_sl}</code> (-{pnl_sl:.1f}% ROE)\n"
                             f"────────────────\n"
                             f"🧠 <b>Strategy:</b> <b>{strat}</b>\n"
-                            f"⚖️ <b>Fair Score:</b> <b>{q_score}/100</b>"
+                            f"⚖️ <b>Tech Score:</b> <b>{q_score}/100</b>"
                         )
                         msg_id = await send_telegram_msg(msg)
                         if msg_id:
@@ -488,7 +491,7 @@ async def start_scanning(app_state):
                             }
                             app_state.stats["signals"] += 1; await asyncio.sleep(1) 
                 else:
-                    cprint("📉 No setups detected. Batched retrying...", Log.BLUE)
+                    cprint("📉 No Elite setups detected. Retrying...", Log.BLUE)
                     await asyncio.sleep(15) 
             except: await asyncio.sleep(5)
     except: await asyncio.sleep(10)
@@ -511,7 +514,7 @@ async def lifespan(app: FastAPI):
     t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel() 
 
 app.router.lifespan_context = lifespan
-# 🚨 إغلاق فرامل CCXT للسماح للكتائب بالعمل بكفاءة
+# إغلاق الفرامل للسماح بسحب سريع للـ 150 عملة
 exchange = ccxt.mexc({'enableRateLimit': False, 'options': {'defaultType': 'swap'}})
 if __name__ == "__main__":
     import uvicorn; uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
