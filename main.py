@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import os
+import warnings
 from datetime import datetime
 import pandas as pd
 import pandas_ta as ta
@@ -10,6 +11,9 @@ from fastapi import FastAPI, Response
 from fastapi.responses import HTMLResponse
 import uvicorn
 from contextlib import asynccontextmanager
+
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # ==========================================
 # 1. الإعدادات المركزية (CONFIG)
@@ -21,7 +25,7 @@ class Config:
     TIMEFRAME = '15m' 
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 50_000 
-    MIN_SCORE_THRESHOLD = 85 # سيعمل الآن بكفاءة بعد تصحيح الرياضيات
+    MIN_SCORE_THRESHOLD = 80 
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -30,9 +34,6 @@ class Log:
         ts = datetime.now().strftime("%H:%M:%S")
         print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
 
-# ==========================================
-# 2. نظام الإشعارات
-# ==========================================
 class TelegramNotifier:
     def __init__(self):
         self.base_url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
@@ -55,44 +56,38 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك السكالبينج (THE FLAWLESS ENGINE) 🧠
+# 3. محرك السكالبينج الديناميكي 🧠 (THE SCALPER)
 # ==========================================
 class StrategyEngine:
     @staticmethod
     def analyze_data(symbol, ohlcv):
         try:
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            df['time'] = pd.to_datetime(df['time'], unit='ms')
+            df.set_index('time', inplace=True)
+            df.sort_index(inplace=True)
             
-            if len(df) < 50 or df['vol'].iloc[-2] == 0: 
+            if len(df) < 250 or df['vol'].iloc[-2] == 0: 
                 return None
 
-            curr, prev, prev2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
+            curr, prev = df.iloc[-1], df.iloc[-2]
             entry = curr['close']
 
-            # 🚀 الحل العبقري لمشكلة الـ VWAP: حساب يدوي لحظي بدون أخطاء مكتبات!
-            df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
-            df['vwap'] = (df['typical_price'] * df['vol']).rolling(window=20).sum() / df['vol'].rolling(window=20).sum()
-
-            # المؤشرات الأساسية
+            # 📊 المؤشرات الشاملة
+            df['ema9'] = ta.ema(df['close'], length=9)
             df['ema21'] = ta.ema(df['close'], length=21)
             df['ema200'] = ta.ema(df['close'], length=200)
             df['rsi'] = ta.rsi(df['close'], length=14)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            
-            bb = df.ta.bbands(length=20, std=2)
-            if bb is not None and not bb.empty:
-                df['bbl'], df['bbu'] = bb.filter(like='BBL').iloc[:, 0], bb.filter(like='BBU').iloc[:, 0]
-                df['bb_width'] = ((df['bbu'] - df['bbl']) / df['close']) * 100
-            else:
-                df['bb_width'] = 100
+
+            df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
+            df['vwap'] = (df['typical_price'] * df['vol']).rolling(window=20).sum() / df['vol'].rolling(window=20).sum()
 
             if pd.isna(df['atr'].iloc[-1]): return None
 
-            # الفوليوم (مخفف لاصطياد الفرص)
             avg_vol = df['vol'].iloc[-15:-1].mean()
             vol_ratio = max(curr['vol'], prev['vol']) / avg_vol if avg_vol > 0 else 0
 
-            # الشموع
             body = abs(curr['close'] - curr['open'])
             lower_wick = min(curr['open'], curr['close']) - curr['low']
             upper_wick = curr['high'] - max(curr['open'], curr['close'])
@@ -100,70 +95,76 @@ class StrategyEngine:
             is_green = curr['close'] > curr['open']
             is_red = curr['close'] < curr['open']
             
+            micro_high = df['high'].rolling(5).max().shift(1).iloc[-1]
+            micro_low = df['low'].rolling(5).min().shift(1).iloc[-1]
             swing_low = df['low'].rolling(10).min().shift(1).iloc[-1]
             swing_high = df['high'].rolling(10).max().shift(1).iloc[-1]
 
-            strat = ""; side = ""; base_score = 65 # 🚨 النتيجة الأساسية العادلة
+            strat = ""; side = ""; base_score = 70 
 
             # ==========================================
-            # 🧨 استراتيجيات السكالبينج الغزيرة والقوية
+            # 🧨 استراتيجيات السكالبينج (High Frequency)
             # ==========================================
 
-            # 1. كسر الضغط المتفجر (Bollinger Squeeze Pop)
-            if df['bb_width'].iloc[-2] < 4.0 and curr['close'] > df['bbu'].iloc[-1] and vol_ratio > 1.3:
-                strat = "BB Squeeze Breakout"; side = "LONG"
-            elif df['bb_width'].iloc[-2] < 4.0 and curr['close'] < df['bbl'].iloc[-1] and vol_ratio > 1.3:
-                strat = "BB Squeeze Breakdown"; side = "SHORT"
+            # 1. اختراق المقاومات اللحظية
+            if is_green and curr['close'] > micro_high and vol_ratio > 1.2:
+                strat = "Micro Resistance Breakout"; side = "LONG"
+            elif is_red and curr['close'] < micro_low and vol_ratio > 1.2:
+                strat = "Micro Support Breakdown"; side = "SHORT"
 
-            # 2. قناص الأذيال (Liquidity Sweep)
+            # 2. تقاطع المتوسطات السريع
+            elif df['ema9'].iloc[-1] > df['ema21'].iloc[-1] and df['ema9'].iloc[-2] <= df['ema21'].iloc[-2]:
+                strat = "Fast EMA Golden Cross"; side = "LONG"
+            elif df['ema9'].iloc[-1] < df['ema21'].iloc[-1] and df['ema9'].iloc[-2] >= df['ema21'].iloc[-2]:
+                strat = "Fast EMA Death Cross"; side = "SHORT"
+
+            # 3. صيد السيولة والشموع الانعكاسية
             elif is_green and curr['low'] < swing_low and lower_wick > body * 1.5:
                 strat = "Liquidity Sweep (Pinbar)"; side = "LONG"
             elif is_red and curr['high'] > swing_high and upper_wick > body * 1.5:
                 strat = "Liquidity Sweep (Pinbar)"; side = "SHORT"
 
-            # 3. لكمة الـ VWAP (VWAP Bounce)
+            # 4. الارتداد العنيف من التشبع
+            elif df['rsi'].iloc[-2] < 30 and df['rsi'].iloc[-1] >= 30 and is_green:
+                strat = "RSI V-Shape Recovery"; side = "LONG"
+            elif df['rsi'].iloc[-2] > 70 and df['rsi'].iloc[-1] <= 70 and is_red:
+                strat = "RSI V-Shape Dump"; side = "SHORT"
+
+            # 5. لكمة الـ VWAP
             elif prev['low'] <= df['vwap'].iloc[-1] and curr['close'] > df['vwap'].iloc[-1] and is_green:
                 strat = "VWAP Tap Bounce"; side = "LONG"
             elif prev['high'] >= df['vwap'].iloc[-1] and curr['close'] < df['vwap'].iloc[-1] and is_red:
                 strat = "VWAP Tap Reject"; side = "SHORT"
 
-            # 4. ارتداد التشبع السريع (RSI Snapback)
-            elif curr['rsi'] < 30 and is_green and curr['close'] > prev['high']:
-                strat = "RSI Oversold Snapback"; side = "LONG"
-            elif curr['rsi'] > 70 and is_red and curr['close'] < prev['low']:
-                strat = "RSI Overbought Snapback"; side = "SHORT"
-
-            # 5. ابتلاع الزخم (Momentum Engulfing)
-            elif is_green and curr['close'] > prev['high'] and prev['close'] < prev['open'] and vol_ratio > 1.2:
-                strat = "Momentum Engulfing"; side = "LONG"
-            elif is_red and curr['close'] < prev['low'] and prev['close'] > prev['open'] and vol_ratio > 1.2:
-                strat = "Momentum Engulfing"; side = "SHORT"
-
             # ==========================================
-            # 📐 حسابات السكالبينج (هدف سريع واستوب دقيق)
+            # 📐 نظام التقييم والرافعة الديناميكية المحسوبة
             # ==========================================
             if strat != "":
                 atr = df['atr'].iloc[-1]
                 
-                # 🚨 التقييم الآن منطقي: 65 أساس + الفوليوم والترند
-                vol_score = min(20, vol_ratio * 10) # 1.5 فوليوم = 15 نقطة
-                trend_score = 10 if (side == "LONG" and entry > df['ema200'].iloc[-1]) or (side == "SHORT" and entry < df['ema200'].iloc[-1]) else 0
+                vol_score = 15 if vol_ratio > 1.2 else 0
+                trend_score = 15 if pd.notna(df['ema200'].iloc[-1]) and ((side == "LONG" and entry > df['ema200'].iloc[-1]) or (side == "SHORT" and entry < df['ema200'].iloc[-1])) else 0
+                
                 final_score = min(100, int(base_score + vol_score + trend_score))
 
-                # إذا كانت الصفقة ضعيفة يتجاهلها
                 if final_score < Config.MIN_SCORE_THRESHOLD:
                     del df; return None
 
-                # الستوب لوس: 1.2 ATR (قريب جداً للسكالبينج)
+                # سكالبينج حقيقي: ستوب لوس (1 ATR)، هدف (1.5 ATR)
+                risk = atr * 1.0
                 if side == "LONG":
-                    sl = entry - (atr * 1.2)
-                    tp = entry + (atr * 1.8) # هدف 1.5x من المخاطرة
+                    sl = entry - risk
+                    tp = entry + (risk * 1.5)
                 else:
-                    sl = entry + (atr * 1.2)
-                    tp = entry - (atr * 1.8)
+                    sl = entry + risk
+                    tp = entry - (risk * 1.5)
 
+                # 🚨 الرافعة الديناميكية (Dynamic Leverage) 🚨
                 risk_pct = abs((entry - sl) / entry) * 100
-                lev = max(5, min(int(15.0 / risk_pct), 25)) if risk_pct > 0 else 10 
+                
+                # المعادلة: استهداف خسارة 15% كحد أقصى من الهامش المخصص في حالة ضرب الستوب
+                # الحد الأدنى للرافعة 3x (للعملات المجنونة)، والحد الأقصى 50x (للعملات المستقرة)
+                lev = max(3, min(int(15.0 / risk_pct), 50)) if risk_pct > 0 else 10 
 
                 del df
                 return {
@@ -177,7 +178,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت الشامل (THE SYSTEM)
+# 4. مدير البوت (AS-COMPLETED ENGINE)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -190,8 +191,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 THE FLAWLESS SCALPER ONLINE: V101.0", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V101.0 Online.</b>\nLogic Fixed | Manual VWAP | Aggressive Mode 🎯")
+        Log.print("🚀 ULTIMATE SCALPER ONLINE: V103.0", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V103.0 Online.</b>\nDynamic Leverage Active | Perfect Risk Control ⚖️")
 
     async def shutdown(self):
         self.running = False
@@ -200,7 +201,7 @@ class TradingSystem:
 
     async def fetch_and_analyze(self, symbol):
         try:
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=100) 
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=300) 
             if ohlcv:
                 res = await asyncio.to_thread(StrategyEngine.analyze_data, symbol, ohlcv)
                 return res
@@ -217,60 +218,55 @@ class TradingSystem:
             
             try:
                 tickers = await self.exchange.fetch_tickers()
+                valid_coins = [sym for sym, data in tickers.items() if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']) and data.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT]
                 
-                valid_coins = []
-                for sym, data in tickers.items():
-                    if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
-                        vol_24h = data.get('quoteVolume', 0)
-                        if vol_24h >= Config.MIN_24H_VOLUME_USDT:
-                            valid_coins.append({'sym': sym, 'vol': vol_24h})
+                Log.print(f"⚡ Fast Scan Started on {len(valid_coins)} Pairs...", Log.BLUE)
                 
-                valid_coins.sort(key=lambda x: x['vol'], reverse=True)
-                targets = [c['sym'] for c in valid_coins]
-                
-                Log.print(f"⚡ Flawless Scan Started on {len(targets)} Pairs...", Log.BLUE)
-                
-                tasks = [asyncio.create_task(self.fetch_and_analyze(sym)) for sym in targets]
-                
-                for coro in asyncio.as_completed(tasks):
-                    if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
-                        break 
+                chunk_size = 30
+                for i in range(0, len(valid_coins), chunk_size):
+                    if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     
-                    res = await coro
-                    if res and res['symbol'] not in self.active_trades:
-                        sym, entry, sl, tp, side = res['symbol'], res['entry'], res['sl'], res['tp'], res['side']
-                        lev, strat, score = res['leverage'], res['strat'], res['score']
+                    chunk = valid_coins[i:i+chunk_size]
+                    tasks = [asyncio.create_task(self.fetch_and_analyze(sym)) for sym in chunk]
+                    
+                    for coro in asyncio.as_completed(tasks):
+                        if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                         
-                        fmt = lambda x: self.exchange.price_to_precision(sym, x)
-                        pnl_tp = abs((tp - entry) / entry) * 100 * lev
-                        pnl_sl = abs((entry - sl) / entry) * 100 * lev
-                        
-                        clean_name = sym.split(':')[0].replace('/', '')
-                        icon = "🟢" if side == "LONG" else "🔴"
-                        
-                        msg = (
-                            f"{icon} <b><code>{clean_name}</code> ({side}) SCALP</b>\n"
-                            f"────────────────\n"
-                            f"🛒 <b>Entry:</b> <code>{fmt(entry)}</code>\n"
-                            f"⚖️ <b>Leverage:</b> <b>{lev}x</b>\n"
-                            f"────────────────\n"
-                            f"🎯 <b>Target:</b> <code>{fmt(tp)}</code> (+{pnl_tp:.1f}% ROE)\n"
-                            f"🛑 <b>Stop:</b> <code>{fmt(sl)}</code> (-{pnl_sl:.1f}% ROE)\n"
-                            f"────────────────\n"
-                            f"⚡ <b>Setup:</b> <b>{strat}</b>\n"
-                            f"🔥 <b>Score:</b> <b>{score}/100</b>"
-                        )
-                        
-                        msg_id = await self.tg.send(msg)
-                        if msg_id:
-                            self.active_trades[sym] = {
-                                "entry": entry, "sl": sl, "tp": tp, "side": side, 
-                                "msg_id": msg_id, "lev": lev, "pnl_tp": pnl_tp, "pnl_sl": pnl_sl
-                            }
-                            self.stats["signals"] += 1
-                            Log.print(f"🚀 SIGNAL FIRED: {clean_name} | {strat} | Score: {score}", Log.GREEN)
+                        res = await coro
+                        if res and res['symbol'] not in self.active_trades:
+                            sym, entry, sl, tp, side = res['symbol'], res['entry'], res['sl'], res['tp'], res['side']
+                            lev, strat, score = res['leverage'], res['strat'], res['score']
+                            
+                            fmt = lambda x: self.exchange.price_to_precision(sym, x)
+                            pnl_tp = abs((tp - entry) / entry) * 100 * lev
+                            pnl_sl = abs((entry - sl) / entry) * 100 * lev
+                            
+                            clean_name = sym.split(':')[0].replace('/', '')
+                            icon = "🟢" if side == "LONG" else "🔴"
+                            
+                            msg = (
+                                f"{icon} <b><code>{clean_name}</code> ({side}) SCALP</b>\n"
+                                f"────────────────\n"
+                                f"🛒 <b>Entry:</b> <code>{fmt(entry)}</code>\n"
+                                f"⚖️ <b>Leverage:</b> <b>{lev}x</b>\n"
+                                f"────────────────\n"
+                                f"🎯 <b>Target:</b> <code>{fmt(tp)}</code> (+{pnl_tp:.1f}% ROE)\n"
+                                f"🛑 <b>Stop:</b> <code>{fmt(sl)}</code> (-{pnl_sl:.1f}% ROE)\n"
+                                f"────────────────\n"
+                                f"⚡ <b>Setup:</b> <b>{strat}</b>\n"
+                                f"🔥 <b>Score:</b> <b>{score}/100</b>"
+                            )
+                            
+                            msg_id = await self.tg.send(msg)
+                            if msg_id:
+                                self.active_trades[sym] = {
+                                    "entry": entry, "sl": sl, "tp": tp, "side": side, 
+                                    "msg_id": msg_id, "lev": lev, "pnl_tp": pnl_tp, "pnl_sl": pnl_sl
+                                }
+                                self.stats["signals"] += 1
+                                Log.print(f"🚀 SIGNAL FIRED: {clean_name} | {strat} | Lev: {lev}x", Log.GREEN)
 
-                await asyncio.sleep(5) 
+                await asyncio.sleep(3) 
                 gc.collect() 
             except Exception as e:
                 Log.print(f"Scan Error: {e}", Log.RED)
@@ -331,9 +327,6 @@ class TradingSystem:
             except: pass
             await asyncio.sleep(300)
 
-# ==========================================
-# 5. تشغيل السيرفر
-# ==========================================
 bot = TradingSystem()
 app = FastAPI()
 
@@ -343,7 +336,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ THE FLAWLESS SCALPER V101.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ ULTIMATE SCALPER V103.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
