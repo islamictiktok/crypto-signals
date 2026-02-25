@@ -283,7 +283,9 @@ async def get_signal_logic(symbol):
             distance_to_origin = abs(target_origin - entry)
             
             # فلتر جودة الصفقة
-            if distance_to_origin < (risk * 1.2): return "ERROR: Bad Risk/Reward"
+            if distance_to_origin < (risk * 1.2): 
+                del df
+                return "ERROR: Bad Risk/Reward"
 
             # الفيبوناتشي
             if side == "LONG":
@@ -302,13 +304,21 @@ async def get_signal_logic(symbol):
             pnl_sl_base = abs((entry - sl) / entry) * 100
             leverage = max(2, min(int(20.0 / pnl_sl_base), 50)) if pnl_sl_base > 0 else 10
 
-            # 💯 التقييم (100 نقطة)
-            base_score = 50
-            vol_points = min(20, vol_ratio * 5)
-            trend_points = 10 if (side=="LONG" and entry>df['ema200'].iloc[-1]) or (side=="SHORT" and entry<df['ema200'].iloc[-1]) else 0
-            rr_points = min(10, (distance_to_origin / risk) * 2) 
+            # 💯 التقييم المحسن الجديد (100 نقطة) - بدون جودة المخاطرة
+            base_score = 30
             
-            final_score = int(base_score + vol_points + trend_points + rr_points + score_boost)
+            # 1. قوة الفوليوم (25 نقطة كحد أقصى)
+            vol_points = min(25, vol_ratio * 5)
+            
+            # 2. التوافق مع الترند العام (15 نقطة)
+            trend_points = 15 if (side=="LONG" and entry>df['ema200'].iloc[-1]) or (side=="SHORT" and entry<df['ema200'].iloc[-1]) else 0
+            
+            # 3. سرعة وتذبذب العملة (10 نقاط كحد أقصى)
+            atr_pct = df['atr_pct'].iloc[-1]
+            velocity_points = min(10, atr_pct * 3)
+            
+            # المجموع = الأساس (30) + الفوليوم (حتى 25) + الترند (15) + السرعة (حتى 10) + مكافأة الاستراتيجية (6-20)
+            final_score = int(base_score + vol_points + trend_points + velocity_points + score_boost)
             final_score = min(100, final_score)
 
             # تنظيف الرام يدوياً لضمان كفاءة السيرفر
@@ -328,23 +338,30 @@ async def get_signal_logic(symbol):
     except Exception as e: return f"ERROR"
 
 # ==========================================
-# 4. إدارة البيانات والمراقبة
+# 4. محرك الطوابير والعمال الموازية 🚀 (QUEUE WORKER ENGINE)
 # ==========================================
-sem = asyncio.Semaphore(40) # 🚨 تعديل: زيادة الخيوط لـ 40 لتسريع الفحص إلى أقصى حد
 class DataManager:
     def __init__(self):
         self.active_trades = {}
         self.stats = {"signals": 0, "tp_hits": 0, "sl_hits": 0, "net_pnl": 0.0}
 db = DataManager()
 
-async def safe_check(symbol):
-    async with sem:
-        await asyncio.sleep(0.02) # 🚨 تعديل: تقليل وقت الراحة لسرعة البرق
+# 🚨 التقنية الجديدة كلياً: العمال تسحب العملات من الطابور دون انتظار بعضها البعض
+async def queue_worker(queue, valid_signals_list):
+    while True:
         try:
-            # 🚨 تعديل: بروتوكول الهروب الزمني حتى لا يتجمد الفحص
-            return await asyncio.wait_for(get_signal_logic(symbol), timeout=7.0)
-        except Exception:
-            return "ERROR"
+            sym = await queue.get()
+            try:
+                # بروتوكول الهروب الزمني لحماية العامل من التجمد
+                res = await asyncio.wait_for(get_signal_logic(sym), timeout=5.0)
+                if isinstance(res, dict):
+                    valid_signals_list.append(res)
+            except Exception:
+                pass
+            finally:
+                queue.task_done()
+        except asyncio.CancelledError:
+            break
 
 async def monitor_trades(app_state):
     cprint("👀 15m Omniscient Tracker Started...", Log.CYAN)
@@ -425,32 +442,44 @@ async def daily_report_task(app_state):
 # ==========================================
 async def start_scanning(app_state):
     cprint("🚀 System Online: V36.0 (THE OMNISCIENT)", Log.GREEN)
-    await send_telegram_msg(f"🟢 <b>Fortress V36.0 Online.</b>\n20 Elite Strategies | Ram Optimized | Math Flawless 👁️")
+    await send_telegram_msg(f"🟢 <b>Fortress V36.0 Online.</b>\n20 Elite Strategies | Queue Worker Engine 👁️")
     
     try:
         await exchange.load_markets()
         while True:
             if len(app_state.active_trades) >= MAX_TRADES_AT_ONCE:
                 cprint(f"💤 Sleeping... {len(app_state.active_trades)} trade active.", Log.YELLOW)
-                await asyncio.sleep(10); continue # 🚨 تعديل: وقت نوم قصير جداً للرجوع السريع
+                await asyncio.sleep(10); continue 
             
             try:
                 tickers = await exchange.fetch_tickers()
                 high_liquid_symbols = []
                 for sym, data in tickers.items():
                     if 'USDT' in sym and ':' in sym: 
-                        # 🚨 تعديل: تجاهل العملات الميتة لتسريع الفحص لسرعة الضوء
-                        if any(junk in sym for junk in ['3L', '3S', '5L', '5S', 'USDC', 'TUSD', 'BUSD', 'USDD']): continue
+                        if any(junk in sym for junk in ['3L', '3S', '5L', '5S', 'USDC', 'TUSD', 'BUSD', 'USDD']):
+                            continue
                         vol_24h = data.get('quoteVolume', 0)
                         if vol_24h >= MIN_24H_VOLUME_USDT: 
                             high_liquid_symbols.append(sym)
                 
-                cprint(f"🔎 Scanning Top {len(high_liquid_symbols)} Pairs...", Log.BLUE)
+                cprint(f"🔎 Scanning Top {len(high_liquid_symbols)} Pairs [QUEUE ENGINE]...", Log.BLUE)
                 
-                tasks = [safe_check(sym) for sym in high_liquid_symbols]
-                results = await asyncio.gather(*tasks)
+                # 🚨 التقنية الجديدة كلياً للفحص السريع (Queue)
+                queue = asyncio.Queue()
+                valid_signals = []
                 
-                valid_signals = [res for res in results if isinstance(res, dict)]
+                for sym in high_liquid_symbols:
+                    queue.put_nowait(sym)
+                
+                # إطلاق 60 عامل يعملون بالتوازي لسحق الطابور في ثوانٍ
+                workers = [asyncio.create_task(queue_worker(queue, valid_signals)) for _ in range(60)]
+                
+                # ننتظر حتى ينتهي الطابور بالكامل
+                await queue.join()
+                
+                # نغلق العمال
+                for w in workers:
+                    w.cancel()
                 
                 cprint(f"📊 Scan Result: {len(valid_signals)} Elite Signals Found.", Log.YELLOW)
 
@@ -504,7 +533,7 @@ async def start_scanning(app_state):
                             app_state.stats["signals"] += 1; await asyncio.sleep(1) 
                 else:
                     cprint("📉 No Elite setups detected. Retrying...", Log.BLUE)
-                    await asyncio.sleep(15) # 🚨 تعديل: تقليل وقت إعادة الفحص إلى 15 ثانية فقط
+                    await asyncio.sleep(15) 
             except: await asyncio.sleep(5)
     except: await asyncio.sleep(10)
 
@@ -526,6 +555,7 @@ async def lifespan(app: FastAPI):
     t1.cancel(); t2.cancel(); t3.cancel(); t4.cancel() 
 
 app.router.lifespan_context = lifespan
-exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+# 🚨 إغلاق فرامل CCXT (RateLimit) للسماح بالسرعة القصوى للعمال
+exchange = ccxt.mexc({'enableRateLimit': False, 'options': {'defaultType': 'swap'}})
 if __name__ == "__main__":
     import uvicorn; uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
