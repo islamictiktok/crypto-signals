@@ -9,6 +9,7 @@ import aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import uvicorn
+from contextlib import asynccontextmanager
 
 # ==========================================
 # 1. الإعدادات المركزية (CONFIG)
@@ -449,26 +450,38 @@ class TradingSystem:
             await asyncio.sleep(300)
 
 # ==========================================
-# 5. تشغيل السيرفر (FASTAPI)
+# 5. تشغيل السيرفر (FASTAPI) والتخطي السريع
 # ==========================================
 bot = TradingSystem()
 app = FastAPI()
 
 @app.get("/", response_class=HTMLResponse)
-async def root(): return "<html><body style='background:#000;color:#0f0;text-align:center;padding:50px;'><h1>🏛️ TITAN ENGINE V50.0 ONLINE</h1></body></html>"
+async def root(): 
+    return "<html><body style='background:#000;color:#0f0;text-align:center;padding:50px;'><h1>🏛️ TITAN ENGINE V50.0 ONLINE</h1></body></html>"
+
+# 🚨 دالة التشغيل في الخلفية لضمان عدم توقف الإقلاع 🚨
+async def run_bot_background():
+    try:
+        await bot.initialize()
+        asyncio.create_task(bot.scan_market())
+        asyncio.create_task(bot.monitor_open_trades())
+        asyncio.create_task(bot.daily_report())
+        asyncio.create_task(bot.keep_alive())
+    except Exception as e:
+        Log.print(f"Error starting bot: {e}", Log.RED)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await bot.initialize()
-    t1 = asyncio.create_task(bot.scan_market())
-    t2 = asyncio.create_task(bot.monitor_open_trades())
-    t3 = asyncio.create_task(bot.daily_report())
-    t4 = asyncio.create_task(bot.keep_alive())
+    # نطلق البوت كعملية خلفية (Background Task)
+    main_task = asyncio.create_task(run_bot_background())
+    # نسمح لـ FastAPI بفتح البورت للمنصة فوراً (هذا يمنع خطأ Status 1 تماماً)
     yield
+    # في حالة الإغلاق
     await bot.shutdown()
-    for t in [t1, t2, t3, t4]: t.cancel()
+    main_task.cancel()
 
 app.router.lifespan_context = lifespan
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    # تشغيل السيرفر مع البورت الخاص بمنصة Render
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
