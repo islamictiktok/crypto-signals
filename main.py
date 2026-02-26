@@ -25,7 +25,7 @@ class Config:
     TIMEFRAME = '15m' 
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 50_000 
-    MIN_SCORE_THRESHOLD = 85 # 🚨 تم رفع الحد الأدنى لضمان صفقات VIP فقط
+    MIN_SCORE_THRESHOLD = 90 # 🚨 الجودة المطلقة
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -56,7 +56,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. المحرك الخوارزمي 🧠 (ALGO ENGINE)
+# 3. محرك الشبح الإحصائي 🧠 (THE GHOST ENGINE)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -73,39 +73,19 @@ class StrategyEngine:
             curr, prev = df.iloc[-1], df.iloc[-2]
             entry = curr['close']
 
-            # 📊 المؤشرات الرياضية الشاملة
-            df['ema9'] = ta.ema(df['close'], length=9)
+            # 📊 المؤشرات الصارمة
             df['ema21'] = ta.ema(df['close'], length=21)
             df['ema50'] = ta.ema(df['close'], length=50)
             df['ema200'] = ta.ema(df['close'], length=200)
             df['rsi'] = ta.rsi(df['close'], length=14)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
 
-            # الـ VWAP اليدوي لضمان السرعة وعدم وجود أخطاء
-            df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
-            df['vwap'] = (df['typical_price'] * df['vol']).rolling(window=20).sum() / df['vol'].rolling(window=20).sum()
-
-            # MACD
-            macd = ta.macd(df['close'])
-            if macd is not None and not macd.empty:
-                df['macd_line'] = macd.iloc[:, 0]
-            else:
-                df['macd_line'] = 0
-
-            # Stochastic
-            stoch = ta.stoch(df['high'], df['low'], df['close'])
-            if stoch is not None and not stoch.empty:
-                df['stoch_k'] = stoch.iloc[:, 0]
-                df['stoch_d'] = stoch.iloc[:, 1]
-            else:
-                df['stoch_k'], df['stoch_d'] = 50, 50
-
-            # Bollinger Bands
             bb = df.ta.bbands(length=20, std=2)
             if bb is not None and not bb.empty:
-                df['bbl'], df['bbu'] = bb.filter(like='BBL').iloc[:, 0], bb.filter(like='BBU').iloc[:, 0]
+                df['bbl'], df['bbu'] = bb.filter(like='BBL').iloc[:, 0], df.filter(like='BBU').iloc[:, 0]
+                df['bb_width'] = ((df['bbu'] - df['bbl']) / df['close']) * 100
             else:
-                df['bbl'], df['bbu'] = 0, 0
+                df['bb_width'] = 100
 
             if pd.isna(df['atr'].iloc[-1]): return None
 
@@ -114,69 +94,62 @@ class StrategyEngine:
 
             is_green = curr['close'] > curr['open']
             is_red = curr['close'] < curr['open']
+            
             body = abs(curr['close'] - curr['open'])
-            prev_body = abs(prev['close'] - prev['open'])
+            lower_wick = min(curr['open'], curr['close']) - curr['low']
+            upper_wick = curr['high'] - max(curr['open'], curr['close'])
 
             strat = ""; side = ""; base_score = 0 
 
             # ==========================================
-            # 🧨 6 استراتيجيات خوارزمية عالية الدقة (ALGO ONLY)
+            # 🧨 3 استراتيجيات (تعمل في كل ظروف السوق)
             # ==========================================
 
-            # 1. MACD Zero-Cross Surge (انفجار الماكد مع الترند)
-            if is_green and df['macd_line'].iloc[-2] <= 0 and df['macd_line'].iloc[-1] > 0 and vol_ratio > 1.2:
-                strat = "MACD Zero-Cross Surge"; side = "LONG"; base_score = 70
-            elif is_red and df['macd_line'].iloc[-2] >= 0 and df['macd_line'].iloc[-1] < 0 and vol_ratio > 1.2:
-                strat = "MACD Zero-Cross Drop"; side = "SHORT"; base_score = 70
+            # 1. Deep Exhaustion (ارتداد إحصائي من القاع/القمة)
+            if is_green and prev['close'] < df['bbl'].iloc[-2] and curr['close'] > df['bbl'].iloc[-1] and df['rsi'].iloc[-2] < 25:
+                strat = "Deep Exhaustion Recovery"; side = "LONG"; base_score = 75
+            elif is_red and prev['close'] > df['bbu'].iloc[-2] and curr['close'] < df['bbu'].iloc[-1] and df['rsi'].iloc[-2] > 75:
+                strat = "Deep Exhaustion Drop"; side = "SHORT"; base_score = 75
 
-            # 2. Stochastic Extreme Snapback (تأكيد ارتداد الاستوكاستيك باختراق EMA9)
-            elif is_green and df['stoch_k'].iloc[-2] < 20 and df['stoch_k'].iloc[-1] > df['stoch_d'].iloc[-1] and curr['close'] > df['ema9'].iloc[-1]:
-                strat = "Stoch Extreme Snapback"; side = "LONG"; base_score = 75 # تقييم أساسي أعلى للارتدادات
-            elif is_red and df['stoch_k'].iloc[-2] > 80 and df['stoch_k'].iloc[-1] < df['stoch_d'].iloc[-1] and curr['close'] < df['ema9'].iloc[-1]:
-                strat = "Stoch Extreme Snapback"; side = "SHORT"; base_score = 75
+            # 2. Trend Pullback (دخول مع الحيتان بعد تصحيح)
+            elif is_green and curr['close'] > df['ema200'].iloc[-1] and df['ema21'].iloc[-1] > df['ema50'].iloc[-1]:
+                if prev['low'] <= df['ema50'].iloc[-1] and curr['close'] > df['ema50'].iloc[-1] and lower_wick > body:
+                    strat = "Macro Trend Pullback"; side = "LONG"; base_score = 70
+            elif is_red and curr['close'] < df['ema200'].iloc[-1] and df['ema21'].iloc[-1] < df['ema50'].iloc[-1]:
+                if prev['high'] >= df['ema50'].iloc[-1] and curr['close'] < df['ema50'].iloc[-1] and upper_wick > body:
+                    strat = "Macro Trend Pullback"; side = "SHORT"; base_score = 70
 
-            # 3. Algorithmic Volumetric Engulfing (ابتلاع آلي مدعوم بزخم حقيقي)
-            elif is_green and body > df['atr'].iloc[-1] and body > prev_body * 1.5 and curr['close'] > prev['high'] and vol_ratio > 1.5:
-                strat = "Algo Volumetric Engulfing"; side = "LONG"; base_score = 75
-            elif is_red and body > df['atr'].iloc[-1] and body > prev_body * 1.5 and curr['close'] < prev['low'] and vol_ratio > 1.5:
-                strat = "Algo Volumetric Engulfing"; side = "SHORT"; base_score = 75
-
-            # 4. BB + RSI Mean Reversion (الارتداد المطاطي المضمون)
-            elif is_green and prev['close'] < df['bbl'].iloc[-2] and curr['close'] > df['bbl'].iloc[-1] and df['rsi'].iloc[-1] < 35:
-                strat = "BB + RSI Mean Reversion"; side = "LONG"; base_score = 75
-            elif is_red and prev['close'] > df['bbu'].iloc[-2] and curr['close'] < df['bbu'].iloc[-1] and df['rsi'].iloc[-1] > 65:
-                strat = "BB + RSI Mean Reversion"; side = "SHORT"; base_score = 75
-
-            # 5. VWAP Momentum Breakout (اختراق VWAP في اتجاه المايكرو ترند)
-            elif is_green and prev['close'] <= df['vwap'].iloc[-1] and curr['close'] > df['vwap'].iloc[-1] and vol_ratio > 1.5 and curr['close'] > df['ema50'].iloc[-1]:
-                strat = "VWAP Momentum Breakout"; side = "LONG"; base_score = 70
-            elif is_red and prev['close'] >= df['vwap'].iloc[-1] and curr['close'] < df['vwap'].iloc[-1] and vol_ratio > 1.5 and curr['close'] < df['ema50'].iloc[-1]:
-                strat = "VWAP Momentum Breakout"; side = "SHORT"; base_score = 70
-
-            # 6. EMA 21 Trend Pullback (سكالبينج كلاسيكي مع الترند)
-            elif is_green and df['ema9'].iloc[-1] > df['ema21'].iloc[-1] and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1] and curr['close'] > df['ema200'].iloc[-1]:
-                strat = "EMA 21 Trend Pullback"; side = "LONG"; base_score = 70
-            elif is_red and df['ema9'].iloc[-1] < df['ema21'].iloc[-1] and curr['high'] >= df['ema21'].iloc[-1] and curr['close'] < df['ema21'].iloc[-1] and curr['close'] < df['ema200'].iloc[-1]:
-                strat = "EMA 21 Trend Pullback"; side = "SHORT"; base_score = 70
+            # 3. Volatility Coil (انفجار الضغط العنيف)
+            elif df['bb_width'].iloc[-2] < 3.0 and vol_ratio > 3.0: 
+                if is_green and curr['close'] > df['bbu'].iloc[-1]:
+                    strat = "Volatility Coil Explosion"; side = "LONG"; base_score = 75
+                elif is_red and curr['close'] < df['bbl'].iloc[-1]:
+                    strat = "Volatility Coil Explosion"; side = "SHORT"; base_score = 75
 
             # ==========================================
-            # 📐 نظام التقييم الديناميكي والرافعة
+            # 📐 نظام التقييم المحسن (Titan Score V2)
             # ==========================================
             if strat != "":
                 atr = df['atr'].iloc[-1]
                 
-                # التقييم أصبح ذكياً: الفوليوم يعطي حتى 20 نقطة
-                vol_score = min(20, vol_ratio * 10) 
+                # 1. سيولة الفوليوم (حتى 15 نقطة إضافية)
+                vol_score = min(15, max(0, (vol_ratio - 1.0) * 10)) 
                 
-                # الترند يعطي 10 نقاط إذا كان متوافقاً مع EMA 200
+                # 2. التوافق مع الترند (10 نقاط)
                 trend_score = 10 if pd.notna(df['ema200'].iloc[-1]) and ((side == "LONG" and entry > df['ema200'].iloc[-1]) or (side == "SHORT" and entry < df['ema200'].iloc[-1])) else 0
                 
-                final_score = min(100, int(base_score + vol_score + trend_score))
+                # 3. جودة تذبذب العملة (5 نقاط)
+                atr_pct = (atr / entry) * 100
+                volatility_score = 5 if atr_pct > 0.2 else 0
+                
+                # المجموع الكلي الدقيق
+                final_score = min(100, int(base_score + vol_score + trend_score + volatility_score))
 
+                # الفلتر الحديدي (90 فما فوق فقط)
                 if final_score < Config.MIN_SCORE_THRESHOLD:
                     del df; return None
 
-                # سكالبينج حقيقي: ستوب لوس (1.2 ATR)، هدف (1.8 ATR لضمان 1.5 R:R)
+                # الستوب 1.2 ATR، الهدف 1.8 ATR
                 risk = atr * 1.2
                 if side == "LONG":
                     sl = entry - risk
@@ -185,7 +158,7 @@ class StrategyEngine:
                     sl = entry + risk
                     tp = entry - (risk * 1.5)
 
-                # 🚨 الرافعة الديناميكية (Dynamic Leverage) 
+                # الرافعة الديناميكية
                 risk_pct = abs((entry - sl) / entry) * 100
                 lev = max(3, min(int(15.0 / risk_pct), 50)) if risk_pct > 0 else 10 
 
@@ -214,8 +187,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 ALGO MASTER ONLINE: V106.0", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V106.0 Online.</b>\nAlgorithmic Trading Active | Dynamic Scoring 🤖📈")
+        Log.print("🚀 REFINED GHOST ALGO ONLINE: V109.0", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V109.0 Online.</b>\nUpgraded Titan Scoring | UI Improved 🎯")
 
     async def shutdown(self):
         self.running = False
@@ -243,7 +216,7 @@ class TradingSystem:
                 tickers = await self.exchange.fetch_tickers()
                 valid_coins = [sym for sym, data in tickers.items() if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']) and data.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT]
                 
-                Log.print(f"⚡ Fast Algo Scan Started on {len(valid_coins)} Pairs...", Log.BLUE)
+                Log.print(f"⚡ Ghost Scan Started on {len(valid_coins)} Pairs...", Log.BLUE)
                 
                 chunk_size = 30
                 for i in range(0, len(valid_coins), chunk_size):
@@ -267,6 +240,7 @@ class TradingSystem:
                             clean_name = sym.split(':')[0].replace('/', '')
                             icon = "🟢" if side == "LONG" else "🔴"
                             
+                            # 🚨 التعديل البصري: إضافة خط فاصل بين الهدف والاستوب
                             msg = (
                                 f"{icon} <b><code>{clean_name}</code> ({side}) SCALP</b>\n"
                                 f"────────────────\n"
@@ -274,10 +248,11 @@ class TradingSystem:
                                 f"⚖️ <b>Leverage:</b> <b>{lev}x</b>\n"
                                 f"────────────────\n"
                                 f"🎯 <b>Target:</b> <code>{fmt(tp)}</code> (+{pnl_tp:.1f}% ROE)\n"
+                                f"────────────────\n"
                                 f"🛑 <b>Stop:</b> <code>{fmt(sl)}</code> (-{pnl_sl:.1f}% ROE)\n"
                                 f"────────────────\n"
-                                f"🤖 <b>Algo Setup:</b> <b>{strat}</b>\n"
-                                f"🔥 <b>Power Score:</b> <b>{score}/100</b>"
+                                f"🤖 <b>Ghost Setup:</b> <b>{strat}</b>\n"
+                                f"🔥 <b>Titan Score:</b> <b>{score}/100</b>"
                             )
                             
                             msg_id = await self.tg.send(msg)
@@ -330,7 +305,7 @@ class TradingSystem:
             t = self.stats['wins'] + self.stats['losses']
             wr = (self.stats['wins'] / t * 100) if t > 0 else 0
             msg = (
-                f"🤖 <b>ALGO SCALPER REPORT (24H)</b> 🤖\n"
+                f"🤖 <b>GHOST ALGO REPORT (24H)</b> 🤖\n"
                 f"────────────────\n"
                 f"🎯 <b>Signals:</b> {self.stats['signals']}\n"
                 f"✅ <b>Wins:</b> {self.stats['wins']}\n"
@@ -359,7 +334,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ ALGO MASTER V106.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ REFINED GHOST ALGO V109.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
