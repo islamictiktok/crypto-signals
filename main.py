@@ -56,7 +56,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك السكالبينج الديناميكي 🧠 (THE SCALPER)
+# 3. محرك السكالبينج المطور 🧠 (PERFECTED SCALPER)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -76,6 +76,7 @@ class StrategyEngine:
             # 📊 المؤشرات الشاملة
             df['ema9'] = ta.ema(df['close'], length=9)
             df['ema21'] = ta.ema(df['close'], length=21)
+            df['ema50'] = ta.ema(df['close'], length=50)
             df['ema200'] = ta.ema(df['close'], length=200)
             df['rsi'] = ta.rsi(df['close'], length=14)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
@@ -95,46 +96,44 @@ class StrategyEngine:
             is_green = curr['close'] > curr['open']
             is_red = curr['close'] < curr['open']
             
-            micro_high = df['high'].rolling(5).max().shift(1).iloc[-1]
-            micro_low = df['low'].rolling(5).min().shift(1).iloc[-1]
             swing_low = df['low'].rolling(10).min().shift(1).iloc[-1]
             swing_high = df['high'].rolling(10).max().shift(1).iloc[-1]
 
             strat = ""; side = ""; base_score = 70 
 
             # ==========================================
-            # 🧨 استراتيجيات السكالبينج (High Frequency)
+            # 🧨 استراتيجيات السكالبينج (بعد التطوير الجذري)
             # ==========================================
 
-            # 1. اختراق المقاومات اللحظية
-            if is_green and curr['close'] > micro_high and vol_ratio > 1.2:
-                strat = "Micro Resistance Breakout"; side = "LONG"
-            elif is_red and curr['close'] < micro_low and vol_ratio > 1.2:
-                strat = "Micro Support Breakdown"; side = "SHORT"
+            # 1. VWAP + Trend Confirmation (لا دخول عكس الترند)
+            if df['ema21'].iloc[-1] > df['ema50'].iloc[-1] and prev['low'] <= df['vwap'].iloc[-1] and curr['close'] > df['vwap'].iloc[-1] and is_green and lower_wick > body:
+                strat = "VWAP Trend Bounce"; side = "LONG"
+            elif df['ema21'].iloc[-1] < df['ema50'].iloc[-1] and prev['high'] >= df['vwap'].iloc[-1] and curr['close'] < df['vwap'].iloc[-1] and is_red and upper_wick > body:
+                strat = "VWAP Trend Reject"; side = "SHORT"
 
-            # 2. تقاطع المتوسطات السريع
-            elif df['ema9'].iloc[-1] > df['ema21'].iloc[-1] and df['ema9'].iloc[-2] <= df['ema21'].iloc[-2]:
-                strat = "Fast EMA Golden Cross"; side = "LONG"
-            elif df['ema9'].iloc[-1] < df['ema21'].iloc[-1] and df['ema9'].iloc[-2] >= df['ema21'].iloc[-2]:
-                strat = "Fast EMA Death Cross"; side = "SHORT"
+            # 2. RSI V-Shape + Momentum (تأكيد اختراق EMA 9)
+            elif df['rsi'].iloc[-2] < 30 and df['rsi'].iloc[-1] >= 30 and is_green and curr['close'] > df['ema9'].iloc[-1]:
+                strat = "RSI V-Shape + Momentum"; side = "LONG"
+            elif df['rsi'].iloc[-2] > 70 and df['rsi'].iloc[-1] <= 70 and is_red and curr['close'] < df['ema9'].iloc[-1]:
+                strat = "RSI V-Shape + Momentum"; side = "SHORT"
 
-            # 3. صيد السيولة والشموع الانعكاسية
-            elif is_green and curr['low'] < swing_low and lower_wick > body * 1.5:
-                strat = "Liquidity Sweep (Pinbar)"; side = "LONG"
-            elif is_red and curr['high'] > swing_high and upper_wick > body * 1.5:
-                strat = "Liquidity Sweep (Pinbar)"; side = "SHORT"
+            # 3. Volumetric EMA Cross (تقاطع مدعوم بالفوليوم فقط)
+            elif df['ema9'].iloc[-1] > df['ema21'].iloc[-1] and df['ema9'].iloc[-2] <= df['ema21'].iloc[-2] and vol_ratio > 1.5 and body > (df['atr'].iloc[-1] * 0.5):
+                strat = "Volumetric EMA Cross"; side = "LONG"
+            elif df['ema9'].iloc[-1] < df['ema21'].iloc[-1] and df['ema9'].iloc[-2] >= df['ema21'].iloc[-2] and vol_ratio > 1.5 and body > (df['atr'].iloc[-1] * 0.5):
+                strat = "Volumetric EMA Cross"; side = "SHORT"
 
-            # 4. الارتداد العنيف من التشبع
-            elif df['rsi'].iloc[-2] < 30 and df['rsi'].iloc[-1] >= 30 and is_green:
-                strat = "RSI V-Shape Recovery"; side = "LONG"
-            elif df['rsi'].iloc[-2] > 70 and df['rsi'].iloc[-1] <= 70 and is_red:
-                strat = "RSI V-Shape Dump"; side = "SHORT"
+            # 4. Liquidity Sweep (ذيل الشمعة يجب أن يكون ضعف جسمها)
+            elif is_green and curr['low'] < swing_low and lower_wick > (body * 2) and curr['close'] > prev['close']:
+                strat = "Liquidity Sweep (Sniper)"; side = "LONG"
+            elif is_red and curr['high'] > swing_high and upper_wick > (body * 2) and curr['close'] < prev['close']:
+                strat = "Liquidity Sweep (Sniper)"; side = "SHORT"
 
-            # 5. لكمة الـ VWAP
-            elif prev['low'] <= df['vwap'].iloc[-1] and curr['close'] > df['vwap'].iloc[-1] and is_green:
-                strat = "VWAP Tap Bounce"; side = "LONG"
-            elif prev['high'] >= df['vwap'].iloc[-1] and curr['close'] < df['vwap'].iloc[-1] and is_red:
-                strat = "VWAP Tap Reject"; side = "SHORT"
+            # 5. BB Squeeze Breakout (انفجار الضغط المؤكد)
+            elif df['bb_width'].iloc[-2] < 4.0 and curr['close'] > df['bbu'].iloc[-1] and vol_ratio > 1.5:
+                strat = "BB Squeeze Pop"; side = "LONG"
+            elif df['bb_width'].iloc[-2] < 4.0 and curr['close'] < df['bbl'].iloc[-1] and vol_ratio > 1.5:
+                strat = "BB Squeeze Drop"; side = "SHORT"
 
             # ==========================================
             # 📐 نظام التقييم والرافعة الديناميكية المحسوبة
@@ -150,8 +149,8 @@ class StrategyEngine:
                 if final_score < Config.MIN_SCORE_THRESHOLD:
                     del df; return None
 
-                # سكالبينج حقيقي: ستوب لوس (1 ATR)، هدف (1.5 ATR)
-                risk = atr * 1.0
+                # سكالبينج حقيقي: ستوب لوس (1.2 ATR)، هدف (1.8 ATR لضمان 1.5 R:R)
+                risk = atr * 1.2
                 if side == "LONG":
                     sl = entry - risk
                     tp = entry + (risk * 1.5)
@@ -161,9 +160,6 @@ class StrategyEngine:
 
                 # 🚨 الرافعة الديناميكية (Dynamic Leverage) 🚨
                 risk_pct = abs((entry - sl) / entry) * 100
-                
-                # المعادلة: استهداف خسارة 15% كحد أقصى من الهامش المخصص في حالة ضرب الستوب
-                # الحد الأدنى للرافعة 3x (للعملات المجنونة)، والحد الأقصى 50x (للعملات المستقرة)
                 lev = max(3, min(int(15.0 / risk_pct), 50)) if risk_pct > 0 else 10 
 
                 del df
@@ -191,8 +187,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 ULTIMATE SCALPER ONLINE: V103.0", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V103.0 Online.</b>\nDynamic Leverage Active | Perfect Risk Control ⚖️")
+        Log.print("🚀 PERFECTED SCALPER ONLINE: V104.0", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V104.0 Online.</b>\nStrategies Perfectly Tuned for High Win Rate 🎯")
 
     async def shutdown(self):
         self.running = False
@@ -336,7 +332,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ ULTIMATE SCALPER V103.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ PERFECTED SCALPER V104.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
