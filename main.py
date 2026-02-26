@@ -16,16 +16,16 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # ==========================================
-# 1. الإعدادات المركزية (CONFIG) - فريم 5 دقائق!
+# 1. الإعدادات المركزية (CONFIG)
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TIMEFRAME = '5m'  # 🚨 تم التغيير لفريم 5 دقائق للسرعة القصوى
+    TIMEFRAME = '15m' 
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 50_000 
-    MIN_SCORE_THRESHOLD = 80 # 🚨 تم فك القيود لتتدفق الصفقات المضمونة
+    MIN_SCORE_THRESHOLD = 80 
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -56,7 +56,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك الـ 5 دقائق الصاروخي 🧠 (5M ACTION ENGINE)
+# 3. محرك السكالبينج الديناميكي 🧠 (THE SCALPER)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -73,86 +73,101 @@ class StrategyEngine:
             curr, prev = df.iloc[-1], df.iloc[-2]
             entry = curr['close']
 
-            # 📊 مؤشرات سريعة لفريم 5 دقائق
+            # 📊 المؤشرات الشاملة
             df['ema9'] = ta.ema(df['close'], length=9)
             df['ema21'] = ta.ema(df['close'], length=21)
+            df['ema50'] = ta.ema(df['close'], length=50)
             df['ema200'] = ta.ema(df['close'], length=200)
             df['rsi'] = ta.rsi(df['close'], length=14)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
 
-            # VWAP سريع
             df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
-            df['vwap'] = (df['typical_price'] * df['vol']).rolling(window=12).sum() / df['vol'].rolling(window=12).sum()
-
+            df['vwap'] = (df['typical_price'] * df['vol']).rolling(window=20).sum() / df['vol'].rolling(window=20).sum()
+            
+            # مؤشر البولينجر باندز للانفجارات
             bb = df.ta.bbands(length=20, std=2)
             if bb is not None and not bb.empty:
-                df['bbl'], df['bbu'] = bb.filter(like='BBL').iloc[:, 0], df.filter(like='BBU').iloc[:, 0]
+                df['bbl'], df['bbu'] = bb.filter(like='BBL').iloc[:, 0], bb.filter(like='BBU').iloc[:, 0]
                 df['bb_width'] = ((df['bbu'] - df['bbl']) / df['close']) * 100
             else:
                 df['bb_width'] = 100
+                df['bbl'], df['bbu'] = 0, 0
 
             if pd.isna(df['atr'].iloc[-1]): return None
 
             avg_vol = df['vol'].iloc[-15:-1].mean()
             vol_ratio = max(curr['vol'], prev['vol']) / avg_vol if avg_vol > 0 else 0
 
-            is_green = curr['close'] > curr['open']
-            is_red = curr['close'] < curr['open']
             body = abs(curr['close'] - curr['open'])
+            prev_body = abs(prev['close'] - prev['open'])
             lower_wick = min(curr['open'], curr['close']) - curr['low']
             upper_wick = curr['high'] - max(curr['open'], curr['close'])
 
-            strat = ""; side = ""; base_score = 70 # 🚨 تقييم أساسي قوي لضمان إرسال الصفقات
+            is_green = curr['close'] > curr['open']
+            is_red = curr['close'] < curr['open']
+            prev_green = prev['close'] > prev['open']
+            prev_red = prev['close'] < prev['open']
+
+            strat = ""; side = ""; base_score = 65 # 🚨 أساس منطقي يسمح بدخول السيولة للتقييم
 
             # ==========================================
-            # 🧨 استراتيجيات الـ 5 دقائق الخاطفة والمضمونة
+            # 🧨 استراتيجيات السكالبينج (قوية جدا ومتوازنة)
             # ==========================================
 
-            # 1. رصاصة التقاطع (5m Momentum Cross): زحف سريع مع بداية الترند اللحظي
-            if is_green and df['ema9'].iloc[-1] > df['ema21'].iloc[-1] and df['ema9'].iloc[-2] <= df['ema21'].iloc[-2] and vol_ratio > 1.2:
-                strat = "5m Momentum Cross"; side = "LONG"
-            elif is_red and df['ema9'].iloc[-1] < df['ema21'].iloc[-1] and df['ema9'].iloc[-2] >= df['ema21'].iloc[-2] and vol_ratio > 1.2:
-                strat = "5m Momentum Cross"; side = "SHORT"
+            # 1. Momentum Engulfing (ابتلاع الزخم مع سيولة)
+            if is_green and prev_red and curr['close'] > prev['open'] and body > prev_body and vol_ratio > 1.2:
+                strat = "Volumetric Bull Engulfing"; side = "LONG"
+            elif is_red and prev_green and curr['close'] < prev['open'] and body > prev_body and vol_ratio > 1.2:
+                strat = "Volumetric Bear Engulfing"; side = "SHORT"
 
-            # 2. انتفاضة الـ RSI (5m RSI Snapback): خطف الارتدادات المفرطة بسرعة
-            elif is_green and df['rsi'].iloc[-2] < 25 and df['rsi'].iloc[-1] >= 25 and lower_wick > body:
-                strat = "5m RSI Snapback"; side = "LONG"
-            elif is_red and df['rsi'].iloc[-2] > 75 and df['rsi'].iloc[-1] <= 75 and upper_wick > body:
-                strat = "5m RSI Snapback"; side = "SHORT"
+            # 2. RSI Snapback Confirmation (ارتداد التشبع بتأكيد تقاطع قوي)
+            elif is_green and df['rsi'].iloc[-2] < 30 and curr['close'] > df['ema9'].iloc[-1] and lower_wick > body:
+                strat = "RSI Snapback Confirmation"; side = "LONG"
+            elif is_red and df['rsi'].iloc[-2] > 70 and curr['close'] < df['ema9'].iloc[-1] and upper_wick > body:
+                strat = "RSI Snapback Confirmation"; side = "SHORT"
 
-            # 3. قفزة الـ VWAP (VWAP Jump): اختراق خط الحيتان بقوة
-            elif is_green and prev['close'] < df['vwap'].iloc[-1] and curr['close'] > df['vwap'].iloc[-1] and vol_ratio > 1.3:
-                strat = "5m VWAP Jump"; side = "LONG"
-            elif is_red and prev['close'] > df['vwap'].iloc[-1] and curr['close'] < df['vwap'].iloc[-1] and vol_ratio > 1.3:
-                strat = "5m VWAP Jump"; side = "SHORT"
+            # 3. VWAP Trend Bounce (ارتداد الـ VWAP محمي بالترند)
+            elif is_green and df['ema21'].iloc[-1] > df['ema50'].iloc[-1] and prev['low'] <= df['vwap'].iloc[-1] and curr['close'] > df['vwap'].iloc[-1]:
+                strat = "VWAP Trend Bounce"; side = "LONG"
+            elif is_red and df['ema21'].iloc[-1] < df['ema50'].iloc[-1] and prev['high'] >= df['vwap'].iloc[-1] and curr['close'] < df['vwap'].iloc[-1]:
+                strat = "VWAP Trend Reject"; side = "SHORT"
 
-            # 4. كسر الصندوق (BB Squeeze Pop): انفجار فريم الـ 5 دقائق
-            elif df['bb_width'].iloc[-2] < 2.0 and vol_ratio > 1.5: 
+            # 4. Bollinger Squeeze Pop (انفجار الضغط العرضي)
+            elif df['bb_width'].iloc[-2] < 3.5 and vol_ratio > 1.5:
                 if is_green and curr['close'] > df['bbu'].iloc[-1]:
-                    strat = "5m BB Squeeze Pop"; side = "LONG"; base_score = 75
+                    strat = "BB Squeeze Breakout"; side = "LONG"
                 elif is_red and curr['close'] < df['bbl'].iloc[-1]:
-                    strat = "5m BB Squeeze Drop"; side = "SHORT"; base_score = 75
+                    strat = "BB Squeeze Breakdown"; side = "SHORT"
+
+            # 5. EMA 21 Pinbar Pullback (تصحيح الترند بدبوس رفض)
+            elif is_green and df['ema21'].iloc[-1] > df['ema50'].iloc[-1] and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1] and lower_wick > body * 1.5:
+                strat = "EMA 21 Trend Pinbar"; side = "LONG"
+            elif is_red and df['ema21'].iloc[-1] < df['ema50'].iloc[-1] and curr['high'] >= df['ema21'].iloc[-1] and curr['close'] < df['ema21'].iloc[-1] and upper_wick > body * 1.5:
+                strat = "EMA 21 Trend Pinbar"; side = "SHORT"
 
             # ==========================================
-            # 📐 نظام التقييم الديناميكي (يتنفس مع السوق)
+            # 📐 نظام التقييم والرافعة الديناميكية المحسوبة
             # ==========================================
             if strat != "":
                 atr = df['atr'].iloc[-1]
                 
-                # الفوليوم يعطي حتى 20 نقطة
+                # تقييم ديناميكي يتنفس مع السوق
+                # الفوليوم يعطي حتى 20 نقطة إضافية
                 vol_score = min(20, vol_ratio * 10) 
                 
-                # الترند يعطي 10 نقاط
-                trend_score = 10 if pd.notna(df['ema200'].iloc[-1]) and ((side == "LONG" and entry > df['ema200'].iloc[-1]) or (side == "SHORT" and entry < df['ema200'].iloc[-1])) else 0
+                # الترند الماكرو يعطي 10 نقاط
+                macro_trend = 10 if pd.notna(df['ema200'].iloc[-1]) and ((side == "LONG" and entry > df['ema200'].iloc[-1]) or (side == "SHORT" and entry < df['ema200'].iloc[-1])) else 0
                 
-                final_score = min(100, int(base_score + vol_score + trend_score))
+                # الزخم اللحظي يعطي 5 نقاط إضافية
+                micro_trend = 5 if ((side == "LONG" and df['ema9'].iloc[-1] > df['ema21'].iloc[-1]) or (side == "SHORT" and df['ema9'].iloc[-1] < df['ema21'].iloc[-1])) else 0
+                
+                final_score = min(100, int(base_score + vol_score + macro_trend + micro_trend))
 
-                # الفلتر: يقبل من 80 فما فوق، مما يضمن غزارة صفقات عالية الجودة
+                # الفلتر الذكي: 80 فما فوق
                 if final_score < Config.MIN_SCORE_THRESHOLD:
                     del df; return None
 
-                # 🚨 الهدف والاستوب لفريم 5 دقائق (أهداف ممكنة ومضمونة جداً)
-                # الستوب = 1 ATR ، الهدف = 1.5 ATR (ضربات سريعة جداً)
+                # سكالبينج حقيقي: ستوب لوس (1 ATR)، هدف (1.5 ATR)
                 risk = atr * 1.0
                 if side == "LONG":
                     sl = entry - risk
@@ -161,9 +176,12 @@ class StrategyEngine:
                     sl = entry + risk
                     tp = entry - (risk * 1.5)
 
-                # الرافعة الديناميكية بناءً على فريم الـ 5 دقائق
+                # 🚨 الرافعة الديناميكية (Dynamic Leverage) 🚨
                 risk_pct = abs((entry - sl) / entry) * 100
-                lev = max(5, min(int(15.0 / risk_pct), 50)) if risk_pct > 0 else 20 
+                
+                # المعادلة: استهداف خسارة 15% كحد أقصى من الهامش المخصص في حالة ضرب الستوب
+                # الحد الأدنى للرافعة 3x (للعملات المجنونة)، والحد الأقصى 50x (للعملات المستقرة)
+                lev = max(3, min(int(15.0 / risk_pct), 50)) if risk_pct > 0 else 10 
 
                 del df
                 return {
@@ -190,8 +208,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 THE 5-MIN MACHINE ONLINE: V111.0", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V111.0 Online.</b>\n5-Minute Timeframe Active | High Frequency Mode ⚡")
+        Log.print("🚀 ULTIMATE SCALPER ONLINE: V112.0", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V112.0 Online.</b>\nDynamic Leverage Active | Perfect Risk Control ⚖️")
 
     async def shutdown(self):
         self.running = False
@@ -200,8 +218,7 @@ class TradingSystem:
 
     async def fetch_and_analyze(self, symbol):
         try:
-            # تقليل الليمت لـ 250 لسرعة جلب البيانات لفريم الـ 5 دقائق
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=250) 
+            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=300) 
             if ohlcv:
                 res = await asyncio.to_thread(StrategyEngine.analyze_data, symbol, ohlcv)
                 return res
@@ -220,7 +237,7 @@ class TradingSystem:
                 tickers = await self.exchange.fetch_tickers()
                 valid_coins = [sym for sym, data in tickers.items() if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']) and data.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT]
                 
-                Log.print(f"⚡ 5m Fast Scan Started on {len(valid_coins)} Pairs...", Log.BLUE)
+                Log.print(f"⚡ Fast Scan Started on {len(valid_coins)} Pairs...", Log.BLUE)
                 
                 chunk_size = 30
                 for i in range(0, len(valid_coins), chunk_size):
@@ -245,17 +262,16 @@ class TradingSystem:
                             icon = "🟢" if side == "LONG" else "🔴"
                             
                             msg = (
-                                f"{icon} <b><code>{clean_name}</code> ({side}) 5m SCALP</b>\n"
+                                f"{icon} <b><code>{clean_name}</code> ({side}) SCALP</b>\n"
                                 f"────────────────\n"
                                 f"🛒 <b>Entry:</b> <code>{fmt(entry)}</code>\n"
                                 f"⚖️ <b>Leverage:</b> <b>{lev}x</b>\n"
                                 f"────────────────\n"
                                 f"🎯 <b>Target:</b> <code>{fmt(tp)}</code> (+{pnl_tp:.1f}% ROE)\n"
-                                f"────────────────\n"
                                 f"🛑 <b>Stop:</b> <code>{fmt(sl)}</code> (-{pnl_sl:.1f}% ROE)\n"
                                 f"────────────────\n"
-                                f"⚡ <b>5m Setup:</b> <b>{strat}</b>\n"
-                                f"🔥 <b>Action Score:</b> <b>{score}/100</b>"
+                                f"⚡ <b>Setup:</b> <b>{strat}</b>\n"
+                                f"🔥 <b>Score:</b> <b>{score}/100</b>"
                             )
                             
                             msg_id = await self.tg.send(msg)
@@ -267,7 +283,7 @@ class TradingSystem:
                                 self.stats["signals"] += 1
                                 Log.print(f"🚀 SIGNAL FIRED: {clean_name} | {strat} | Lev: {lev}x", Log.GREEN)
 
-                await asyncio.sleep(2) # انتظار قليل جداً لضمان سرعة الفحص
+                await asyncio.sleep(3) 
                 gc.collect() 
             except Exception as e:
                 Log.print(f"Scan Error: {e}", Log.RED)
@@ -286,21 +302,21 @@ class TradingSystem:
                     hit_tp = (price >= trade['tp']) if side == "LONG" else (price <= trade['tp'])
                     
                     if hit_sl:
-                        msg = f"🛑 <b>5m Scalp Closed at SL</b> (-{trade['pnl_sl']:.1f}% ROE)"
+                        msg = f"🛑 <b>Scalp Closed at SL</b> (-{trade['pnl_sl']:.1f}% ROE)"
                         self.stats['losses'] += 1
                         self.stats['net_pnl'] -= trade['pnl_sl']
                         await self.tg.send(msg, trade['msg_id'])
                         del self.active_trades[sym]
                         
                     elif hit_tp:
-                        msg = f"✅ <b>5m TARGET SMASHED!</b> (+{trade['pnl_tp']:.1f}% ROE) 💸"
+                        msg = f"✅ <b>TARGET SMASHED!</b> (+{trade['pnl_tp']:.1f}% ROE) 💸"
                         self.stats['wins'] += 1
                         self.stats['net_pnl'] += trade['pnl_tp']
                         await self.tg.send(msg, trade['msg_id'])
                         del self.active_trades[sym]
                         
                 except: pass
-            await asyncio.sleep(1) # فحص الأهداف كل ثانية واحدة لسرعة فريم الـ 5 دقائق
+            await asyncio.sleep(2) 
 
     async def daily_report(self):
         while self.running:
@@ -308,7 +324,7 @@ class TradingSystem:
             t = self.stats['wins'] + self.stats['losses']
             wr = (self.stats['wins'] / t * 100) if t > 0 else 0
             msg = (
-                f"⚡ <b>5-MIN MACHINE REPORT (24H)</b> ⚡\n"
+                f"⚡ <b>SCALP SNIPER REPORT (24H)</b> ⚡\n"
                 f"────────────────\n"
                 f"🎯 <b>Signals:</b> {self.stats['signals']}\n"
                 f"✅ <b>Wins:</b> {self.stats['wins']}\n"
@@ -337,7 +353,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ THE 5-MIN MACHINE V111.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ ULTIMATE SCALPER V112.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
