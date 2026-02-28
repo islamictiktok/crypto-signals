@@ -254,16 +254,14 @@ class TradingSystem:
                                 targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{fmt(tps[idx])}</code> (+{pnls[idx]:.1f}%)\n"
 
                             msg = (
-                                f"{icon} <b><code>{clean_name}</code> ({side}) 1H PRO SETUP</b>\n"
+                                f"{icon} <b><code>{clean_name}</code> ({side})</b>\n"
                                 f"────────────────\n"
                                 f"🛒 <b>Entry:</b> <code>{fmt(entry)}</code>\n"
                                 f"⚖️ <b>Leverage:</b> <b>{lev}x</b>\n"
                                 f"────────────────\n"
                                 f"{targets_msg}"
                                 f"────────────────\n"
-                                f"🛑 <b>Stop Loss:</b> <code>{fmt(sl)}</code> (-{pnl_sl:.1f}% ROE)\n"
-                                f"────────────────\n"
-                                f"📐 <b>Pattern:</b> <b>{strat}</b>"
+                                f"🛑 <b>Stop Loss:</b> <code>{fmt(sl)}</code> (-{pnl_sl:.1f}% ROE)"
                             )
                             
                             msg_id = await self.tg.send(msg)
@@ -298,8 +296,12 @@ class TradingSystem:
                             msg = f"🛑 <b>Trade Closed at SL</b> (-{trade['pnl_sl']:.1f}% ROE)"
                             self.stats['losses'] += 1
                             self.stats['net_pnl'] -= trade['pnl_sl']
+                        elif step == 1:
+                            # السعر حقق الهدف الأول، ثم عاد وضرب الستوب عند نقطة الدخول
+                            msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (+0.0% ROE)"
                         else:
-                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> (+{trade['pnls'][step-1]:.1f}% ROE)"
+                            # السعر حقق أهدافاً أخرى وعاد لضرب الستوب المتحرك للهدف الذي قبله
+                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> (+{trade['pnls'][step-2]:.1f}% ROE)"
                         
                         await self.tg.send(msg, trade['msg_id'])
                         del self.active_trades[sym]
@@ -337,7 +339,7 @@ class TradingSystem:
             t = self.stats['wins'] + self.stats['losses']
             wr = (self.stats['wins'] / t * 100) if t > 0 else 0
             msg = (
-                f"📈 <b>WALL STREET MASTER REPORT (24H)</b> 📉\n"
+                f"📈 <b>DAILY REPORT (24H)</b> 📉\n"
                 f"────────────────\n"
                 f"🎯 <b>Signals:</b> {self.stats['signals']}\n"
                 f"✅ <b>Wins (Hit TP1+):</b> {self.stats['wins']}\n"
