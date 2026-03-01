@@ -116,6 +116,10 @@ class StrategyEngine:
 
             if upper_wick > body * 2.0 or lower_wick > body * 2.0: return None
 
+            # 🚨 1. فلتر قتل الـ FOMO: يمنع الدخول في الشموع العملاقة التي استنزفت حركتها
+            if body > (df['atr'].iloc[-1] * 2.5): 
+                return None # القطار فات، تجاهل العملة لتجنب الانعكاس!
+
             strong_body = body > (df['atr'].iloc[-1] * 0.7)
             
             df['body_size'] = abs(df['close'] - df['open'])
@@ -126,12 +130,13 @@ class StrategyEngine:
             clean_long_wick = upper_wick < (body * 0.4)
             clean_short_wick = lower_wick < (body * 0.4)
 
-            # 🚀 تحسين: فلتر "تناغم الترند" لمنع فخاخ التذبذب الجانبي
             trend_aligned_long = df['ema21'].iloc[-1] > df['ema50'].iloc[-1]
             trend_aligned_short = df['ema21'].iloc[-1] < df['ema50'].iloc[-1]
 
-            macro_bullish = (curr['close'] > df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] > 45) and trend_aligned_long
-            macro_bearish = (curr['close'] < df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] < 55) and trend_aligned_short
+            # 🚨 2. فلتر التشبع لقتل الـ FOMO: سقف أعلى وأدنى للـ RSI
+            # لا نشتري إذا كان RSI فوق 75 (قمة)، ولا نبيع إذا كان أقل من 25 (قاع)
+            macro_bullish = (curr['close'] > df['ema400'].iloc[-1]) and (45 < df['rsi'].iloc[-1] < 75) and trend_aligned_long
+            macro_bearish = (curr['close'] < df['ema400'].iloc[-1]) and (25 < df['rsi'].iloc[-1] < 55) and trend_aligned_short
 
             strat = ""; side = ""
 
@@ -160,24 +165,20 @@ class StrategyEngine:
                  strat = "Inverse H&S / Double Bottom"; side = "LONG"
 
             # ==========================================
-            # 📐 الأهداف الديناميكية والستوب الهيكلي (مخصص لكل عملة)
+            # 📐 الأهداف الديناميكية والستوب الهيكلي
             # ==========================================
             if strat != "":
                 atr = float(df['atr'].iloc[-1])
                 
-                # 🚀 تحسين: الستوب لوس الهيكلي (حسب دعوم ومقاومات العملة نفسها)
                 if side == "LONG":
-                    # أسفل آخر قاع قريب (Swing Low) مع مسافة أمان
                     struct_sl = df['ll5'].iloc[-1]
                     sl = min(entry - (atr * 1.2), struct_sl - (atr * 0.3))
                 else:
-                    # أعلى آخر قمة قريبة (Swing High) مع مسافة أمان
                     struct_sl = df['hh5'].iloc[-1]
                     sl = max(entry + (atr * 1.2), struct_sl + (atr * 0.3))
 
-                # حماية: التأكد أن الستوب ليس بعيداً جداً أو قريباً جداً
-                max_risk = entry * 0.15 # أقصى هبوط 15%
-                min_risk = entry * 0.005 # أدنى هبوط 0.5%
+                max_risk = entry * 0.15 
+                min_risk = entry * 0.005 
                 
                 risk_abs = abs(entry - sl)
                 risk_abs = max(min_risk, min(max_risk, risk_abs))
@@ -193,8 +194,6 @@ class StrategyEngine:
                 risk_pct = (risk_abs / entry) * 100
                 lev = max(2, min(int(15.0 / risk_pct), 50)) if risk_pct > 0 else 10 
 
-                # 🚀 تحسين: أهداف مبنية على Risk/Reward حقيقي يتناسب مع طبيعة العملة
-                # الهدف الأول يعادل 0.75 من المخاطرة، الثاني 1.5، وهكذا...
                 step_size = risk_abs * 0.75 
 
                 for i in range(1, 11):
