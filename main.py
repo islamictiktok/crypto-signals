@@ -101,6 +101,11 @@ class StrategyEngine:
 
             if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema400'].iloc[-1]): return None
 
+            # 🚨 فلتر الجودة 1: استبعاد العملات ذات التذبذب الضعيف
+            atr_pct = (df['atr'].iloc[-1] / entry) * 100
+            if atr_pct < 0.25:
+                del df; return None
+
             avg_vol = df['vol'].iloc[-20:-1].mean()
             vol_ratio = max(curr['vol'], prev['vol']) / avg_vol if avg_vol > 0 else 0
 
@@ -112,8 +117,10 @@ class StrategyEngine:
 
             # 🚨 فلتر الكسر الحقيقي (يجب أن يكون جسم الشمعة كبيراً ويمثل كسر حقيقي وليس ذيلاً)
             strong_body = body > (df['atr'].iloc[-1] * 0.7)
-            # تحسين بسيط جداً لمنع الشموع ذات الذيول الخبيثة جداً من الخداع، دون خنق البوت
-            clean_break = upper_wick < body and lower_wick < body
+
+            # 🚨 فلتر الجودة 2: كسر نظيف بدون ذيول معاكسة قوية
+            clean_long_breakout = upper_wick < (body * 0.8)
+            clean_short_breakout = lower_wick < (body * 0.8)
             
             # 🚨 فلتر الماكرو ترند (لا تتداول ضد اتجاه الحيتان الأكبر)
             macro_bullish = curr['close'] > df['ema400'].iloc[-1]
@@ -132,23 +139,23 @@ class StrategyEngine:
                 strat = "Break & Retest Pattern"; side = "SHORT"
 
             # 2. Support Breakdown (كسر الدعم القوي / المثلث الهابط)
-            elif is_red and curr['close'] < df['ll20'].iloc[-1] and strong_body and clean_break and vol_ratio > 1.5 and macro_bearish:
+            elif is_red and curr['close'] < df['ll20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bearish and clean_short_breakout:
                 strat = "Support Breakdown / Bearish Triangle"; side = "SHORT"
 
             # 3. Resistance Breakout (اختراق المقاومة / المثلث الصاعد / القاع الدائري)
-            elif is_green and curr['close'] > df['hh20'].iloc[-1] and strong_body and clean_break and vol_ratio > 1.5 and macro_bullish:
+            elif is_green and curr['close'] > df['hh20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bullish and clean_long_breakout:
                 strat = "Resistance Breakout / Bullish Triangle"; side = "LONG"
 
             # 4. Bump and Run Reversal (نموذج القفزة والهروب - انهيار النشوة)
-            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and clean_break and vol_ratio > 1.5:
+            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_ratio > 1.5 and clean_short_breakout:
                 strat = "Bump and Run Reversal"; side = "SHORT"
 
             # 5. H&S / Double Top (الرأس والكتفين / القمة المزدوجة - مع دايفرجنس)
-            elif is_red and curr['close'] < df['ll5'].iloc[-1] and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].max() > df['ema50'].iloc[-1] and strong_body and clean_break and vol_ratio > 1.2 and macro_bearish:
+            elif is_red and curr['close'] < df['ll5'].iloc[-1] and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].max() > df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bearish:
                  strat = "Head & Shoulders / Double Top"; side = "SHORT"
 
             # 6. Inverse H&S / Double Bottom (الرأس والكتفين المقلوب / القاع المزدوج)
-            elif is_green and curr['close'] > df['hh5'].iloc[-1] and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].min() < df['ema50'].iloc[-1] and strong_body and clean_break and vol_ratio > 1.2 and macro_bullish:
+            elif is_green and curr['close'] > df['hh5'].iloc[-1] and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].min() < df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bullish:
                  strat = "Inverse H&S / Double Bottom"; side = "LONG"
 
             # ==========================================
@@ -263,23 +270,21 @@ class TradingSystem:
                                 targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{fmt(tps[idx])}</code> (+{pnls[idx]:.1f}%)\n"
 
                             msg = (
-                                f"{icon} <b><code>{clean_name}</code> ({side}) 1H PRO SETUP</b>\n"
+                                f"{icon} <b><code>{clean_name}</code> ({side})</b>\n"
                                 f"────────────────\n"
                                 f"🛒 <b>Entry:</b> <code>{fmt(entry)}</code>\n"
                                 f"⚖️ <b>Leverage:</b> <b>{lev}x</b>\n"
                                 f"────────────────\n"
                                 f"{targets_msg}"
                                 f"────────────────\n"
-                                f"🛑 <b>Stop Loss:</b> <code>{fmt(sl)}</code> ({pnl_sl_raw:.1f}% ROE)\n"
-                                f"────────────────\n"
-                                f"📐 <b>Pattern:</b> <b>{strat}</b>"
+                                f"🛑 <b>Stop Loss:</b> <code>{fmt(sl)}</code> ({pnl_sl_raw:.1f}% ROE)"
                             )
                             
                             msg_id = await self.tg.send(msg)
                             if msg_id:
                                 self.active_trades[sym] = {
                                     "entry": entry, "sl": sl, "tps": tps, "pnls": pnls, "side": side, 
-                                    "msg_id": msg_id, "lev": lev, "step": 0
+                                    "msg_id": msg_id, "lev": lev, "pnl_sl": pnl_sl_raw, "step": 0
                                 }
                                 self.stats["signals"] += 1
                                 Log.print(f"🚀 PATTERN FIRED: {clean_name} | {strat} | Lev: {lev}x", Log.GREEN)
@@ -306,19 +311,19 @@ class TradingSystem:
                     hit_sl = (price <= current_sl) if side == "LONG" else (price >= current_sl)
                     
                     if hit_sl:
+                        # 🚨 حساب العائد الفعلي بدقة بناءً على مكان الستوب الحالي
                         actual_roe = StrategyEngine.calc_actual_roe(entry, current_sl, side, lev)
                         
                         if step == 0:
                             msg = f"🛑 <b>Trade Closed at SL</b> ({actual_roe:.1f}% ROE)"
                             self.stats['losses'] += 1
-                            self.stats['net_pnl'] += actual_roe
                         elif step == 1:
-                            actual_roe = 0.0
+                            actual_roe = 0.0 # إجبار الربح على الصفر عند ضرب الدخول لتجنب الكسور
                             msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (0.0% ROE)"
                         else:
                             msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> (+{actual_roe:.1f}% ROE)"
-                            self.stats['net_pnl'] += actual_roe
                         
+                        self.stats['net_pnl'] += actual_roe
                         await self.tg.send(msg, trade['msg_id'])
                         del self.active_trades[sym]
                         continue
@@ -363,7 +368,7 @@ class TradingSystem:
                 f"❌ <b>Losses:</b> {self.stats['losses']}\n"
                 f"📊 <b>Win Rate:</b> {wr:.1f}%\n"
                 f"────────────────\n"
-                f"📈 <b>Net PNL:</b> {self.stats['net_pnl']:+.2f}%\n"
+                f"📈 <b>Net PNL:</b> {self.stats['net_pnl']:.2f}%\n"
             )
             await self.tg.send(msg)
             self.stats = {"signals": 0, "wins": 0, "losses": 0, "net_pnl": 0.0}
