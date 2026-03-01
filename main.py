@@ -25,7 +25,7 @@ class Config:
     TIMEFRAME = '1h'  
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 50_000 
-    MAX_SPREAD_PCT = 0.005 # فلتر السبريد لمنع العملات سيئة السيولة
+    MAX_SPREAD_PCT = 0.005 
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -61,7 +61,7 @@ class TelegramNotifier:
 class StrategyEngine:
     @staticmethod
     def calc_actual_roe(entry, exit_price, side, lev):
-        if entry == 0: return 0.0 # أمان إضافي لتجنب القسمة على صفر
+        if entry == 0: return 0.0
         if side == "LONG":
             return float(((exit_price - entry) / entry) * 100.0 * lev)
         else:
@@ -116,8 +116,7 @@ class StrategyEngine:
 
             if upper_wick > body * 2.0 or lower_wick > body * 2.0: return None
 
-            # 💡 تحسين 2: تخفيف الخنق على جسم الشمعة للسماح بصفقات أكثر جودة
-            strong_body = body > (df['atr'].iloc[-1] * 0.55)
+            strong_body = body > (df['atr'].iloc[-1] * 0.7)
             
             df['body_size'] = abs(df['close'] - df['open'])
             avg_body = df['body_size'].iloc[-10:-1].mean()
@@ -127,9 +126,12 @@ class StrategyEngine:
             clean_long_wick = upper_wick < (body * 0.4)
             clean_short_wick = lower_wick < (body * 0.4)
 
-            # 💡 تحسين 3: ضبط زوايا الزخم للتأكد من الانطلاقة الحقيقية
-            macro_bullish = (curr['close'] > df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] > 48)
-            macro_bearish = (curr['close'] < df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] < 52)
+            # 🚀 تحسين: فلتر "تناغم الترند" لمنع فخاخ التذبذب الجانبي
+            trend_aligned_long = df['ema21'].iloc[-1] > df['ema50'].iloc[-1]
+            trend_aligned_short = df['ema21'].iloc[-1] < df['ema50'].iloc[-1]
+
+            macro_bullish = (curr['close'] > df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] > 45) and trend_aligned_long
+            macro_bearish = (curr['close'] < df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] < 55) and trend_aligned_short
 
             strat = ""; side = ""
 
@@ -158,32 +160,48 @@ class StrategyEngine:
                  strat = "Inverse H&S / Double Bottom"; side = "LONG"
 
             # ==========================================
-            # 📐 توليد الـ 10 أهداف الاحترافية
+            # 📐 الأهداف الديناميكية والستوب الهيكلي (مخصص لكل عملة)
             # ==========================================
             if strat != "":
                 atr = float(df['atr'].iloc[-1])
                 
-                # 💡 تحسين 1: إعطاء مساحة تنفس أكبر للستوب لوس لحماية الصفقة من ضربات الحيتان السريعة
-                risk = atr * 1.8 
+                # 🚀 تحسين: الستوب لوس الهيكلي (حسب دعوم ومقاومات العملة نفسها)
                 if side == "LONG":
-                    sl = entry - risk
+                    # أسفل آخر قاع قريب (Swing Low) مع مسافة أمان
+                    struct_sl = df['ll5'].iloc[-1]
+                    sl = min(entry - (atr * 1.2), struct_sl - (atr * 0.3))
                 else:
-                    sl = entry + risk
+                    # أعلى آخر قمة قريبة (Swing High) مع مسافة أمان
+                    struct_sl = df['hh5'].iloc[-1]
+                    sl = max(entry + (atr * 1.2), struct_sl + (atr * 0.3))
+
+                # حماية: التأكد أن الستوب ليس بعيداً جداً أو قريباً جداً
+                max_risk = entry * 0.15 # أقصى هبوط 15%
+                min_risk = entry * 0.005 # أدنى هبوط 0.5%
+                
+                risk_abs = abs(entry - sl)
+                risk_abs = max(min_risk, min(max_risk, risk_abs))
+                
+                if side == "LONG":
+                    sl = entry - risk_abs
+                else:
+                    sl = entry + risk_abs
 
                 tps = []
                 pnls = []
                 
-                risk_pct = abs((entry - sl) / entry) * 100
+                risk_pct = (risk_abs / entry) * 100
                 lev = max(2, min(int(15.0 / risk_pct), 50)) if risk_pct > 0 else 10 
 
-                dynamic_multiplier = max(0.8, min(vol_ratio, 2.0))
-                dynamic_step = risk * 0.5 * dynamic_multiplier
+                # 🚀 تحسين: أهداف مبنية على Risk/Reward حقيقي يتناسب مع طبيعة العملة
+                # الهدف الأول يعادل 0.75 من المخاطرة، الثاني 1.5، وهكذا...
+                step_size = risk_abs * 0.75 
 
                 for i in range(1, 11):
                     if side == "LONG":
-                        target = entry + (dynamic_step * i)
+                        target = entry + (step_size * i)
                     else:
-                        target = entry - (dynamic_step * i)
+                        target = entry - (step_size * i)
                     tps.append(float(target))
                     pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
 
