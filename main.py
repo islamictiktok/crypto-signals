@@ -24,7 +24,7 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     TIMEFRAME = '1h'  
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 50_000 # تم الإرجاع إلى 50,000 كما طلبت
+    MIN_24H_VOLUME_USDT = 50_000 
     MAX_SPREAD_PCT = 0.005 # فلتر السبريد لمنع العملات سيئة السيولة
 
 class Log:
@@ -61,6 +61,7 @@ class TelegramNotifier:
 class StrategyEngine:
     @staticmethod
     def calc_actual_roe(entry, exit_price, side, lev):
+        if entry == 0: return 0.0 # أمان إضافي لتجنب القسمة على صفر
         if side == "LONG":
             return float(((exit_price - entry) / entry) * 100.0 * lev)
         else:
@@ -102,7 +103,7 @@ class StrategyEngine:
             if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema400'].iloc[-1]): return None
 
             atr_pct = (df['atr'].iloc[-1] / entry) * 100
-            if atr_pct < 0.3: return None # استبعاد العملات شبه المتوقفة تماماً فقط
+            if atr_pct < 0.3: return None 
 
             avg_vol = df['vol'].iloc[-20:-1].mean()
             vol_ratio = max(curr['vol'], prev['vol']) / avg_vol if avg_vol > 0 else 0
@@ -115,27 +116,25 @@ class StrategyEngine:
 
             if upper_wick > body * 2.0 or lower_wick > body * 2.0: return None
 
-            strong_body = body > (df['atr'].iloc[-1] * 0.7)
+            # 💡 تحسين 2: تخفيف الخنق على جسم الشمعة للسماح بصفقات أكثر جودة
+            strong_body = body > (df['atr'].iloc[-1] * 0.55)
             
-            # 🚀 طريقة التنقية الجديدة: (الانفجار السعري + جودة الإغلاق) مناسبة لسيولة 50 ألف
             df['body_size'] = abs(df['close'] - df['open'])
             avg_body = df['body_size'].iloc[-10:-1].mean()
             
-            # 1. الانفجار: جسم الشمعة الحالية أكبر من متوسط الـ 10 شموع السابقة بـ 1.5 مرة
             momentum_burst = body > (avg_body * 1.5) if avg_body > 0 else False
             
-            # 2. جودة الإغلاق: الذيل المعاكس يجب أن يكون صغيراً (لا يزيد عن 40% من الجسم)
             clean_long_wick = upper_wick < (body * 0.4)
             clean_short_wick = lower_wick < (body * 0.4)
 
-            # فلتر الماكرو ترند
-            macro_bullish = (curr['close'] > df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] > 45)
-            macro_bearish = (curr['close'] < df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] < 55)
+            # 💡 تحسين 3: ضبط زوايا الزخم للتأكد من الانطلاقة الحقيقية
+            macro_bullish = (curr['close'] > df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] > 48)
+            macro_bearish = (curr['close'] < df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] < 52)
 
             strat = ""; side = ""
 
             # ==========================================
-            # 🧨 استراتيجيات النماذج الكلاسيكية المحدثة بالفلتر
+            # 🧨 استراتيجيات النماذج الكلاسيكية
             # ==========================================
 
             if is_green and df['close'].iloc[-5:-1].max() > df['hh20'].iloc[-5] and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1] and lower_wick > body * 1.5 and macro_bullish and clean_long_wick and momentum_burst:
@@ -149,7 +148,7 @@ class StrategyEngine:
             elif is_green and curr['close'] > df['hh20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bullish and clean_long_wick and momentum_burst:
                 strat = "Resistance Breakout / Bullish Triangle"; side = "LONG"
 
-            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_ratio > 1.5 and clean_short_wick and momentum_burst:
+            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_ratio > 1.5:
                 strat = "Bump and Run Reversal"; side = "SHORT"
 
             elif is_red and curr['close'] < df['ll5'].iloc[-1] and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].max() > df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bearish and clean_short_wick and momentum_burst:
@@ -164,7 +163,8 @@ class StrategyEngine:
             if strat != "":
                 atr = float(df['atr'].iloc[-1])
                 
-                risk = atr * 1.5
+                # 💡 تحسين 1: إعطاء مساحة تنفس أكبر للستوب لوس لحماية الصفقة من ضربات الحيتان السريعة
+                risk = atr * 1.8 
                 if side == "LONG":
                     sl = entry - risk
                 else:
