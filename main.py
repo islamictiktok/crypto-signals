@@ -59,6 +59,14 @@ class TelegramNotifier:
 # ==========================================
 class StrategyEngine:
     @staticmethod
+    def calc_actual_roe(entry, exit_price, side, lev):
+        # 🚨 دالة جديدة لحساب العائد الفعلي بدقة متناهية
+        if side == "LONG":
+            return ((exit_price - entry) / entry) * 100 * lev
+        else:
+            return ((entry - exit_price) / entry) * 100 * lev
+
+    @staticmethod
     def analyze_data(symbol, ohlcv):
         try:
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
@@ -66,17 +74,18 @@ class StrategyEngine:
             df.set_index('time', inplace=True)
             df.sort_index(inplace=True)
             
+            # 🚨 التأكد من وجود بيانات كافية لحساب EMA400
             if len(df) < 450 or df['vol'].iloc[-2] == 0: 
-                return None
+                del df; return None
 
             curr, prev = df.iloc[-1], df.iloc[-2]
-            entry = curr['close']
+            entry = float(curr['close'])
 
             # 📊 المؤشرات لرصد النماذج وهيكلة السوق
             df['ema21'] = ta.ema(df['close'], length=21)
             df['ema50'] = ta.ema(df['close'], length=50)
             df['ema200'] = ta.ema(df['close'], length=200)
-            df['ema400'] = ta.ema(df['close'], length=400) # 🚨 فلتر الماكرو ترند (يعادل 4H EMA100)
+            df['ema400'] = ta.ema(df['close'], length=400) 
             df['rsi'] = ta.rsi(df['close'], length=14)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
             
@@ -86,16 +95,17 @@ class StrategyEngine:
             else:
                 df['macd_h'] = 0
 
-            # رصد القمم والقيعان الهيكلية (Swing Points)
-            df['hh20'] = df['high'].rolling(20).max().shift(1) 
-            df['ll20'] = df['low'].rolling(20).min().shift(1)  
-            df['hh5'] = df['high'].rolling(5).max().shift(1)   
-            df['ll5'] = df['low'].rolling(5).min().shift(1)
+            # 🚨 استخدام min_periods لتجنب أخطاء NaN في القمم والقيعان
+            df['hh20'] = df['high'].rolling(20, min_periods=5).max().shift(1) 
+            df['ll20'] = df['low'].rolling(20, min_periods=5).min().shift(1)  
+            df['hh5'] = df['high'].rolling(5, min_periods=2).max().shift(1)   
+            df['ll5'] = df['low'].rolling(5, min_periods=2).min().shift(1)
 
-            if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema400'].iloc[-1]): return None
+            if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema400'].iloc[-1]): 
+                del df; return None
 
             avg_vol = df['vol'].iloc[-20:-1].mean()
-            vol_ratio = max(curr['vol'], prev['vol']) / avg_vol if avg_vol > 0 else 0
+            vol_ratio = float(max(curr['vol'], prev['vol']) / avg_vol) if avg_vol > 0 else 0.0
 
             is_green = curr['close'] > curr['open']
             is_red = curr['close'] < curr['open']
@@ -103,87 +113,78 @@ class StrategyEngine:
             lower_wick = min(curr['open'], curr['close']) - curr['low']
             upper_wick = curr['high'] - max(curr['open'], curr['close'])
 
-            # 🚨 فلتر الكسر الحقيقي (يجب أن يكون جسم الشمعة كبيراً ويمثل كسر حقيقي وليس ذيلاً)
+            # 🚨 فلتر الكسر الحقيقي 
             strong_body = body > (df['atr'].iloc[-1] * 0.7)
             
-            # 🚨 فلتر الماكرو ترند (لا تتداول ضد اتجاه الحيتان الأكبر)
+            # 🚨 فلتر الماكرو ترند (إلزامي)
             macro_bullish = curr['close'] > df['ema400'].iloc[-1]
             macro_bearish = curr['close'] < df['ema400'].iloc[-1]
 
             strat = ""; side = ""
 
             # ==========================================
-            # 🧨 استراتيجيات النماذج الكلاسيكية (بمنظور المحترفين)
+            # 🧨 استراتيجيات النماذج الكلاسيكية
             # ==========================================
 
-            # 1. Break & Retest (نموذج الكسر وإعادة الاختبار - الأقوى)
             if is_green and df['close'].iloc[-5:-1].max() > df['hh20'].iloc[-5] and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1] and lower_wick > body * 1.5 and macro_bullish:
-                strat = "Break & Retest Pattern"; side = "LONG"
+                strat = "Break & Retest"; side = "LONG"
             elif is_red and df['close'].iloc[-5:-1].min() < df['ll20'].iloc[-5] and curr['high'] >= df['ema21'].iloc[-1] and curr['close'] < df['ema21'].iloc[-1] and upper_wick > body * 1.5 and macro_bearish:
-                strat = "Break & Retest Pattern"; side = "SHORT"
+                strat = "Break & Retest"; side = "SHORT"
 
-            # 2. Support Breakdown (كسر الدعم القوي / المثلث الهابط)
             elif is_red and curr['close'] < df['ll20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bearish:
-                strat = "Support Breakdown / Bearish Triangle"; side = "SHORT"
+                strat = "Support Breakdown"; side = "SHORT"
 
-            # 3. Resistance Breakout (اختراق المقاومة / المثلث الصاعد / القاع الدائري)
             elif is_green and curr['close'] > df['hh20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bullish:
-                strat = "Resistance Breakout / Bullish Triangle"; side = "LONG"
+                strat = "Resistance Breakout"; side = "LONG"
 
-            # 4. Bump and Run Reversal (نموذج القفزة والهروب - انهيار النشوة)
             elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_ratio > 1.5:
-                strat = "Bump and Run Reversal"; side = "SHORT"
+                strat = "Bump and Run"; side = "SHORT"
 
-            # 5. H&S / Double Top (الرأس والكتفين / القمة المزدوجة - مع دايفرجنس)
             elif is_red and curr['close'] < df['ll5'].iloc[-1] and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].max() > df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bearish:
-                 strat = "Head & Shoulders / Double Top"; side = "SHORT"
+                 strat = "Head & Shoulders"; side = "SHORT"
 
-            # 6. Inverse H&S / Double Bottom (الرأس والكتفين المقلوب / القاع المزدوج)
             elif is_green and curr['close'] > df['hh5'].iloc[-1] and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].min() < df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bullish:
-                 strat = "Inverse H&S / Double Bottom"; side = "LONG"
+                 strat = "Inverse H&S"; side = "LONG"
 
             # ==========================================
-            # 📐 توليد الـ 10 أهداف الاحترافية (بدون تقييم)
+            # 📐 توليد أهداف ديناميكية دقيقة
             # ==========================================
             if strat != "":
-                atr = df['atr'].iloc[-1]
+                atr = float(df['atr'].iloc[-1])
                 
-                # 🚨 الستوب لوس: تحت الشمعة الكاسرة بقليل (1.5 ATR لضمان عدم ضرب الستوب بالذيول)
+                # الستوب لوس المبدئي
                 risk = atr * 1.5
-                if side == "LONG":
-                    sl = entry - risk
-                else:
-                    sl = entry + risk
+                sl = entry - risk if side == "LONG" else entry + risk
 
-                # 🚨 توليد 10 أهداف متدرجة (10 Targets System)
-                tps = []
-                pnls = []
-                
-                # حساب الرافعة المالية (ديناميكية تحمي الحساب لـ 15% مخاطرة كحد أقصى)
+                # حساب الرافعة 
                 risk_pct = abs((entry - sl) / entry) * 100
                 lev = max(2, min(int(15.0 / risk_pct), 50)) if risk_pct > 0 else 10 
 
+                # 🚨 بناء الأهداف الديناميكية (TPs) حسب تذبذب العملة
+                tps = []
+                pnls = []
+                volatility_factor = max(0.4, min(1.2, (atr / entry) * 100)) # معامل ديناميكي للأهداف
+                
                 for i in range(1, 11):
-                    if side == "LONG":
-                        target = entry + (risk * i * 0.5)
-                    else:
-                        target = entry - (risk * i * 0.5)
+                    # الأهداف تتسع إذا كانت العملة متذبذبة
+                    offset = risk * i * volatility_factor
+                    target = entry + offset if side == "LONG" else entry - offset
                     tps.append(target)
-                    pnls.append(abs((target - entry) / entry) * 100 * lev)
+                    pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
 
-                del df
+                del df; gc.collect()
                 return {
                     "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
                     "leverage": lev, "strat": strat
                 }
 
-            del df
+            del df; gc.collect()
             return None
-        except Exception as e:
+        except Exception:
             return None
 
 # ==========================================
-# 4. مدير البوت المتطور (10 TARGETS & TRAILING SL)
+# 4. مدير البوت (الدقيق والآمن)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -196,88 +197,98 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 WALL STREET MASTER ONLINE: V300.0", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V300.0 Online.</b>\nPro Chart Patterns | Macro Trend Filter | 10 Targets 🏦")
+        Log.print("🚀 PRO PATTERN MASTER ONLINE: V400.0", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V400.0 Online.</b>\nDynamic TPs | Accurate Trailing PNL Active 🏦")
 
     async def shutdown(self):
         self.running = False
         await self.tg.stop()
         await self.exchange.close()
 
-    async def fetch_and_analyze(self, symbol):
-        try:
-            # تم رفع سحب الشموع لـ 450 لضمان حساب الـ EMA400 الخاص بالماكرو ترند
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=450) 
-            if ohlcv:
-                res = await asyncio.to_thread(StrategyEngine.analyze_data, symbol, ohlcv)
-                return res
-        except Exception: 
-            pass
+    # 🚨 نظام المحاولة (Retry Mechanism) لمنع فشل جلب البيانات
+    async def fetch_with_retry(self, symbol, limit=450, retries=3):
+        for _ in range(retries):
+            try:
+                return await self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=limit)
+            except Exception:
+                await asyncio.sleep(1)
         return None
 
     async def scan_market(self):
         while self.running:
             if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
                 Log.print(f"💤 Max Trades Reached ({len(self.active_trades)}). Waiting...", Log.YELLOW)
-                await asyncio.sleep(15)
+                await asyncio.sleep(10)
                 continue
             
             try:
                 tickers = await self.exchange.fetch_tickers()
-                valid_coins = [sym for sym, data in tickers.items() if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']) and data.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT]
+                valid_coins = []
+                for sym, data in tickers.items():
+                    if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
+                        # فلترة إضافية للسيولة لتسريع الأداء
+                        if data.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT:
+                            valid_coins.append(sym)
                 
-                Log.print(f"⚡ Pro 1H Pattern Scan Started on {len(valid_coins)} Pairs...", Log.BLUE)
+                Log.print(f"⚡ 1H Pro Scan Started on {len(valid_coins)} Pairs...", Log.BLUE)
                 
-                chunk_size = 30
+                chunk_size = 25
                 for i in range(0, len(valid_coins), chunk_size):
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     
                     chunk = valid_coins[i:i+chunk_size]
-                    tasks = [asyncio.create_task(self.fetch_and_analyze(sym)) for sym in chunk]
+                    tasks = [asyncio.create_task(self.fetch_with_retry(sym)) for sym in chunk]
                     
-                    for coro in asyncio.as_completed(tasks):
+                    for idx, coro in enumerate(asyncio.as_completed(tasks)):
                         if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                         
-                        res = await coro
-                        if res and res['symbol'] not in self.active_trades:
-                            sym, entry, sl, tps, side = res['symbol'], res['entry'], res['sl'], res['tps'], res['side']
-                            pnls, lev, strat = res['pnls'], res['leverage'], res['strat']
-                            
-                            fmt = lambda x: self.exchange.price_to_precision(sym, x)
-                            pnl_sl = abs((entry - sl) / entry) * 100 * lev
-                            
-                            clean_name = sym.split(':')[0].replace('/', '')
-                            icon = "🟢" if side == "LONG" else "🔴"
-                            
-                            targets_msg = ""
-                            for idx in range(10):
-                                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{fmt(tps[idx])}</code> (+{pnls[idx]:.1f}%)\n"
+                        ohlcv = await coro
+                        if ohlcv:
+                            # البحث عن اسم العملة المطابق للنتيجة
+                            for sym in chunk:
+                                if sym not in self.active_trades:
+                                    res = await asyncio.to_thread(StrategyEngine.analyze_data, sym, ohlcv)
+                                    if res:
+                                        sym, entry, sl, tps, side = res['symbol'], res['entry'], res['sl'], res['tps'], res['side']
+                                        pnls, lev, strat = res['pnls'], res['leverage'], res['strat']
+                                        
+                                        fmt = lambda x: self.exchange.price_to_precision(sym, x)
+                                        # حساب الستوب الفعلي بالدالة
+                                        pnl_sl_raw = StrategyEngine.calc_actual_roe(entry, sl, side, lev)
+                                        
+                                        clean_name = sym.split(':')[0].replace('/', '')
+                                        icon = "🟢" if side == "LONG" else "🔴"
+                                        
+                                        targets_msg = ""
+                                        for tidx in range(10):
+                                            targets_msg += f"🎯 <b>TP {tidx+1}:</b> <code>{fmt(tps[tidx])}</code> (+{pnls[tidx]:.1f}%)\n"
 
-                            msg = (
-                                f"{icon} <b><code>{clean_name}</code> ({side})</b>\n"
-                                f"────────────────\n"
-                                f"🛒 <b>Entry:</b> <code>{fmt(entry)}</code>\n"
-                                f"⚖️ <b>Leverage:</b> <b>{lev}x</b>\n"
-                                f"────────────────\n"
-                                f"{targets_msg}"
-                                f"────────────────\n"
-                                f"🛑 <b>Stop Loss:</b> <code>{fmt(sl)}</code> (-{pnl_sl:.1f}% ROE)"
-                            )
-                            
-                            msg_id = await self.tg.send(msg)
-                            if msg_id:
-                                self.active_trades[sym] = {
-                                    "entry": entry, "sl": sl, "tps": tps, "pnls": pnls, "side": side, 
-                                    "msg_id": msg_id, "lev": lev, "pnl_sl": pnl_sl, "step": 0
-                                }
-                                self.stats["signals"] += 1
-                                Log.print(f"🚀 PATTERN FIRED: {clean_name} | {strat} | Lev: {lev}x", Log.GREEN)
+                                        msg = (
+                                            f"{icon} <b><code>{clean_name}</code> ({side})</b>\n"
+                                            f"────────────────\n"
+                                            f"🛒 <b>Entry:</b> <code>{fmt(entry)}</code>\n"
+                                            f"⚖️ <b>Leverage:</b> <b>{lev}x</b>\n"
+                                            f"────────────────\n"
+                                            f"{targets_msg}"
+                                            f"────────────────\n"
+                                            f"🛑 <b>Stop Loss:</b> <code>{fmt(sl)}</code> ({pnl_sl_raw:.1f}% ROE)"
+                                        )
+                                        
+                                        msg_id = await self.tg.send(msg)
+                                        if msg_id:
+                                            self.active_trades[sym] = {
+                                                "entry": entry, "sl": sl, "tps": tps, "pnls": pnls, "side": side, 
+                                                "msg_id": msg_id, "lev": lev, "step": 0
+                                            }
+                                            self.stats["signals"] += 1
+                                            Log.print(f"🚀 TRADE FIRED: {clean_name} | {strat} | Lev: {lev}x", Log.GREEN)
+                                            break # منع التكرار لنفس النتيجة
 
-                await asyncio.sleep(5) 
+                await asyncio.sleep(2) 
                 gc.collect() 
             except Exception as e:
                 Log.print(f"Scan Error: {e}", Log.RED)
-                await asyncio.sleep(10)
+                await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
         while self.running:
@@ -288,25 +299,31 @@ class TradingSystem:
                     price = ticker['last']
                     side = trade['side']
                     step = trade['step']
+                    entry = trade['entry']
+                    lev = trade['lev']
+                    current_sl = trade['sl']
                     
-                    hit_sl = (price <= trade['sl']) if side == "LONG" else (price >= trade['sl'])
+                    hit_sl = (price <= current_sl) if side == "LONG" else (price >= current_sl)
                     
                     if hit_sl:
-                        if step == 0:
-                            msg = f"🛑 <b>Trade Closed at SL</b> (-{trade['pnl_sl']:.1f}% ROE)"
-                            self.stats['losses'] += 1
-                            self.stats['net_pnl'] -= trade['pnl_sl']
-                        elif step == 1:
-                            # السعر حقق الهدف الأول، ثم عاد وضرب الستوب عند نقطة الدخول
-                            msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (+0.0% ROE)"
-                        else:
-                            # السعر حقق أهدافاً أخرى وعاد لضرب الستوب المتحرك للهدف الذي قبله
-                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> (+{trade['pnls'][step-2]:.1f}% ROE)"
+                        # 🚨 حساب العائد الفعلي لحظة ضرب الستوب لوس بدقة
+                        actual_roe = StrategyEngine.calc_actual_roe(entry, current_sl, side, lev)
                         
+                        if step == 0:
+                            msg = f"🛑 <b>Trade Closed at SL</b> ({actual_roe:.1f}% ROE)"
+                            self.stats['losses'] += 1
+                        elif step == 1:
+                            msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (0.0% ROE)"
+                        else:
+                            # السعر حقق أهدافاً وعاد لضرب الستوب (نطبع العائد الفعلي لقيمة الستوب الحالي)
+                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> (+{actual_roe:.1f}% ROE)"
+                        
+                        self.stats['net_pnl'] += actual_roe
                         await self.tg.send(msg, trade['msg_id'])
                         del self.active_trades[sym]
                         continue
 
+                    # فحص الـ 10 أهداف
                     for i in range(step, 10):
                         target = trade['tps'][i]
                         hit_tp = (price >= target) if side == "LONG" else (price <= target)
@@ -314,16 +331,17 @@ class TradingSystem:
                         if hit_tp:
                             trade['step'] = i + 1
                             if i == 0:
-                                trade['sl'] = trade['entry']
+                                trade['sl'] = entry # وضع الستوب على الدخول
                                 msg = f"✅ <b>TP1 HIT! (+{trade['pnls'][i]:.1f}%)</b>\n🛡️ SL moved to Entry."
                             else:
-                                trade['sl'] = trade['tps'][i-1] 
+                                trade['sl'] = trade['tps'][i-1] # تحريك الستوب للهدف السابق
                                 msg = f"🔥 <b>TP{i+1} HIT! (+{trade['pnls'][i]:.1f}%)</b>\n📈 Trailing SL moved up."
                                 
                             if i == 9: 
-                                msg = f"🏆 <b>ALL 10 TARGETS SMASHED! (+{trade['pnls'][i]:.1f}%)</b> 🏦\nTrade Completed."
+                                actual_roe = trade['pnls'][i]
+                                msg = f"🏆 <b>ALL 10 TARGETS SMASHED! (+{actual_roe:.1f}%)</b> 🏦\nTrade Completed."
                                 self.stats['wins'] += 1
-                                self.stats['net_pnl'] += trade['pnls'][i]
+                                self.stats['net_pnl'] += actual_roe
                                 del self.active_trades[sym]
                                 
                             await self.tg.send(msg, trade['msg_id'])
@@ -331,7 +349,7 @@ class TradingSystem:
                             break 
                             
                 except: pass
-            await asyncio.sleep(3) 
+            await asyncio.sleep(2) 
 
     async def daily_report(self):
         while self.running:
@@ -339,7 +357,7 @@ class TradingSystem:
             t = self.stats['wins'] + self.stats['losses']
             wr = (self.stats['wins'] / t * 100) if t > 0 else 0
             msg = (
-                f"📈 <b>DAILY REPORT (24H)</b> 📉\n"
+                f"📈 <b>PRO BOT REPORT (24H)</b> 📉\n"
                 f"────────────────\n"
                 f"🎯 <b>Signals:</b> {self.stats['signals']}\n"
                 f"✅ <b>Wins (Hit TP1+):</b> {self.stats['wins']}\n"
@@ -368,7 +386,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER V300.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ PRO MASTER V400.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
