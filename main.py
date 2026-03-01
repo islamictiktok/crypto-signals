@@ -25,6 +25,7 @@ class Config:
     TIMEFRAME = '1h'  
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 50_000 
+    MIN_SCORE_THRESHOLD = 80 # الحد الأدنى للتقييم الصارم
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -60,6 +61,7 @@ class TelegramNotifier:
 class StrategyEngine:
     @staticmethod
     def calc_actual_roe(entry, exit_price, side, lev):
+        # حساب العائد الفعلي الدقيق
         if side == "LONG":
             return ((exit_price - entry) / entry) * 100 * lev
         else:
@@ -93,7 +95,6 @@ class StrategyEngine:
             else:
                 df['macd_h'] = 0
 
-            # رصد القمم والقيعان الهيكلية
             df['hh20'] = df['high'].rolling(20, min_periods=5).max().shift(1) 
             df['ll20'] = df['low'].rolling(20, min_periods=5).min().shift(1)  
             df['hh5'] = df['high'].rolling(5, min_periods=2).max().shift(1)   
@@ -101,9 +102,9 @@ class StrategyEngine:
 
             if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema400'].iloc[-1]): return None
 
-            # 🚨 فلتر الجودة 1: استبعاد العملات الميتة (ذات التذبذب الضعيف جداً)
+            # 🚨 1. فلتر الجودة: استبعاد العملات الميتة (الحد الأدنى للتذبذب تم رفعه لضمان حركة قوية)
             atr_pct = (df['atr'].iloc[-1] / entry) * 100
-            if atr_pct < 0.25:
+            if atr_pct < 0.30: # تم الرفع من 0.25 إلى 0.30
                 del df; return None
 
             avg_vol = df['vol'].iloc[-20:-1].mean()
@@ -115,52 +116,57 @@ class StrategyEngine:
             lower_wick = min(curr['open'], curr['close']) - curr['low']
             upper_wick = curr['high'] - max(curr['open'], curr['close'])
 
-            # 🚨 فلتر الجودة 2: الكسر النظيف (منع الاختراقات الوهمية ذات الذيول الطويلة)
+            # 🚨 2. فلتر الجودة: تسارع السيولة والكسر النظيف جداً
             strong_body = body > (df['atr'].iloc[-1] * 0.7)
-            clean_long_breakout = upper_wick < (body * 0.8) # الذيل العلوي أصغر من الجسم
-            clean_short_breakout = lower_wick < (body * 0.8) # الذيل السفلي أصغر من الجسم
+            clean_long_breakout = upper_wick < (body * 0.5) # تم التضييق (الذيل يجب أن يكون أقل من نصف الجسم)
+            clean_short_breakout = lower_wick < (body * 0.5)
+            vol_accelerating = curr['vol'] > prev['vol'] # تأكيد أن الفوليوم يتزايد الآن وليس مجرد متوسط عالي
             
             macro_bullish = curr['close'] > df['ema400'].iloc[-1]
             macro_bearish = curr['close'] < df['ema400'].iloc[-1]
 
-            strat = ""; side = ""
+            strat = ""; side = ""; base_score = 65 
 
             # ==========================================
-            # 🧨 استراتيجيات النماذج الكلاسيكية
+            # 🧨 استراتيجيات النماذج الكلاسيكية (مع فلاتر الجودة)
             # ==========================================
 
-            # 1. Break & Retest 
             if is_green and df['close'].iloc[-5:-1].max() > df['hh20'].iloc[-5] and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1] and lower_wick > body * 1.5 and macro_bullish:
                 strat = "Break & Retest"; side = "LONG"
             elif is_red and df['close'].iloc[-5:-1].min() < df['ll20'].iloc[-5] and curr['high'] >= df['ema21'].iloc[-1] and curr['close'] < df['ema21'].iloc[-1] and upper_wick > body * 1.5 and macro_bearish:
                 strat = "Break & Retest"; side = "SHORT"
 
-            # 2. Support Breakdown (مضاف فلتر الكسر النظيف)
-            elif is_red and curr['close'] < df['ll20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bearish and clean_short_breakout:
+            elif is_red and curr['close'] < df['ll20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bearish and clean_short_breakout and vol_accelerating:
                 strat = "Support Breakdown"; side = "SHORT"
 
-            # 3. Resistance Breakout (مضاف فلتر الكسر النظيف)
-            elif is_green and curr['close'] > df['hh20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bullish and clean_long_breakout:
+            elif is_green and curr['close'] > df['hh20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bullish and clean_long_breakout and vol_accelerating:
                 strat = "Resistance Breakout"; side = "LONG"
 
-            # 4. Bump and Run
-            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_ratio > 1.5 and clean_short_breakout:
+            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_ratio > 1.5 and clean_short_breakout and vol_accelerating:
                 strat = "Bump and Run"; side = "SHORT"
 
-            # 5. Head & Shoulders
             elif is_red and curr['close'] < df['ll5'].iloc[-1] and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].max() > df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bearish:
                  strat = "Head & Shoulders"; side = "SHORT"
 
-            # 6. Inverse H&S
             elif is_green and curr['close'] > df['hh5'].iloc[-1] and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].min() < df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bullish:
                  strat = "Inverse H&S"; side = "LONG"
 
             # ==========================================
-            # 📐 توليد الأهداف
+            # 📐 نظام التقييم المحسن وتوليد الأهداف
             # ==========================================
             if strat != "":
                 atr = float(df['atr'].iloc[-1])
                 
+                # 🚨 3. فلتر الجودة: تقييم ذكي يدمج الزخم
+                vol_score = min(20, vol_ratio * 10) # الفوليوم يعطي 20
+                trend_score = 10 if pd.notna(df['ema200'].iloc[-1]) and ((side == "LONG" and entry > df['ema200'].iloc[-1]) or (side == "SHORT" and entry < df['ema200'].iloc[-1])) else 0
+                mom_score = 5 if ((side == "LONG" and df['macd_h'].iloc[-1] > 0) or (side == "SHORT" and df['macd_h'].iloc[-1] < 0)) else 0 # الزخم يعطي 5
+                
+                final_score = min(100, int(base_score + vol_score + trend_score + mom_score))
+
+                if final_score < Config.MIN_SCORE_THRESHOLD:
+                    del df; return None
+
                 risk = atr * 1.5
                 sl = entry - risk if side == "LONG" else entry + risk
 
@@ -180,7 +186,7 @@ class StrategyEngine:
                 del df; gc.collect()
                 return {
                     "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
-                    "leverage": lev, "strat": strat
+                    "leverage": lev, "strat": strat, "score": final_score
                 }
 
             del df; gc.collect()
@@ -202,8 +208,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 PRO PATTERN MASTER ONLINE: V402.0", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V402.0 Online.</b>\nTrailing PNL Fixed | Pro Breakout Filters Active 🏦")
+        Log.print("🚀 PRO PATTERN MASTER ONLINE: V403.0", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V403.0 Online.</b>\nTrailing PNL Fixed | Pro Breakout Filters Active 🏦")
 
     async def shutdown(self):
         self.running = False
@@ -248,11 +254,9 @@ class TradingSystem:
                                     res = await asyncio.to_thread(StrategyEngine.analyze_data, sym, ohlcv)
                                     if res:
                                         sym, entry, sl, tps, side = res['symbol'], res['entry'], res['sl'], res['tps'], res['side']
-                                        pnls, lev = res['pnls'], res['leverage']
+                                        pnls, lev, strat, score = res['pnls'], res['leverage'], res['strat'], res['score']
                                         
                                         fmt = lambda x: self.exchange.price_to_precision(sym, x)
-                                        
-                                        # حساب خسارة الستوب الأساسي الفعلية
                                         pnl_sl_raw = StrategyEngine.calc_actual_roe(entry, sl, side, lev)
                                         
                                         clean_name = sym.split(':')[0].replace('/', '')
@@ -280,7 +284,7 @@ class TradingSystem:
                                                 "msg_id": msg_id, "lev": lev, "step": 0
                                             }
                                             self.stats["signals"] += 1
-                                            Log.print(f"🚀 TRADE FIRED: {clean_name} | Lev: {lev}x", Log.GREEN)
+                                            Log.print(f"🚀 TRADE FIRED: {clean_name} | Lev: {lev}x | Score: {score}", Log.GREEN)
                                             break
 
                 await asyncio.sleep(2) 
@@ -305,19 +309,20 @@ class TradingSystem:
                     hit_sl = (price <= current_sl) if side == "LONG" else (price >= current_sl)
                     
                     if hit_sl:
-                        # 🚨 الإصلاح الجذري: حساب الربح/الخسارة بناءً على سعر الستوب الفعلي وقت ضربه
+                        # 🚨 حساب العائد الفعلي بدقة بناءً على مكان الستوب الحالي
                         actual_roe = StrategyEngine.calc_actual_roe(entry, current_sl, side, lev)
                         
                         if step == 0:
                             msg = f"🛑 <b>Trade Closed at SL</b> ({actual_roe:.1f}% ROE)"
                             self.stats['losses'] += 1
                         elif step == 1:
+                            # 🚨 إصلاح دقيق: إجبار الـ PNL على أن يكون صفر تماماً لتجنب الكسور العشرية في التقارير
+                            actual_roe = 0.0
                             msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (0.0% ROE)"
                         else:
-                            # طباعة العائد الفعلي للستوب المتحرك
-                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> (+{actual_roe:.1f}% ROE)"
+                            # 🚨 تم إضافة علامة '+' لنسبة الربح المتحرك ليكون التنسيق احترافياً
+                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> ({actual_roe:+.1f}% ROE)"
                         
-                        # إضافة الربح/الخسارة الفعلي لصافي الأرباح
                         self.stats['net_pnl'] += actual_roe
                         await self.tg.send(msg, trade['msg_id'])
                         del self.active_trades[sym]
@@ -363,7 +368,7 @@ class TradingSystem:
                 f"❌ <b>Losses:</b> {self.stats['losses']}\n"
                 f"📊 <b>Win Rate:</b> {wr:.1f}%\n"
                 f"────────────────\n"
-                f"📈 <b>Net PNL:</b> {self.stats['net_pnl']:.2f}%\n"
+                f"📈 <b>Net PNL:</b> {self.stats['net_pnl']:+.2f}%\n" # إضافة علامة + و - لصافي الربح
             )
             await self.tg.send(msg)
             self.stats = {"signals": 0, "wins": 0, "losses": 0, "net_pnl": 0.0}
@@ -385,7 +390,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ PRO MASTER V402.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ PRO MASTER V403.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
