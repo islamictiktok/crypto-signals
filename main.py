@@ -25,7 +25,6 @@ class Config:
     TIMEFRAME = '1h'  
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 50_000 
-    MIN_SCORE_THRESHOLD = 80 # 🚨 تفعيل التقييم لفلترة الصفقات الضعيفة
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -61,7 +60,6 @@ class TelegramNotifier:
 class StrategyEngine:
     @staticmethod
     def calc_actual_roe(entry, exit_price, side, lev):
-        # 🚨 دالة جديدة لحساب العائد الفعلي بدقة متناهية
         if side == "LONG":
             return ((exit_price - entry) / entry) * 100 * lev
         else:
@@ -95,12 +93,18 @@ class StrategyEngine:
             else:
                 df['macd_h'] = 0
 
+            # رصد القمم والقيعان الهيكلية
             df['hh20'] = df['high'].rolling(20, min_periods=5).max().shift(1) 
             df['ll20'] = df['low'].rolling(20, min_periods=5).min().shift(1)  
             df['hh5'] = df['high'].rolling(5, min_periods=2).max().shift(1)   
             df['ll5'] = df['low'].rolling(5, min_periods=2).min().shift(1)
 
             if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema400'].iloc[-1]): return None
+
+            # 🚨 فلتر الجودة 1: استبعاد العملات الميتة (ذات التذبذب الضعيف جداً)
+            atr_pct = (df['atr'].iloc[-1] / entry) * 100
+            if atr_pct < 0.25:
+                del df; return None
 
             avg_vol = df['vol'].iloc[-20:-1].mean()
             vol_ratio = float(max(curr['vol'], prev['vol']) / avg_vol) if avg_vol > 0 else 0.0
@@ -111,51 +115,52 @@ class StrategyEngine:
             lower_wick = min(curr['open'], curr['close']) - curr['low']
             upper_wick = curr['high'] - max(curr['open'], curr['close'])
 
+            # 🚨 فلتر الجودة 2: الكسر النظيف (منع الاختراقات الوهمية ذات الذيول الطويلة)
             strong_body = body > (df['atr'].iloc[-1] * 0.7)
+            clean_long_breakout = upper_wick < (body * 0.8) # الذيل العلوي أصغر من الجسم
+            clean_short_breakout = lower_wick < (body * 0.8) # الذيل السفلي أصغر من الجسم
+            
             macro_bullish = curr['close'] > df['ema400'].iloc[-1]
             macro_bearish = curr['close'] < df['ema400'].iloc[-1]
 
-            strat = ""; side = ""; base_score = 65 # 🚨 التقييم الأساسي
+            strat = ""; side = ""
 
             # ==========================================
             # 🧨 استراتيجيات النماذج الكلاسيكية
             # ==========================================
 
+            # 1. Break & Retest 
             if is_green and df['close'].iloc[-5:-1].max() > df['hh20'].iloc[-5] and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1] and lower_wick > body * 1.5 and macro_bullish:
                 strat = "Break & Retest"; side = "LONG"
             elif is_red and df['close'].iloc[-5:-1].min() < df['ll20'].iloc[-5] and curr['high'] >= df['ema21'].iloc[-1] and curr['close'] < df['ema21'].iloc[-1] and upper_wick > body * 1.5 and macro_bearish:
                 strat = "Break & Retest"; side = "SHORT"
 
-            elif is_red and curr['close'] < df['ll20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bearish:
+            # 2. Support Breakdown (مضاف فلتر الكسر النظيف)
+            elif is_red and curr['close'] < df['ll20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bearish and clean_short_breakout:
                 strat = "Support Breakdown"; side = "SHORT"
 
-            elif is_green and curr['close'] > df['hh20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bullish:
+            # 3. Resistance Breakout (مضاف فلتر الكسر النظيف)
+            elif is_green and curr['close'] > df['hh20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bullish and clean_long_breakout:
                 strat = "Resistance Breakout"; side = "LONG"
 
-            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_ratio > 1.5:
+            # 4. Bump and Run
+            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_ratio > 1.5 and clean_short_breakout:
                 strat = "Bump and Run"; side = "SHORT"
 
+            # 5. Head & Shoulders
             elif is_red and curr['close'] < df['ll5'].iloc[-1] and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].max() > df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bearish:
                  strat = "Head & Shoulders"; side = "SHORT"
 
+            # 6. Inverse H&S
             elif is_green and curr['close'] > df['hh5'].iloc[-1] and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].min() < df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bullish:
                  strat = "Inverse H&S"; side = "LONG"
 
             # ==========================================
-            # 📐 نظام التقييم وتوليد الأهداف
+            # 📐 توليد الأهداف
             # ==========================================
             if strat != "":
                 atr = float(df['atr'].iloc[-1])
                 
-                # 🚨 فلتر التقييم لضمان الصفقات الممتازة فقط
-                vol_score = min(25, vol_ratio * 10) 
-                trend_score = 10 if pd.notna(df['ema200'].iloc[-1]) and ((side == "LONG" and entry > df['ema200'].iloc[-1]) or (side == "SHORT" and entry < df['ema200'].iloc[-1])) else 0
-                
-                final_score = min(100, int(base_score + vol_score + trend_score))
-
-                if final_score < Config.MIN_SCORE_THRESHOLD:
-                    del df; return None
-
                 risk = atr * 1.5
                 sl = entry - risk if side == "LONG" else entry + risk
 
@@ -175,7 +180,7 @@ class StrategyEngine:
                 del df; gc.collect()
                 return {
                     "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
-                    "leverage": lev, "strat": strat, "score": final_score # إضافة السكور للرسالة
+                    "leverage": lev, "strat": strat
                 }
 
             del df; gc.collect()
@@ -197,8 +202,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 PRO PATTERN MASTER ONLINE: V401.0", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V401.0 Online.</b>\nTrailing PNL Fixed | Strong Pattern Filter Active 🏦")
+        Log.print("🚀 PRO PATTERN MASTER ONLINE: V402.0", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V402.0 Online.</b>\nTrailing PNL Fixed | Pro Breakout Filters Active 🏦")
 
     async def shutdown(self):
         self.running = False
@@ -243,9 +248,11 @@ class TradingSystem:
                                     res = await asyncio.to_thread(StrategyEngine.analyze_data, sym, ohlcv)
                                     if res:
                                         sym, entry, sl, tps, side = res['symbol'], res['entry'], res['sl'], res['tps'], res['side']
-                                        pnls, lev, strat, score = res['pnls'], res['leverage'], res['strat'], res['score']
+                                        pnls, lev = res['pnls'], res['leverage']
                                         
                                         fmt = lambda x: self.exchange.price_to_precision(sym, x)
+                                        
+                                        # حساب خسارة الستوب الأساسي الفعلية
                                         pnl_sl_raw = StrategyEngine.calc_actual_roe(entry, sl, side, lev)
                                         
                                         clean_name = sym.split(':')[0].replace('/', '')
@@ -255,7 +262,6 @@ class TradingSystem:
                                         for tidx in range(10):
                                             targets_msg += f"🎯 <b>TP {tidx+1}:</b> <code>{fmt(tps[tidx])}</code> (+{pnls[tidx]:.1f}%)\n"
 
-                                        # 🚨 تم إزالة الكلمات التي طلبت حذفها
                                         msg = (
                                             f"{icon} <b><code>{clean_name}</code> ({side})</b>\n"
                                             f"────────────────\n"
@@ -274,7 +280,7 @@ class TradingSystem:
                                                 "msg_id": msg_id, "lev": lev, "step": 0
                                             }
                                             self.stats["signals"] += 1
-                                            Log.print(f"🚀 TRADE FIRED: {clean_name} | {strat} | Lev: {lev}x | Score: {score}", Log.GREEN)
+                                            Log.print(f"🚀 TRADE FIRED: {clean_name} | Lev: {lev}x", Log.GREEN)
                                             break
 
                 await asyncio.sleep(2) 
@@ -299,7 +305,7 @@ class TradingSystem:
                     hit_sl = (price <= current_sl) if side == "LONG" else (price >= current_sl)
                     
                     if hit_sl:
-                        # 🚨 حساب العائد الفعلي بدقة بناءً على مكان الستوب الحالي
+                        # 🚨 الإصلاح الجذري: حساب الربح/الخسارة بناءً على سعر الستوب الفعلي وقت ضربه
                         actual_roe = StrategyEngine.calc_actual_roe(entry, current_sl, side, lev)
                         
                         if step == 0:
@@ -308,9 +314,10 @@ class TradingSystem:
                         elif step == 1:
                             msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (0.0% ROE)"
                         else:
-                            # 🚨 هنا تم الإصلاح: سيتم طباعة الـ PNL الفعلي للستوب المتحرك
+                            # طباعة العائد الفعلي للستوب المتحرك
                             msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> (+{actual_roe:.1f}% ROE)"
                         
+                        # إضافة الربح/الخسارة الفعلي لصافي الأرباح
                         self.stats['net_pnl'] += actual_roe
                         await self.tg.send(msg, trade['msg_id'])
                         del self.active_trades[sym]
@@ -378,7 +385,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ PRO MASTER V401.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ PRO MASTER V402.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
