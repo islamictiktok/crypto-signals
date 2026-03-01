@@ -25,6 +25,7 @@ class Config:
     TIMEFRAME = '1h'  
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 50_000 
+    MIN_SCORE_THRESHOLD = 80 # 🚨 تفعيل التقييم لفلترة الصفقات الضعيفة
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -74,9 +75,8 @@ class StrategyEngine:
             df.set_index('time', inplace=True)
             df.sort_index(inplace=True)
             
-            # 🚨 التأكد من وجود بيانات كافية لحساب EMA400
             if len(df) < 450 or df['vol'].iloc[-2] == 0: 
-                del df; return None
+                return None
 
             curr, prev = df.iloc[-1], df.iloc[-2]
             entry = float(curr['close'])
@@ -95,14 +95,12 @@ class StrategyEngine:
             else:
                 df['macd_h'] = 0
 
-            # 🚨 استخدام min_periods لتجنب أخطاء NaN في القمم والقيعان
             df['hh20'] = df['high'].rolling(20, min_periods=5).max().shift(1) 
             df['ll20'] = df['low'].rolling(20, min_periods=5).min().shift(1)  
             df['hh5'] = df['high'].rolling(5, min_periods=2).max().shift(1)   
             df['ll5'] = df['low'].rolling(5, min_periods=2).min().shift(1)
 
-            if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema400'].iloc[-1]): 
-                del df; return None
+            if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema400'].iloc[-1]): return None
 
             avg_vol = df['vol'].iloc[-20:-1].mean()
             vol_ratio = float(max(curr['vol'], prev['vol']) / avg_vol) if avg_vol > 0 else 0.0
@@ -113,14 +111,11 @@ class StrategyEngine:
             lower_wick = min(curr['open'], curr['close']) - curr['low']
             upper_wick = curr['high'] - max(curr['open'], curr['close'])
 
-            # 🚨 فلتر الكسر الحقيقي 
             strong_body = body > (df['atr'].iloc[-1] * 0.7)
-            
-            # 🚨 فلتر الماكرو ترند (إلزامي)
             macro_bullish = curr['close'] > df['ema400'].iloc[-1]
             macro_bearish = curr['close'] < df['ema400'].iloc[-1]
 
-            strat = ""; side = ""
+            strat = ""; side = ""; base_score = 65 # 🚨 التقييم الأساسي
 
             # ==========================================
             # 🧨 استراتيجيات النماذج الكلاسيكية
@@ -147,26 +142,31 @@ class StrategyEngine:
                  strat = "Inverse H&S"; side = "LONG"
 
             # ==========================================
-            # 📐 توليد أهداف ديناميكية دقيقة
+            # 📐 نظام التقييم وتوليد الأهداف
             # ==========================================
             if strat != "":
                 atr = float(df['atr'].iloc[-1])
                 
-                # الستوب لوس المبدئي
+                # 🚨 فلتر التقييم لضمان الصفقات الممتازة فقط
+                vol_score = min(25, vol_ratio * 10) 
+                trend_score = 10 if pd.notna(df['ema200'].iloc[-1]) and ((side == "LONG" and entry > df['ema200'].iloc[-1]) or (side == "SHORT" and entry < df['ema200'].iloc[-1])) else 0
+                
+                final_score = min(100, int(base_score + vol_score + trend_score))
+
+                if final_score < Config.MIN_SCORE_THRESHOLD:
+                    del df; return None
+
                 risk = atr * 1.5
                 sl = entry - risk if side == "LONG" else entry + risk
 
-                # حساب الرافعة 
                 risk_pct = abs((entry - sl) / entry) * 100
                 lev = max(2, min(int(15.0 / risk_pct), 50)) if risk_pct > 0 else 10 
 
-                # 🚨 بناء الأهداف الديناميكية (TPs) حسب تذبذب العملة
                 tps = []
                 pnls = []
-                volatility_factor = max(0.4, min(1.2, (atr / entry) * 100)) # معامل ديناميكي للأهداف
+                volatility_factor = max(0.4, min(1.2, (atr / entry) * 100))
                 
                 for i in range(1, 11):
-                    # الأهداف تتسع إذا كانت العملة متذبذبة
                     offset = risk * i * volatility_factor
                     target = entry + offset if side == "LONG" else entry - offset
                     tps.append(target)
@@ -175,7 +175,7 @@ class StrategyEngine:
                 del df; gc.collect()
                 return {
                     "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
-                    "leverage": lev, "strat": strat
+                    "leverage": lev, "strat": strat, "score": final_score # إضافة السكور للرسالة
                 }
 
             del df; gc.collect()
@@ -184,7 +184,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت (الدقيق والآمن)
+# 4. مدير البوت (الآمن والمصحح)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -197,15 +197,14 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 PRO PATTERN MASTER ONLINE: V400.0", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V400.0 Online.</b>\nDynamic TPs | Accurate Trailing PNL Active 🏦")
+        Log.print("🚀 PRO PATTERN MASTER ONLINE: V401.0", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V401.0 Online.</b>\nTrailing PNL Fixed | Strong Pattern Filter Active 🏦")
 
     async def shutdown(self):
         self.running = False
         await self.tg.stop()
         await self.exchange.close()
 
-    # 🚨 نظام المحاولة (Retry Mechanism) لمنع فشل جلب البيانات
     async def fetch_with_retry(self, symbol, limit=450, retries=3):
         for _ in range(retries):
             try:
@@ -223,12 +222,7 @@ class TradingSystem:
             
             try:
                 tickers = await self.exchange.fetch_tickers()
-                valid_coins = []
-                for sym, data in tickers.items():
-                    if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
-                        # فلترة إضافية للسيولة لتسريع الأداء
-                        if data.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT:
-                            valid_coins.append(sym)
+                valid_coins = [sym for sym, data in tickers.items() if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']) and data.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT]
                 
                 Log.print(f"⚡ 1H Pro Scan Started on {len(valid_coins)} Pairs...", Log.BLUE)
                 
@@ -244,16 +238,14 @@ class TradingSystem:
                         
                         ohlcv = await coro
                         if ohlcv:
-                            # البحث عن اسم العملة المطابق للنتيجة
                             for sym in chunk:
                                 if sym not in self.active_trades:
                                     res = await asyncio.to_thread(StrategyEngine.analyze_data, sym, ohlcv)
                                     if res:
                                         sym, entry, sl, tps, side = res['symbol'], res['entry'], res['sl'], res['tps'], res['side']
-                                        pnls, lev, strat = res['pnls'], res['leverage'], res['strat']
+                                        pnls, lev, strat, score = res['pnls'], res['leverage'], res['strat'], res['score']
                                         
                                         fmt = lambda x: self.exchange.price_to_precision(sym, x)
-                                        # حساب الستوب الفعلي بالدالة
                                         pnl_sl_raw = StrategyEngine.calc_actual_roe(entry, sl, side, lev)
                                         
                                         clean_name = sym.split(':')[0].replace('/', '')
@@ -263,6 +255,7 @@ class TradingSystem:
                                         for tidx in range(10):
                                             targets_msg += f"🎯 <b>TP {tidx+1}:</b> <code>{fmt(tps[tidx])}</code> (+{pnls[tidx]:.1f}%)\n"
 
+                                        # 🚨 تم إزالة الكلمات التي طلبت حذفها
                                         msg = (
                                             f"{icon} <b><code>{clean_name}</code> ({side})</b>\n"
                                             f"────────────────\n"
@@ -281,8 +274,8 @@ class TradingSystem:
                                                 "msg_id": msg_id, "lev": lev, "step": 0
                                             }
                                             self.stats["signals"] += 1
-                                            Log.print(f"🚀 TRADE FIRED: {clean_name} | {strat} | Lev: {lev}x", Log.GREEN)
-                                            break # منع التكرار لنفس النتيجة
+                                            Log.print(f"🚀 TRADE FIRED: {clean_name} | {strat} | Lev: {lev}x | Score: {score}", Log.GREEN)
+                                            break
 
                 await asyncio.sleep(2) 
                 gc.collect() 
@@ -306,7 +299,7 @@ class TradingSystem:
                     hit_sl = (price <= current_sl) if side == "LONG" else (price >= current_sl)
                     
                     if hit_sl:
-                        # 🚨 حساب العائد الفعلي لحظة ضرب الستوب لوس بدقة
+                        # 🚨 حساب العائد الفعلي بدقة بناءً على مكان الستوب الحالي
                         actual_roe = StrategyEngine.calc_actual_roe(entry, current_sl, side, lev)
                         
                         if step == 0:
@@ -315,7 +308,7 @@ class TradingSystem:
                         elif step == 1:
                             msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (0.0% ROE)"
                         else:
-                            # السعر حقق أهدافاً وعاد لضرب الستوب (نطبع العائد الفعلي لقيمة الستوب الحالي)
+                            # 🚨 هنا تم الإصلاح: سيتم طباعة الـ PNL الفعلي للستوب المتحرك
                             msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> (+{actual_roe:.1f}% ROE)"
                         
                         self.stats['net_pnl'] += actual_roe
@@ -323,7 +316,6 @@ class TradingSystem:
                         del self.active_trades[sym]
                         continue
 
-                    # فحص الـ 10 أهداف
                     for i in range(step, 10):
                         target = trade['tps'][i]
                         hit_tp = (price >= target) if side == "LONG" else (price <= target)
@@ -331,10 +323,10 @@ class TradingSystem:
                         if hit_tp:
                             trade['step'] = i + 1
                             if i == 0:
-                                trade['sl'] = entry # وضع الستوب على الدخول
+                                trade['sl'] = entry 
                                 msg = f"✅ <b>TP1 HIT! (+{trade['pnls'][i]:.1f}%)</b>\n🛡️ SL moved to Entry."
                             else:
-                                trade['sl'] = trade['tps'][i-1] # تحريك الستوب للهدف السابق
+                                trade['sl'] = trade['tps'][i-1] 
                                 msg = f"🔥 <b>TP{i+1} HIT! (+{trade['pnls'][i]:.1f}%)</b>\n📈 Trailing SL moved up."
                                 
                             if i == 9: 
@@ -386,7 +378,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ PRO MASTER V400.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ PRO MASTER V401.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
