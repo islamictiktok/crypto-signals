@@ -24,7 +24,7 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     TIMEFRAME = '1h'  
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 50_000 
+    MIN_24H_VOLUME_USDT = 50_000 # السيولة مضبوطة على 50 ألف
     MAX_SPREAD_PCT = 0.005 
 
 class Log:
@@ -102,11 +102,15 @@ class StrategyEngine:
 
             if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema400'].iloc[-1]): return None
 
-            atr_pct = (df['atr'].iloc[-1] / entry) * 100
-            if atr_pct < 0.3: return None 
+            atr = float(df['atr'].iloc[-1])
+            atr_pct = (atr / entry) * 100
+            if atr_pct < 0.3: return None # استبعاد العملات المتوقفة
 
             avg_vol = df['vol'].iloc[-20:-1].mean()
             vol_ratio = max(curr['vol'], prev['vol']) / avg_vol if avg_vol > 0 else 0
+            
+            # 🚀 فلتر "ضخ الأموال اللحظي": الفوليوم الحالي يجب أن يكون في تزايد
+            vol_rising = curr['vol'] > prev['vol']
 
             is_green = curr['close'] > curr['open']
             is_red = curr['close'] < curr['open']
@@ -114,74 +118,70 @@ class StrategyEngine:
             lower_wick = min(curr['open'], curr['close']) - curr['low']
             upper_wick = curr['high'] - max(curr['open'], curr['close'])
 
+            # 🚨 فلتر مضاد الـ FOMO: يمنع الشموع العملاقة التي طارت وفات قطارها
             if upper_wick > body * 2.0 or lower_wick > body * 2.0: return None
+            if body > (atr * 1.8): return None 
 
-            # 🚨 1. فلتر قتل الـ FOMO: يمنع الدخول في الشموع العملاقة التي استنزفت حركتها
-            if body > (df['atr'].iloc[-1] * 2.5): 
-                return None # القطار فات، تجاهل العملة لتجنب الانعكاس!
+            strong_body = body > (atr * 0.6)
 
-            strong_body = body > (df['atr'].iloc[-1] * 0.7)
-            
-            df['body_size'] = abs(df['close'] - df['open'])
-            avg_body = df['body_size'].iloc[-10:-1].mean()
-            
-            momentum_burst = body > (avg_body * 1.5) if avg_body > 0 else False
-            
-            clean_long_wick = upper_wick < (body * 0.4)
-            clean_short_wick = lower_wick < (body * 0.4)
+            macro_bullish = curr['close'] > df['ema400'].iloc[-1]
+            macro_bearish = curr['close'] < df['ema400'].iloc[-1]
 
-            trend_aligned_long = df['ema21'].iloc[-1] > df['ema50'].iloc[-1]
-            trend_aligned_short = df['ema21'].iloc[-1] < df['ema50'].iloc[-1]
-
-            # 🚨 2. فلتر التشبع لقتل الـ FOMO: سقف أعلى وأدنى للـ RSI
-            # لا نشتري إذا كان RSI فوق 75 (قمة)، ولا نبيع إذا كان أقل من 25 (قاع)
-            macro_bullish = (curr['close'] > df['ema400'].iloc[-1]) and (45 < df['rsi'].iloc[-1] < 75) and trend_aligned_long
-            macro_bearish = (curr['close'] < df['ema400'].iloc[-1]) and (25 < df['rsi'].iloc[-1] < 55) and trend_aligned_short
+            # 🚀 سر الدخول المبكر (Fresh Breakout Check):
+            # التأكد أن الشمعة السابقة كانت "قبل" خط الكسر، والشمعة الحالية هي من اخترقت للتو!
+            fresh_break_res = prev['close'] <= df['hh20'].iloc[-1]
+            fresh_break_sup = prev['close'] >= df['ll20'].iloc[-1]
+            fresh_minor_res = prev['close'] <= df['hh5'].iloc[-1]
+            fresh_minor_sup = prev['close'] >= df['ll5'].iloc[-1]
 
             strat = ""; side = ""
 
             # ==========================================
-            # 🧨 استراتيجيات النماذج الكلاسيكية
+            # 🧨 استراتيجياتك الأصلية الـ 6 (مزودة بمحرك الدخول المبكر)
             # ==========================================
 
-            if is_green and df['close'].iloc[-5:-1].max() > df['hh20'].iloc[-5] and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1] and lower_wick > body * 1.5 and macro_bullish and clean_long_wick and momentum_burst:
+            # 1. Break & Retest (استراتيجية مبكرة بطبيعتها لأنها ارتدادية)
+            if is_green and df['close'].iloc[-5:-1].max() > df['hh20'].iloc[-5] and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1] and lower_wick > body * 1.5 and macro_bullish:
                 strat = "Break & Retest Pattern"; side = "LONG"
-            elif is_red and df['close'].iloc[-5:-1].min() < df['ll20'].iloc[-5] and curr['high'] >= df['ema21'].iloc[-1] and curr['close'] < df['ema21'].iloc[-1] and upper_wick > body * 1.5 and macro_bearish and clean_short_wick and momentum_burst:
+            elif is_red and df['close'].iloc[-5:-1].min() < df['ll20'].iloc[-5] and curr['high'] >= df['ema21'].iloc[-1] and curr['close'] < df['ema21'].iloc[-1] and upper_wick > body * 1.5 and macro_bearish:
                 strat = "Break & Retest Pattern"; side = "SHORT"
 
-            elif is_red and curr['close'] < df['ll20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bearish and clean_short_wick and momentum_burst:
+            # 2. Support Breakdown (تم دمج الكسر الطازج)
+            elif is_red and curr['close'] < df['ll20'].iloc[-1] and fresh_break_sup and strong_body and vol_ratio > 1.2 and vol_rising and macro_bearish:
                 strat = "Support Breakdown / Bearish Triangle"; side = "SHORT"
 
-            elif is_green and curr['close'] > df['hh20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bullish and clean_long_wick and momentum_burst:
+            # 3. Resistance Breakout (تم دمج الكسر الطازج)
+            elif is_green and curr['close'] > df['hh20'].iloc[-1] and fresh_break_res and strong_body and vol_ratio > 1.2 and vol_rising and macro_bullish:
                 strat = "Resistance Breakout / Bullish Triangle"; side = "LONG"
 
-            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_ratio > 1.5:
+            # 4. Bump and Run Reversal 
+            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_ratio > 1.2 and vol_rising:
                 strat = "Bump and Run Reversal"; side = "SHORT"
 
-            elif is_red and curr['close'] < df['ll5'].iloc[-1] and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].max() > df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bearish and clean_short_wick and momentum_burst:
+            # 5. H&S / Double Top (تم دمج الكسر الطازج للقاع الصغير)
+            elif is_red and curr['close'] < df['ll5'].iloc[-1] and fresh_minor_sup and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].max() > df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bearish:
                  strat = "Head & Shoulders / Double Top"; side = "SHORT"
 
-            elif is_green and curr['close'] > df['hh5'].iloc[-1] and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].min() < df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bullish and clean_long_wick and momentum_burst:
+            # 6. Inverse H&S / Double Bottom (تم دمج الكسر الطازج للقمة الصغيرة)
+            elif is_green and curr['close'] > df['hh5'].iloc[-1] and fresh_minor_res and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].min() < df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bullish:
                  strat = "Inverse H&S / Double Bottom"; side = "LONG"
 
             # ==========================================
-            # 📐 الأهداف الديناميكية والستوب الهيكلي
+            # 📐 الأهداف والستوب الديناميكي (حسب هيكل كل عملة)
             # ==========================================
             if strat != "":
-                atr = float(df['atr'].iloc[-1])
                 
+                # 🛡️ الستوب لوس الهيكلي (يوضع خلف آخر قمة/قاع مع حماية ATR)
                 if side == "LONG":
                     struct_sl = df['ll5'].iloc[-1]
-                    sl = min(entry - (atr * 1.2), struct_sl - (atr * 0.3))
+                    sl = min(entry - (atr * 1.2), struct_sl - (atr * 0.2))
                 else:
                     struct_sl = df['hh5'].iloc[-1]
-                    sl = max(entry + (atr * 1.2), struct_sl + (atr * 0.3))
+                    sl = max(entry + (atr * 1.2), struct_sl + (atr * 0.2))
 
-                max_risk = entry * 0.15 
-                min_risk = entry * 0.005 
-                
+                # حماية: التأكد أن الستوب ليس بعيداً جداً أو قريباً جداً
                 risk_abs = abs(entry - sl)
-                risk_abs = max(min_risk, min(max_risk, risk_abs))
+                risk_abs = max(entry * 0.005, min(entry * 0.15, risk_abs))
                 
                 if side == "LONG":
                     sl = entry - risk_abs
@@ -194,6 +194,7 @@ class StrategyEngine:
                 risk_pct = (risk_abs / entry) * 100
                 lev = max(2, min(int(15.0 / risk_pct), 50)) if risk_pct > 0 else 10 
 
+                # 🎯 الأهداف تتناسب ديناميكياً مع خطورة ومسافة الستوب لوس لكل عملة
                 step_size = risk_abs * 0.75 
 
                 for i in range(1, 11):
