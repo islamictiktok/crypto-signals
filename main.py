@@ -24,8 +24,7 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     TIMEFRAME = '1h'  
     MAX_TRADES_AT_ONCE = 3  
-    # 🚀 التعديل الأول: رفع الفوليوم لمليون دولار لاستبعاد العملات الراكدة والميتة
-    MIN_24H_VOLUME_USDT = 1_000_000 
+    MIN_24H_VOLUME_USDT = 500_000 # 🚀 تم التعديل إلى 500,000 لتصفية العملات الميتة
     MAX_SPREAD_PCT = 0.005 # فلتر السبريد لمنع العملات سيئة السيولة
 
 class Log:
@@ -85,7 +84,7 @@ class StrategyEngine:
             df['ema21'] = ta.ema(df['close'], length=21)
             df['ema50'] = ta.ema(df['close'], length=50)
             df['ema200'] = ta.ema(df['close'], length=200)
-            df['ema400'] = ta.ema(df['close'], length=400) 
+            df['ema400'] = ta.ema(df['close'], length=400) # 🚨 فلتر الماكرو ترند (يعادل 4H EMA100)
             df['rsi'] = ta.rsi(df['close'], length=14)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
             
@@ -102,9 +101,9 @@ class StrategyEngine:
 
             if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema400'].iloc[-1]): return None
 
-            # 🚀 التعديل الثاني: رفع نسبة التذبذب إلى 0.8% لضمان أن العملة تتحرك بقوة ولها زخم حقيقي
+            # استبعاد العملات التي بالكاد تتحرك (أقل من 0.4% حركة)
             atr_pct = (df['atr'].iloc[-1] / entry) * 100
-            if atr_pct < 0.8: return None
+            if atr_pct < 0.4: return None
 
             avg_vol = df['vol'].iloc[-20:-1].mean()
             vol_ratio = max(curr['vol'], prev['vol']) / avg_vol if avg_vol > 0 else 0
@@ -119,37 +118,55 @@ class StrategyEngine:
 
             strong_body = body > (df['atr'].iloc[-1] * 0.7)
             
+            # 🚀 فلاتر "السرعة والجودة" المضافة حديثاً
+            candle_range = curr['high'] - curr['low']
+            close_pos = (curr['close'] - curr['low']) / candle_range if candle_range > 0 else 0.5
+            
+            # 1. إغلاق مهيمن: الشمعة تغلق قريباً من القمة (للونق) أو القاع (للشورت) لمنع الانعكاس
+            strong_bull_close = close_pos > 0.65
+            strong_bear_close = close_pos < 0.35
+            
+            # 2. تسارع السيولة: فوليوم الشمعة الحالية يجب أن يكون أعلى من السابقة لضمان الانفجار السعري
+            vol_acceleration = curr['vol'] > prev['vol']
+
+            # فلتر الماكرو ترند
             macro_bullish = (curr['close'] > df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] > 45)
             macro_bearish = (curr['close'] < df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] < 55)
 
             strat = ""; side = ""
 
             # ==========================================
-            # 🧨 استراتيجيات النماذج الكلاسيكية (بمنظور المحترفين)
+            # 🧨 استراتيجيات النماذج الكلاسيكية (مع فلاتر الجودة والسرعة)
             # ==========================================
 
-            if is_green and df['close'].iloc[-5:-1].max() > df['hh20'].iloc[-5] and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1] and lower_wick > body * 1.5 and macro_bullish:
+            # 1. Break & Retest 
+            if is_green and df['close'].iloc[-5:-1].max() > df['hh20'].iloc[-5] and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1] and lower_wick > body * 1.5 and macro_bullish and strong_bull_close and vol_acceleration:
                 strat = "Break & Retest Pattern"; side = "LONG"
-            elif is_red and df['close'].iloc[-5:-1].min() < df['ll20'].iloc[-5] and curr['high'] >= df['ema21'].iloc[-1] and curr['close'] < df['ema21'].iloc[-1] and upper_wick > body * 1.5 and macro_bearish:
+            elif is_red and df['close'].iloc[-5:-1].min() < df['ll20'].iloc[-5] and curr['high'] >= df['ema21'].iloc[-1] and curr['close'] < df['ema21'].iloc[-1] and upper_wick > body * 1.5 and macro_bearish and strong_bear_close and vol_acceleration:
                 strat = "Break & Retest Pattern"; side = "SHORT"
 
-            elif is_red and curr['close'] < df['ll20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bearish:
+            # 2. Support Breakdown 
+            elif is_red and curr['close'] < df['ll20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bearish and strong_bear_close and vol_acceleration:
                 strat = "Support Breakdown / Bearish Triangle"; side = "SHORT"
 
-            elif is_green and curr['close'] > df['hh20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bullish:
+            # 3. Resistance Breakout 
+            elif is_green and curr['close'] > df['hh20'].iloc[-1] and strong_body and vol_ratio > 1.5 and macro_bullish and strong_bull_close and vol_acceleration:
                 strat = "Resistance Breakout / Bullish Triangle"; side = "LONG"
 
-            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_ratio > 1.5:
+            # 4. Bump and Run Reversal
+            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_ratio > 1.5 and strong_bear_close:
                 strat = "Bump and Run Reversal"; side = "SHORT"
 
-            elif is_red and curr['close'] < df['ll5'].iloc[-1] and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].max() > df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bearish:
+            # 5. H&S / Double Top
+            elif is_red and curr['close'] < df['ll5'].iloc[-1] and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].max() > df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bearish and strong_bear_close and vol_acceleration:
                  strat = "Head & Shoulders / Double Top"; side = "SHORT"
 
-            elif is_green and curr['close'] > df['hh5'].iloc[-1] and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].min() < df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bullish:
+            # 6. Inverse H&S / Double Bottom
+            elif is_green and curr['close'] > df['hh5'].iloc[-1] and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].min() < df['ema50'].iloc[-1] and strong_body and vol_ratio > 1.2 and macro_bullish and strong_bull_close and vol_acceleration:
                  strat = "Inverse H&S / Double Bottom"; side = "LONG"
 
             # ==========================================
-            # 📐 توليد الـ 10 أهداف الاحترافية
+            # 📐 توليد الـ 10 أهداف الاحترافية (بدون تقييم)
             # ==========================================
             if strat != "":
                 atr = float(df['atr'].iloc[-1])
