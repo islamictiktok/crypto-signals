@@ -25,7 +25,7 @@ class Config:
     TIMEFRAME = '1h'  
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 50_000 
-    MAX_SPREAD_PCT = 0.005 # فلتر السبريد لمنع العملات سيئة السيولة
+    MAX_SPREAD_PCT = 0.005 # 6️⃣ فلتر السبريد لمنع العملات سيئة السيولة
 
 class Log:
     BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
@@ -61,7 +61,7 @@ class TelegramNotifier:
 class StrategyEngine:
     @staticmethod
     def calc_actual_roe(entry, exit_price, side, lev):
-        # حساب PNL بدقة باستخدام float لتجنب أي أخطاء تقريب
+        # 1️⃣ و 🔹 حساب PNL بدقة عالية float
         if side == "LONG":
             return float(((exit_price - entry) / entry) * 100.0 * lev)
         else:
@@ -75,6 +75,7 @@ class StrategyEngine:
             df.set_index('time', inplace=True)
             df.sort_index(inplace=True)
             
+            # 4️⃣ التحقق من وجود بيانات كافية (450 شمعة) لتشغيل EMA400 بدقة
             if len(df) < 450 or df['vol'].iloc[-2] == 0: 
                 return None
 
@@ -95,7 +96,7 @@ class StrategyEngine:
             else:
                 df['macd_h'] = 0
 
-            # رصد القمم والقيعان الهيكلية (Swing Points) مع إضافة min_periods لتجنب NaN
+            # 4️⃣ رصد القمم والقيعان الهيكلية مع min_periods لتجنب قيم NaN
             df['hh20'] = df['high'].rolling(20, min_periods=5).max().shift(1) 
             df['ll20'] = df['low'].rolling(20, min_periods=5).min().shift(1)  
             df['hh5'] = df['high'].rolling(5, min_periods=2).max().shift(1)   
@@ -103,7 +104,7 @@ class StrategyEngine:
 
             if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema400'].iloc[-1]): return None
 
-            # فلتر التقلبات: استبعاد العملات الميتة (لا يخنق البوت)
+            # 6️⃣ تجاهل العملات ذات التقلبات المنخفضة جداً (لا يخنق البوت)
             atr_pct = (df['atr'].iloc[-1] / entry) * 100
             if atr_pct < 0.25: return None
 
@@ -116,13 +117,13 @@ class StrategyEngine:
             lower_wick = min(curr['open'], curr['close']) - curr['low']
             upper_wick = curr['high'] - max(curr['open'], curr['close'])
 
-            # فلتر الشموع الضعيفة (الذيول المبالغ فيها)
-            if upper_wick > body * 2.5 or lower_wick > body * 2.5: return None
+            # 4️⃣ فلتر حجم الشمعة مقارنة بنسبة الذيل لاستبعاد الشموع الوهمية
+            if upper_wick > body * 2.0 or lower_wick > body * 2.0: return None
 
             # 🚨 فلتر الكسر الحقيقي (يجب أن يكون جسم الشمعة كبيراً ويمثل كسر حقيقي وليس ذيلاً)
             strong_body = body > (df['atr'].iloc[-1] * 0.7)
             
-            # 🚨 فلتر الماكرو ترند + إضافة فلتر الزخم (RSI) لضمان قوة الاتجاه وعدم خنق البوت
+            # 3️⃣ فلتر الماكرو ترند + دمج الزخم RSI للتأكيد وعدم الدخول عكس الاتجاه
             macro_bullish = (curr['close'] > df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] > 45)
             macro_bearish = (curr['close'] < df['ema400'].iloc[-1]) and (df['rsi'].iloc[-1] < 55)
 
@@ -171,7 +172,7 @@ class StrategyEngine:
                 else:
                     sl = entry + risk
 
-                # 🚨 توليد 10 أهداف متدرجة ديناميكية تعتمد على الفوليوم والـ ATR
+                # 🚨 توليد 10 أهداف متدرجة (10 Targets System)
                 tps = []
                 pnls = []
                 
@@ -179,8 +180,9 @@ class StrategyEngine:
                 risk_pct = abs((entry - sl) / entry) * 100
                 lev = max(2, min(int(15.0 / risk_pct), 50)) if risk_pct > 0 else 10 
 
-                vol_multiplier = max(1.0, min(vol_ratio, 2.0)) # معامل ديناميكي للأهداف
-                dynamic_step = risk * 0.5 * vol_multiplier
+                # 2️⃣ و 9️⃣ أهداف ديناميكية محسنة تعتمد على الزخم المائي (vol_ratio) والـ ATR
+                dynamic_multiplier = max(0.8, min(vol_ratio, 2.0))
+                dynamic_step = risk * 0.5 * dynamic_multiplier
 
                 for i in range(1, 11):
                     if side == "LONG":
@@ -223,27 +225,32 @@ class TradingSystem:
         await self.tg.stop()
         await self.exchange.close()
 
-    # Retry Mechanism لتفادي فشل جلب البيانات
-    async def fetch_with_retry(self, symbol, limit=450, retries=3):
-        for _ in range(retries):
+    # 8️⃣ إضافة Retry Mechanism آمن جداً ولا يخلط العملات ببعضها
+    async def fetch_and_analyze(self, symbol):
+        for attempt in range(3):
             try:
-                return await self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=limit)
-            except Exception:
-                await asyncio.sleep(1)
+                ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=450) 
+                if ohlcv:
+                    res = await asyncio.to_thread(StrategyEngine.analyze_data, symbol, ohlcv)
+                    return res
+                break
+            except Exception: 
+                if attempt < 2:
+                    await asyncio.sleep(1)
         return None
 
     async def scan_market(self):
         while self.running:
             if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
                 Log.print(f"💤 Max Trades Reached ({len(self.active_trades)}). Waiting...", Log.YELLOW)
-                await asyncio.sleep(5) # تقليل مدة الانتظار لتسريع الرصد
+                await asyncio.sleep(5) # 8️⃣ تقليل sleep لتسريع الرصد فور الإغلاق
                 continue
             
             try:
                 tickers = await self.exchange.fetch_tickers()
                 valid_coins = []
                 
-                # إضافة فلتر السبريد للتحقق من أن الفرق بين Bid و Ask معقول
+                # 6️⃣ فلتر السبريد المضاف بأمان
                 for sym, data in tickers.items():
                     if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
                         if data.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT:
@@ -260,54 +267,49 @@ class TradingSystem:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     
                     chunk = valid_coins[i:i+chunk_size]
-                    tasks = [asyncio.create_task(self.fetch_with_retry(sym)) for sym in chunk]
+                    tasks = [asyncio.create_task(self.fetch_and_analyze(sym)) for sym in chunk]
                     
                     for coro in asyncio.as_completed(tasks):
                         if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                         
-                        ohlcv = await coro
-                        if ohlcv:
-                            # استخراج الرمز بشكل آمن
-                            for sym in chunk:
-                                if sym not in self.active_trades:
-                                    res = await asyncio.to_thread(StrategyEngine.analyze_data, sym, ohlcv)
-                                    if res:
-                                        sym, entry, sl, tps, side = res['symbol'], res['entry'], res['sl'], res['tps'], res['side']
-                                        pnls, lev, strat = res['pnls'], res['leverage'], res['strat']
-                                        
-                                        fmt = lambda x: self.exchange.price_to_precision(sym, x)
-                                        pnl_sl_raw = StrategyEngine.calc_actual_roe(entry, sl, side, lev)
-                                        
-                                        clean_name = sym.split(':')[0].replace('/', '')
-                                        icon = "🟢" if side == "LONG" else "🔴"
-                                        
-                                        targets_msg = ""
-                                        for idx in range(10):
-                                            targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{fmt(tps[idx])}</code> (+{pnls[idx]:.1f}%)\n"
+                        res = await coro
+                        if res and res['symbol'] not in self.active_trades:
+                            sym, entry, sl, tps, side = res['symbol'], res['entry'], res['sl'], res['tps'], res['side']
+                            pnls, lev, strat = res['pnls'], res['leverage'], res['strat']
+                            
+                            fmt = lambda x: self.exchange.price_to_precision(sym, x)
+                            pnl_sl_raw = StrategyEngine.calc_actual_roe(entry, sl, side, lev)
+                            
+                            clean_name = sym.split(':')[0].replace('/', '')
+                            icon = "🟢" if side == "LONG" else "🔴"
+                            
+                            targets_msg = ""
+                            for idx in range(10):
+                                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{fmt(tps[idx])}</code> (+{pnls[idx]:.1f}%)\n"
 
-                                        msg = (
-                                            f"{icon} <b><code>{clean_name}</code> ({side})</b>\n"
-                                            f"────────────────\n"
-                                            f"🛒 <b>Entry:</b> <code>{fmt(entry)}</code>\n"
-                                            f"⚖️ <b>Leverage:</b> <b>{lev}x</b>\n"
-                                            f"────────────────\n"
-                                            f"{targets_msg}"
-                                            f"────────────────\n"
-                                            f"🛑 <b>Stop Loss:</b> <code>{fmt(sl)}</code> ({pnl_sl_raw:.1f}% ROE)"
-                                        )
-                                        
-                                        msg_id = await self.tg.send(msg)
-                                        if msg_id:
-                                            # إدارة Trade State: إضافة last_sl_price و last_tp_hit
-                                            self.active_trades[sym] = {
-                                                "entry": entry, "sl": sl, "last_sl_price": sl, "tps": tps, "pnls": pnls, "side": side, 
-                                                "msg_id": msg_id, "lev": lev, "step": 0, "last_tp_hit": 0
-                                            }
-                                            self.stats["signals"] += 1
-                                            Log.print(f"🚀 PATTERN FIRED: {clean_name} | {strat} | Lev: {lev}x", Log.GREEN) # Logging
+                            msg = (
+                                f"{icon} <b><code>{clean_name}</code> ({side})</b>\n"
+                                f"────────────────\n"
+                                f"🛒 <b>Entry:</b> <code>{fmt(entry)}</code>\n"
+                                f"⚖️ <b>Leverage:</b> <b>{lev}x</b>\n"
+                                f"────────────────\n"
+                                f"{targets_msg}"
+                                f"────────────────\n"
+                                f"🛑 <b>Stop Loss:</b> <code>{fmt(sl)}</code> (-{pnl_sl_raw:.1f}% ROE)"
+                            )
+                            
+                            msg_id = await self.tg.send(msg)
+                            if msg_id:
+                                # 1️⃣ و 5️⃣ إضافة last_sl_price و last_tp_hit
+                                self.active_trades[sym] = {
+                                    "entry": entry, "sl": sl, "last_sl_price": sl, "tps": tps, "pnls": pnls, "side": side, 
+                                    "msg_id": msg_id, "lev": lev, "pnl_sl": pnl_sl_raw, "step": 0, "last_tp_hit": 0
+                                }
+                                self.stats["signals"] += 1
+                                Log.print(f"🚀 PATTERN FIRED: {clean_name} | {strat} | Lev: {lev}x", Log.GREEN)
 
-                await asyncio.sleep(2) 
-                gc.collect() # تفريغ الذاكرة
+                await asyncio.sleep(2) # 8️⃣ تقليل الانتظار
+                gc.collect() # 8️⃣ تحرير الذاكرة
             except Exception as e:
                 Log.print(f"Scan Error: {e}", Log.RED)
                 await asyncio.sleep(5)
@@ -323,28 +325,28 @@ class TradingSystem:
                     step = trade['step']
                     entry = trade['entry']
                     lev = trade['lev']
-                    # استخدام آخر ستوب لوس متحرك للحساب
+                    # 1️⃣ جلب الستوب لوس الحالي (سواء الأساسي أو المتحرك)
                     current_sl = trade.get('last_sl_price', trade['sl'])
                     
                     hit_sl = (price <= current_sl) if side == "LONG" else (price >= current_sl)
                     
                     if hit_sl:
-                        # حساب الـ PNL الفعلي بناءً على سعر الستوب الفعلي المضروب
+                        # 1️⃣ حساب PNL الفعلي بناءً على الستوب المضروب تماماً
                         actual_roe = StrategyEngine.calc_actual_roe(entry, current_sl, side, lev)
                         
                         if step == 0:
-                            msg = f"🛑 <b>Trade Closed at SL</b> ({actual_roe:+.1f}% ROE)\n💸 Actual PNL calculated."
+                            msg = f"🛑 <b>Trade Closed at SL</b> ({actual_roe:+.1f}% ROE)"
                             self.stats['losses'] += 1
                             self.stats['net_pnl'] += actual_roe
                         elif step == 1:
-                            actual_roe = 0.0 # شرط صارم: لا تعتمد على ربح الهدف التالي
-                            msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (0.0% ROE)\n🎯 Last hit: TP{trade['last_tp_hit']}"
+                            actual_roe = 0.0 # 5️⃣ عدم الاعتماد على كسر الهدف التالي، تصفير الربح عند الدخول
+                            msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (0.0% ROE)\n🎯 Last TP Hit: TP{trade['last_tp_hit']}"
                             self.stats['net_pnl'] += actual_roe
                         else:
-                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> ({actual_roe:+.1f}% ROE)\n🎯 Last hit: TP{trade['last_tp_hit']}"
+                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> ({actual_roe:+.1f}% ROE)\n🎯 Last TP Hit: TP{trade['last_tp_hit']}"
                             self.stats['net_pnl'] += actual_roe
                         
-                        Log.print(f"Trade Closed: {sym} | PNL: {actual_roe:+.2f}%", Log.YELLOW) # Logging
+                        Log.print(f"Trade Closed: {sym} | PNL: {actual_roe:+.2f}%", Log.YELLOW) # 8️⃣ Logging
                         await self.tg.send(msg, trade['msg_id'])
                         del self.active_trades[sym]
                         continue
@@ -355,14 +357,14 @@ class TradingSystem:
                         
                         if hit_tp:
                             trade['step'] = i + 1
-                            trade['last_tp_hit'] = i + 1 # تتبع آخر هدف محقق
+                            trade['last_tp_hit'] = i + 1 # 5️⃣ تحديث آخر هدف
                             
                             if i == 0:
-                                trade['last_sl_price'] = trade['entry'] # تحريك الستوب للدخول
+                                trade['last_sl_price'] = trade['entry'] # 1️⃣ تحريك الستوب للدخول
                                 msg = f"✅ <b>TP1 HIT! (+{trade['pnls'][i]:.1f}%)</b>\n🛡️ SL moved to Entry."
                             else:
-                                trade['last_sl_price'] = trade['tps'][i-1] # تحريك الستوب للهدف السابق
-                                msg = f"🔥 <b>TP{i+1} HIT! (+{trade['pnls'][i]:.1f}%)</b>\n📈 Trailing SL moved to TP{i}."
+                                trade['last_sl_price'] = trade['tps'][i-1] # 1️⃣ تحريك الستوب للهدف السابق
+                                msg = f"🔥 <b>TP{i+1} HIT! (+{trade['pnls'][i]:.1f}%)</b>\n📈 Trailing SL moved up."
                                 
                             if i == 9: 
                                 msg = f"🏆 <b>ALL 10 TARGETS SMASHED! (+{trade['pnls'][i]:.1f}%)</b> 🏦\nTrade Completed."
@@ -370,7 +372,7 @@ class TradingSystem:
                                 self.stats['net_pnl'] += trade['pnls'][i]
                                 del self.active_trades[sym]
                                 
-                            Log.print(f"Hit TP{i+1}: {sym}", Log.GREEN) # Logging
+                            Log.print(f"Hit TP{i+1}: {sym}", Log.GREEN) # 8️⃣ Logging
                             await self.tg.send(msg, trade['msg_id'])
                             if i == 0: self.stats['wins'] += 1 
                             break 
@@ -384,14 +386,14 @@ class TradingSystem:
             t = self.stats['wins'] + self.stats['losses']
             wr = (self.stats['wins'] / t * 100) if t > 0 else 0
             msg = (
-                f"📈 <b>DAILY REPORT (24H)</b> 📉\n"
+                f"📈 <b>WALL STREET MASTER REPORT (24H)</b> 📉\n"
                 f"────────────────\n"
                 f"🎯 <b>Signals:</b> {self.stats['signals']}\n"
                 f"✅ <b>Wins (Hit TP1+):</b> {self.stats['wins']}\n"
                 f"❌ <b>Losses:</b> {self.stats['losses']}\n"
                 f"📊 <b>Win Rate:</b> {wr:.1f}%\n"
                 f"────────────────\n"
-                f"📈 <b>Net PNL (Actual):</b> {self.stats['net_pnl']:.2f}%\n"
+                f"📈 <b>Net PNL:</b> {self.stats['net_pnl']:.2f}%\n"
             )
             await self.tg.send(msg)
             self.stats = {"signals": 0, "wins": 0, "losses": 0, "net_pnl": 0.0}
