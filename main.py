@@ -2,7 +2,6 @@ import asyncio
 import gc
 import os
 import warnings
-import re 
 from datetime import datetime
 import pandas as pd
 import pandas_ta as ta
@@ -58,7 +57,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك الاستراتيجيات المدمج 🧠 (H1 + M5 TRUE MTF)
+# 3. محرك الاستراتيجيات المدمج 🧠 (H1 + M5 EXACT SNIPER)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -79,7 +78,6 @@ class StrategyEngine:
             df_h1['ema21'] = ta.ema(df_h1['close'], length=21)
             df_h1['ema50'] = ta.ema(df_h1['close'], length=50)
             df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
-            df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
             df_h1['hh20'] = df_h1['high'].rolling(20).max().shift(1) 
             df_h1['ll20'] = df_h1['low'].rolling(20).min().shift(1)  
             df_h1['hh5'] = df_h1['high'].rolling(5).max().shift(1)   
@@ -113,23 +111,26 @@ class StrategyEngine:
 
             if pd.isna(h1['ema200']) or pd.isna(m5_atr) or pd.isna(m5['ema21']): return None
 
+            # 🚀 فلاتر القنص الصارمة جداً على فريم الـ 5 دقائق
             m5_vol_surge = m5['vol'] > (m5['vol_ma'] * 1.5) 
             m5_body = abs(m5['close'] - m5['open'])
             m5_upper_wick = m5['high'] - max(m5['open'], m5['close'])
             m5_lower_wick = min(m5['open'], m5['close']) - m5['low']
             
-            m5_strong_green = (m5['close'] > m5['open']) and (m5_body > m5_atr * 0.4) 
-            m5_strong_red = (m5['close'] < m5['open']) and (m5_body > m5_atr * 0.4) 
+            # الشمعة يجب أن تكون صلبة جداً، وتغلق بقوة بدون ذيول معاكسة كبيرة (أقل من 30% من الجسم)
+            m5_strong_green = (m5['close'] > m5['open']) and (m5_body > m5_atr * 0.5) and (m5_upper_wick < m5_body * 0.3)
+            m5_strong_red = (m5['close'] < m5['open']) and (m5_body > m5_atr * 0.5) and (m5_lower_wick < m5_body * 0.3)
             
-            # درع منع الـ FOMO 
-            if m5_upper_wick > m5_body * 1.5 or m5_lower_wick > m5_body * 1.5: return None
-            if m5_body > (m5_atr * 2.0): return None 
+            # منع الشموع العملاقة المفرطة (تحديد حجم الشمعة بألا تتجاوز 1.8 ATR)
+            if m5_body > (m5_atr * 1.8): return None 
             
-            dist_from_ema = abs(entry - m5['ema21'])
-            is_overextended = dist_from_ema > (m5_atr * 2.2)
-            
-            is_rsi_overbought = m5['rsi'] > 72
-            is_rsi_oversold = m5['rsi'] < 28
+            # التأكد من أن السعر كان مرتاحاً (Squeeze) قبل الانفجار وليس معلقاً في الهواء
+            is_resting_before_pump = abs(m5_prev['close'] - m5['ema21']) < (m5_atr * 1.0)
+            if not is_resting_before_pump: return None
+
+            # تقييد شديد لمؤشر RSI (يجب ألا يكون تشبع قبل الدخول)
+            is_rsi_safe_long = 40 < m5['rsi'] < 68  # مساحة كافية للصعود
+            is_rsi_safe_short = 32 < m5['rsi'] < 60 # مساحة كافية للهبوط
 
             macro_bullish = h1['close'] > h1['ema200']
             macro_bearish = h1['close'] < h1['ema200']
@@ -137,47 +138,52 @@ class StrategyEngine:
             strat = ""; side = ""
 
             # ==========================================
-            # 🧨 استراتيجيات القنص (مع دروع الحماية)
+            # 🧨 استراتيجيات القنص من نقطة الصفر (Zero-Late Entry)
             # ==========================================
 
-            if macro_bullish and not is_overextended and not is_rsi_overbought and (m5['low'] <= h1['ema21']) and (m5['close'] > h1['ema21']) and m5_strong_green:
+            # 1. Break & Retest (ارتداد نظيف ومبكر)
+            if macro_bullish and is_rsi_safe_long and (m5['low'] <= h1['ema21']) and (m5['close'] > h1['ema21']) and m5_strong_green:
                 strat = "LONG_BR"; side = "LONG"
-            elif macro_bearish and not is_overextended and not is_rsi_oversold and (m5['high'] >= h1['ema21']) and (m5['close'] < h1['ema21']) and m5_strong_red:
+            elif macro_bearish and is_rsi_safe_short and (m5['high'] >= h1['ema21']) and (m5['close'] < h1['ema21']) and m5_strong_red:
                 strat = "SHORT_BR"; side = "SHORT"
 
-            elif macro_bearish and not is_overextended and not is_rsi_oversold and (m5_prev['close'] >= h1['ll20']) and (m5['close'] < h1['ll20']) and (m5['close'] > h1['ll20'] - m5_atr*1.5) and m5_strong_red and m5_vol_surge:
+            # 2. Support Breakdown (كسر الدعم ويجب أن يغلق تحته مباشرة بمسافة لا تزيد عن 1.0 ATR)
+            elif macro_bearish and is_rsi_safe_short and (m5_prev['close'] >= h1['ll20']) and (m5['close'] < h1['ll20']) and (m5['close'] >= h1['ll20'] - m5_atr*1.0) and m5_strong_red and m5_vol_surge:
                 strat = "SHORT_SB"; side = "SHORT"
 
-            elif macro_bullish and not is_overextended and not is_rsi_overbought and (m5_prev['close'] <= h1['hh20']) and (m5['close'] > h1['hh20']) and (m5['close'] < h1['hh20'] + m5_atr*1.5) and m5_strong_green and m5_vol_surge:
+            # 3. Resistance Breakout (اختراق المقاومة ويجب أن يغلق فوقها مباشرة بمسافة لا تزيد عن 1.0 ATR)
+            elif macro_bullish and is_rsi_safe_long and (m5_prev['close'] <= h1['hh20']) and (m5['close'] > h1['hh20']) and (m5['close'] <= h1['hh20'] + m5_atr*1.0) and m5_strong_green and m5_vol_surge:
                 strat = "LONG_RB"; side = "LONG"
 
-            elif h1_prev['rsi'] > 72 and m5['close'] < m5['ema21'] and m5_strong_red and m5_vol_surge:
+            # 4. Bump and Run Reversal 
+            elif h1_prev['rsi'] > 72 and is_rsi_safe_short and m5['close'] < m5['ema21'] and m5_strong_red and m5_vol_surge:
                 strat = "SHORT_BARR"; side = "SHORT"
-            elif h1_prev['rsi'] < 28 and m5['close'] > m5['ema21'] and m5_strong_green and m5_vol_surge:
+            elif h1_prev['rsi'] < 28 and is_rsi_safe_long and m5['close'] > m5['ema21'] and m5_strong_green and m5_vol_surge:
                 strat = "LONG_BARR"; side = "LONG"
 
-            elif macro_bearish and not is_overextended and not is_rsi_oversold and h1['macd_h'] < h1_prev['macd_h'] and (m5_prev['close'] >= h1['ll5']) and (m5['close'] < h1['ll5']) and m5_strong_red and m5_vol_surge:
+            # 5. H&S / Double Top 
+            elif macro_bearish and is_rsi_safe_short and h1['macd_h'] < h1_prev['macd_h'] and (m5_prev['close'] >= h1['ll5']) and (m5['close'] < h1['ll5']) and (m5['close'] >= h1['ll5'] - m5_atr*1.0) and m5_strong_red and m5_vol_surge:
                  strat = "SHORT_DT"; side = "SHORT"
 
-            elif macro_bullish and not is_overextended and not is_rsi_overbought and h1['macd_h'] > h1_prev['macd_h'] and (m5_prev['close'] <= h1['hh5']) and (m5['close'] > h1['hh5']) and m5_strong_green and m5_vol_surge:
+            # 6. Inverse H&S / Double Bottom 
+            elif macro_bullish and is_rsi_safe_long and h1['macd_h'] > h1_prev['macd_h'] and (m5_prev['close'] <= h1['hh5']) and (m5['close'] > h1['hh5']) and (m5['close'] <= h1['hh5'] + m5_atr*1.0) and m5_strong_green and m5_vol_surge:
                  strat = "LONG_DB"; side = "LONG"
 
             # ==========================================
-            # 📐 الأهداف والستوب والرافعة (ديناميكية 100% لكل عملة)
+            # 📐 الأهداف والستوب والرافعة الديناميكية
             # ==========================================
             if strat != "":
                 
-                # 🚀 1. الستوب لوس: هيكلي + مسافة أمان لتجنب ضرب الستوب بالذيول (بدون نسب مئوية ثابتة)
+                # الستوب لوس الهيكلي (آمن وذكي)
                 if side == "LONG":
                     struct_sl = df_m5['ll10'].iloc[-1]
-                    sl = struct_sl - (m5_atr * 0.5) # مسافة أمان تحت القاع
+                    sl = struct_sl - (m5_atr * 0.5) 
                 else:
                     struct_sl = df_m5['hh10'].iloc[-1]
-                    sl = struct_sl + (m5_atr * 0.5) # مسافة أمان فوق القمة
+                    sl = struct_sl + (m5_atr * 0.5) 
 
                 risk_abs = abs(entry - sl)
                 
-                # 🚀 الحد الأقصى للمخاطرة أصبح مبنياً على الـ ATR أيضاً (يسمح للعملات المجنونة بالتنفس)
                 max_allowed_risk = m5_atr * 4.0 
                 min_allowed_risk = m5_atr * 0.8
                 
@@ -191,7 +197,7 @@ class StrategyEngine:
                 tps = []
                 pnls = []
                 
-                # 🚀 2. رافعة مالية رياضية تستهدف 12% خسارة كحد أقصى من الهامش
+                # الرافعة المالية (تستهدف خسارة 12% كحد أقصى)
                 risk_pct = (risk_abs / entry) * 100
                 if risk_pct > 0:
                     lev = int(12.0 / risk_pct) 
@@ -199,8 +205,7 @@ class StrategyEngine:
                 else:
                     lev = Config.MIN_LEVERAGE 
 
-                # 🚀 3. أهداف تتمدد وتتقلص حسب الـ ATR الخاص بالعملة
-                # الهدف الأول يكون بعيداً بمقدار شمعة ونصف طبيعية لهذه العملة تحديداً
+                # الأهداف (الهدف الأول قريب جداً لتأمين الصفقة فوراً)
                 step_size = max(risk_abs * 0.75, m5_atr * 1.5) 
 
                 for i in range(1, 11):
@@ -236,8 +241,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 WALL STREET MASTER: V1000.0 (Dynamic DNA Engine)", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V1000.0 Online.</b>\nRadar: 1H | Sniper: 5m\nDNA Volatility Engine Active 🧬⚡")
+        Log.print("🚀 WALL STREET MASTER: V1100.0 (Exact Names + Zero-Late Entry)", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V1100.0 Online.</b>\nExact Tickers | Zero-Late Entry 🎯⚡")
 
     async def shutdown(self):
         self.running = False
@@ -298,8 +303,8 @@ class TradingSystem:
                             fmt = lambda x: self.exchange.price_to_precision(sym, x)
                             pnl_sl_raw = StrategyEngine.calc_actual_roe(entry, sl, side, lev)
                             
+                            # 🚀 الأسماء كما هي في المنصة تماماً لتسهيل البحث (بدون تنظيف إضافي)
                             clean_name = sym.split(':')[0].replace('/', '')
-                            clean_name = re.sub(r'(COIN|STOCK|CONTRACT)USDT$', 'USDT', clean_name, flags=re.IGNORECASE)
                             
                             icon = "🟢" if side == "LONG" else "🔴"
                             
@@ -434,7 +439,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER V1000.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER V1100.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
