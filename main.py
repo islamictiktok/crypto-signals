@@ -2,6 +2,7 @@ import asyncio
 import gc
 import os
 import warnings
+import numpy as np
 from datetime import datetime
 import pandas as pd
 import pandas_ta as ta
@@ -28,7 +29,7 @@ class Config:
     MIN_LEVERAGE = 2  
 
 class Log:
-    BLUE = '\033[94m'; GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; CYAN = '\033[96m'; RESET = '\033[0m'
+    GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
     @staticmethod
     def print(msg, color=RESET):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -39,12 +40,9 @@ class TelegramNotifier:
         self.base_url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
         self.session = None
 
-    async def start(self):
-        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
-
-    async def stop(self):
+    async def start(self): self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+    async def stop(self): 
         if self.session: await self.session.close()
-
     async def send(self, text, reply_to=None):
         if not self.session: return None
         payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
@@ -56,123 +54,164 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك المحلل الكمّي 🧠 (THE QUANT ENGINE)
+# 3. محرك الرؤية الهندسية 🧠 (GEOMETRIC PATTERN ENGINE)
 # ==========================================
 class StrategyEngine:
     @staticmethod
     def calc_actual_roe(entry, exit_price, side, lev):
         if entry == 0: return 0.0
-        if side == "LONG":
-            return float(((exit_price - entry) / entry) * 100.0 * lev)
-        else:
-            return float(((entry - exit_price) / entry) * 100.0 * lev)
+        if side == "LONG": return float(((exit_price - entry) / entry) * 100.0 * lev)
+        else: return float(((entry - exit_price) / entry) * 100.0 * lev)
+
+    @staticmethod
+    def get_swing_pivots(df, window=5):
+        # هذه الدالة تجعل البوت يرى القمم والقيعان الحقيقية مثل عين المحلل
+        df['swing_high'] = df['high'][(df['high'] == df['high'].rolling(window, center=True).max())]
+        df['swing_low'] = df['low'][(df['low'] == df['low'].rolling(window, center=True).min())]
+        
+        # استخراج آخر 3 قمم و 3 قيعان
+        highs = df['swing_high'].dropna().values[-3:]
+        lows = df['swing_low'].dropna().values[-3:]
+        
+        # حماية من الأخطاء إذا كانت البيانات غير كافية
+        if len(highs) < 3 or len(lows) < 3:
+            return None, None
+        return highs, lows
 
     @staticmethod
     def analyze_mtf(symbol, h1_data, m5_data):
         try:
-            # 1️⃣ تحليل فريم الساعة (الرؤية الكبرى)
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_h1) < 250: return None 
             
             df_h1['ema50'] = ta.ema(df_h1['close'], length=50) 
             df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
-            df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
-            df_h1['hh20'] = df_h1['high'].rolling(20).max().shift(1) # مقاومات الماكرو
-            df_h1['ll20'] = df_h1['low'].rolling(20).min().shift(1)  # دعوم الماكرو
+            df_h1['atr'] = ta.atr(df_h1['high'], df_h1['low'], df_h1['close'], length=14)
             
-            # مؤشر ADX لقياس "قوة" الترند (استخراج العمود الأول بأمان)
-            adx_h1 = ta.adx(df_h1['high'], df_h1['low'], df_h1['close'], length=14)
-            df_h1['adx'] = adx_h1.iloc[:, 0] if adx_h1 is not None and not adx_h1.empty else 0
-
             h1 = df_h1.iloc[-1]
-            h1_prev = df_h1.iloc[-2]
-
-            # 2️⃣ تحليل فريم 5 دقائق (نقطة الدخول بالملليمتير)
+            
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
             
-            df_m5['ema21'] = ta.ema(df_m5['close'], length=21)
             df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
+            df_m5['vol_ma'] = df_m5['vol'].rolling(10).mean()
             
-            # قمم وقيعان هيكلية لحظية
-            df_m5['ll10'] = df_m5['low'].rolling(10).min().shift(1)
-            df_m5['hh10'] = df_m5['high'].rolling(10).max().shift(1)
-
             m5 = df_m5.iloc[-1]
             m5_prev = df_m5.iloc[-2]
             entry = float(m5['close'])
             m5_atr = float(df_m5['atr'].iloc[-1])
 
-            if pd.isna(h1['ema200']) or pd.isna(m5_atr) or pd.isna(m5['ema21']): return None
+            if pd.isna(h1['ema200']) or pd.isna(m5_atr): return None
 
-            # 🚨 تشريح الشمعة (Candle Anatomy) بدون الاعتماد المفرط على الفوليوم
+            # 🚨 تشريح الشمعة والزخم (Micro Action)
             m5_body = abs(m5['close'] - m5['open'])
             m5_upper_wick = m5['high'] - max(m5['open'], m5['close'])
             m5_lower_wick = min(m5['open'], m5['close']) - m5['low']
+            vol_surge = m5['vol'] > (m5['vol_ma'] * 1.5)
             
-            # الشمعة يجب أن تكون صحية ولكن ليست "عملاقة جداً" لتجنب الـ FOMO
-            m5_strong_green = (m5['close'] > m5['open']) and (m5_body > m5_atr * 0.4) and (m5_upper_wick < m5_body * 0.5)
-            m5_strong_red = (m5['close'] < m5['open']) and (m5_body > m5_atr * 0.4) and (m5_lower_wick < m5_body * 0.5)
+            m5_strong_green = (m5['close'] > m5['open']) and (m5_body > m5_atr * 0.5) and (m5_upper_wick < m5_body * 0.3)
+            m5_strong_red = (m5['close'] < m5['open']) and (m5_body > m5_atr * 0.5) and (m5_lower_wick < m5_body * 0.3)
             
-            # 🚨 الفلتر الأقوى: القتل الفوري لأي شمعة بومب/دومب عملاقة (أكبر من 1.2 ATR)
-            if m5_body > (m5_atr * 1.2): return None 
-
-            # 🚨 فلتر الترند القوي
-            macro_bullish = (h1['ema50'] > h1['ema200']) and (h1['adx'] > 20)
-            macro_bearish = (h1['ema50'] < h1['ema200']) and (h1['adx'] > 20)
-
-            strat = ""; side = ""
+            if m5_body > (m5_atr * 1.8): return None # منع الـ FOMO
 
             # ==========================================
-            # 🧨 استراتيجياتك الـ 6 (محدثة بمفهوم المسافة الصفرية والانضغاط)
+            # 📐 استخراج القمم والقيعان الهندسية
+            # ==========================================
+            h1_highs, h1_lows = StrategyEngine.get_swing_pivots(df_h1, window=5)
+            if h1_highs is None or h1_lows is None: return None
+
+            # H1: Highs (h1, h2, h3 where h3 is the most recent)
+            h1_h1, h1_h2, h1_h3 = h1_highs[0], h1_highs[1], h1_highs[2]
+            # H1: Lows (l1, l2, l3 where l3 is the most recent)
+            h1_l1, h1_l2, h1_l3 = h1_lows[0], h1_lows[1], h1_lows[2]
+
+            # تعريفات مساعدة
+            macro_bullish = h1['ema50'] > h1['ema200']
+            macro_bearish = h1['ema50'] < h1['ema200']
+            
+            # السماحية في اعتبار القمم/القيعان متساوية (التسامح بنسبة 0.3% مثلاً)
+            tol = h1['close'] * 0.003 
+            
+            side = ""; strat = ""
+
+            # ==========================================
+            # 🧨 موسوعة النماذج الفنية الهندسية (Analyst Eyes)
             # ==========================================
 
-            # 1. Break & Retest (ارتداد من EMA21 بشمعة مطرقة/ابتلاعية)
-            if macro_bullish and (m5['low'] <= m5['ema21']) and (m5['close'] > m5['ema21']) and (m5_lower_wick > m5_body * 1.2) and m5_strong_green:
-                side = "LONG"; strat = "1"
-            elif macro_bearish and (m5['high'] >= m5['ema21']) and (m5['close'] < m5['ema21']) and (m5_upper_wick > m5_body * 1.2) and m5_strong_red:
-                side = "SHORT"; strat = "1"
+            # 1. Bull Flag (علم صاعد): ترند قوي، قمم هابطة وقيعان هابطة بشكل خفيف، ثم كسر للأعلى
+            if macro_bullish and (h1_h3 < h1_h2) and (h1_l3 < h1_l2):
+                if m5_prev['close'] <= h1_h3 and m5['close'] > h1_h3 and m5_strong_green:
+                    side = "LONG"; strat = "Bull Flag Breakout"
 
-            # 2. Support Breakdown (كسر الدعم بمسافة صفرية - لا فوليوم مطلوب)
-            # الشمعة السابقة فوق الدعم، الحالية تحته، ومسافة الإغلاق قريبة جداً من خط الدعم (لا تتجاوز 0.8 ATR)
-            elif macro_bearish and (m5_prev['close'] >= h1['ll20']) and (m5['close'] < h1['ll20']) and (abs(m5['close'] - h1['ll20']) < m5_atr * 0.8) and m5_strong_red:
-                side = "SHORT"; strat = "2"
+            # 2. Bear Flag (علم هابط): ترند هابط، قمم صاعدة وقيعان صاعدة بشكل خفيف، ثم كسر للأسفل
+            elif macro_bearish and (h1_l3 > h1_l2) and (h1_h3 > h1_h2):
+                if m5_prev['close'] >= h1_l3 and m5['close'] < h1_l3 and m5_strong_red:
+                    side = "SHORT"; strat = "Bear Flag Breakdown"
 
-            # 3. Resistance Breakout (اختراق المقاومة بمسافة صفرية - لا فوليوم مطلوب)
-            elif macro_bullish and (m5_prev['close'] <= h1['hh20']) and (m5['close'] > h1['hh20']) and (abs(m5['close'] - h1['hh20']) < m5_atr * 0.8) and m5_strong_green:
-                side = "LONG"; strat = "3"
+            # 3. Symmetrical Triangle (مثلث متماثل): قمم هابطة وقيعان صاعدة (انضغاط)
+            elif (h1_h3 < h1_h2) and (h1_l3 > h1_l2):
+                if macro_bullish and m5_prev['close'] <= h1_h3 and m5['close'] > h1_h3 and m5_strong_green:
+                    side = "LONG"; strat = "Symmetrical Triangle Breakout"
+                elif macro_bearish and m5_prev['close'] >= h1_l3 and m5['close'] < h1_l3 and m5_strong_red:
+                    side = "SHORT"; strat = "Symmetrical Triangle Breakdown"
 
-            # 4. Bump and Run Reversal (انعكاس بعد تشبع مفرط مع كسر الهيكل اللحظي)
-            # يعتمد على كسر هيكل 5 دقائق (ll10/hh10) وليس فقط الـ EMA
-            elif (h1_prev['rsi'] > 75) and (m5_prev['close'] >= df_m5['ll10'].iloc[-1]) and (m5['close'] < df_m5['ll10'].iloc[-1]) and m5_strong_red:
-                side = "SHORT"; strat = "4"
-            elif (h1_prev['rsi'] < 25) and (m5_prev['close'] <= df_m5['hh10'].iloc[-1]) and (m5['close'] > df_m5['hh10'].iloc[-1]) and m5_strong_green:
-                side = "LONG"; strat = "4"
+            # 4. Ascending Triangle (مثلث صاعد): قمم شبه متساوية، وقيعان صاعدة
+            elif abs(h1_h3 - h1_h2) < tol and (h1_l3 > h1_l2):
+                if m5_prev['close'] <= max(h1_h3, h1_h2) and m5['close'] > max(h1_h3, h1_h2) and m5_strong_green:
+                    side = "LONG"; strat = "Ascending Triangle Breakout"
 
-            # 5. H&S / Double Top Structure Breakdown
-            elif macro_bearish and (m5_prev['close'] >= df_m5['ll10'].iloc[-1]) and (m5['close'] < df_m5['ll10'].iloc[-1]) and (h1['close'] < h1['ema50']) and m5_strong_red:
-                 side = "SHORT"; strat = "5"
+            # 5. Descending Triangle (مثلث هابط): قيعان شبه متساوية، وقمم هابطة
+            elif abs(h1_l3 - h1_l2) < tol and (h1_h3 < h1_h2):
+                if m5_prev['close'] >= min(h1_l3, h1_l2) and m5['close'] < min(h1_l3, h1_l2) and m5_strong_red:
+                    side = "SHORT"; strat = "Descending Triangle Breakdown"
 
-            # 6. Inverse H&S / Double Bottom Structure Breakout
-            elif macro_bullish and (m5_prev['close'] <= df_m5['hh10'].iloc[-1]) and (m5['close'] > df_m5['hh10'].iloc[-1]) and (h1['close'] > h1['ema50']) and m5_strong_green:
-                 side = "LONG"; strat = "6"
+            # 6. Falling Wedge (وتد هابط انعكاسي): قمم تهبط بقوة، قيعان تهبط ببطء (تقارب للأسفل)
+            elif (h1_h2 - h1_h3) > (h1_l2 - h1_l3) > 0:
+                if m5_prev['close'] <= h1_h3 and m5['close'] > h1_h3 and m5_strong_green and vol_surge:
+                    side = "LONG"; strat = "Falling Wedge Reversal"
+
+            # 7. Rising Wedge (وتد صاعد انعكاسي): قيعان تصعد بقوة، قمم تصعد ببطء (تقارب للأعلى)
+            elif (h1_l3 - h1_l2) > (h1_h3 - h1_h2) > 0:
+                if m5_prev['close'] >= h1_l3 and m5['close'] < h1_l3 and m5_strong_red and vol_surge:
+                    side = "SHORT"; strat = "Rising Wedge Reversal"
+
+            # 8. Double Bottom (قاع مزدوج): قاعين متساويين، واختراق القمة بينهما (خط العنق)
+            elif abs(h1_l3 - h1_l2) < tol:
+                neckline = h1_h2 # القمة بين القاعين
+                if m5_prev['close'] <= neckline and m5['close'] > neckline and m5_strong_green:
+                    side = "LONG"; strat = "Double Bottom Breakout"
+
+            # 9. Double Top (قمة مزدوجة): قمتين متساويتين، وكسر القاع بينهما (خط العنق)
+            elif abs(h1_h3 - h1_h2) < tol:
+                neckline = h1_l3 # القاع بين القمتين
+                if m5_prev['close'] >= neckline and m5['close'] < neckline and m5_strong_red:
+                    side = "SHORT"; strat = "Double Top Breakdown"
+
+            # 10. Head & Shoulders (رأس وكتفين هندسي): كتف أيسر، رأس أعلى، كتف أيمن أدنى من الرأس.
+            elif (h1_h2 > h1_h1) and (h1_h2 > h1_h3) and abs(h1_h1 - h1_h3) < (tol * 2):
+                neckline = min(h1_l2, h1_l3)
+                if m5_prev['close'] >= neckline and m5['close'] < neckline and m5_strong_red:
+                    side = "SHORT"; strat = "Head & Shoulders Breakdown"
+
+            # 11. Inverse Head & Shoulders (رأس وكتفين مقلوب):
+            elif (h1_l2 < h1_l1) and (h1_l2 < h1_l3) and abs(h1_l1 - h1_l3) < (tol * 2):
+                neckline = max(h1_h2, h1_h3)
+                if m5_prev['close'] <= neckline and m5['close'] > neckline and m5_strong_green:
+                    side = "LONG"; strat = "Inv Head & Shoulders Breakout"
 
             # ==========================================
             # 📐 الأهداف والستوب والرافعة الديناميكية
             # ==========================================
             if side != "":
-                
-                # الستوب لوس الهيكلي المجهري
+                # الستوب لوس المجهري يعتمد على قيعان الـ 5 دقائق الدقيقة
                 if side == "LONG":
-                    struct_sl = df_m5['ll10'].iloc[-1]
-                    sl = struct_sl - (m5_atr * 0.3) # حماية أسفل القاع بقليل
+                    sl = df_m5['low'].iloc[-3:].min() - (m5_atr * 0.2)
                 else:
-                    struct_sl = df_m5['hh10'].iloc[-1]
-                    sl = struct_sl + (m5_atr * 0.3) # حماية أعلى القمة بقليل
+                    sl = df_m5['high'].iloc[-3:].max() + (m5_atr * 0.2)
 
                 risk_abs = abs(entry - sl)
                 
-                # تقييد المخاطرة لحماية الحساب من التذبذبات غير المنطقية
+                # تقييد المخاطرة لحماية الحساب 
                 max_allowed_risk = m5_atr * 3.0 
                 min_allowed_risk = m5_atr * 0.5
                 
@@ -186,7 +225,7 @@ class StrategyEngine:
                 tps = []
                 pnls = []
                 
-                # رافعة مالية رياضية (تستهدف خسارة 12% فقط عند ضرب الستوب)
+                # رافعة مالية ذكية تستهدف خسارة 12% فقط عند الستوب
                 risk_pct = (risk_abs / entry) * 100
                 if risk_pct > 0:
                     lev = int(12.0 / risk_pct) 
@@ -207,7 +246,7 @@ class StrategyEngine:
                 del df_h1, df_m5
                 return {
                     "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
-                    "leverage": lev
+                    "leverage": lev, "strat": strat
                 }
 
             del df_h1, df_m5
@@ -229,8 +268,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 WALL STREET MASTER: V1800.0 (The Quant Engine)", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V1800.0 Online.</b>\nZero-Distance Breakout Engine Active ⚡")
+        Log.print("🚀 WALL STREET MASTER: V1900.0 (Geometric Vision)", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V1900.0 Online.</b>\n11 Geometric Patterns Analyst Engine Active 📐⚡")
 
     async def shutdown(self):
         self.running = False
@@ -240,6 +279,7 @@ class TradingSystem:
     async def execute_trade(self, trade):
         sym = trade['symbol']
         
+        # استخراج الاسم النظيف لتطبيق MEXC
         market_info = self.exchange.markets.get(sym, {})
         raw_info = market_info.get('info', {})
         base_coin_name = raw_info.get('baseCoinName', '')
@@ -256,7 +296,7 @@ class TradingSystem:
 
         pnl_sl_raw = StrategyEngine.calc_actual_roe(trade['entry'], trade['sl'], trade['side'], trade['leverage'])
 
-        # رسالة نظيفة بالكامل بدون اسم استراتيجية
+        # رسالة نظيفة بالكامل بدون عرض اسم الاستراتيجية
         msg = (
             f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
             f"────────────────\n"
@@ -276,7 +316,8 @@ class TradingSystem:
             trade['last_sl_price'] = trade['sl']
             self.active_trades[sym] = trade
             self.stats["signals"] += 1
-            Log.print(f"🚀 INSTANT FIRE: {exact_app_name}", Log.GREEN)
+            # يتم طباعة اسم الاستراتيجية في شاشة السيرفر الخاصة بك فقط لتعرف ما يجري
+            Log.print(f"🚀 PATTERN FIRED: {exact_app_name} | {trade['strat']}", Log.GREEN)
 
     async def fetch_mtf_data(self, symbol):
         try:
@@ -303,7 +344,7 @@ class TradingSystem:
                 tickers = await self.exchange.fetch_tickers()
                 valid_coins = [sym for sym, d in tickers.items() if 'USDT' in sym and ':' in sym and d.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC'])]
                 
-                Log.print(f"⚡ Quant Scanner Active on {len(valid_coins)} Pairs...", Log.BLUE)
+                Log.print(f"⚡ Geometric Scanner Active on {len(valid_coins)} Pairs...", Log.BLUE)
                 
                 chunk_size = 15 
                 
@@ -426,7 +467,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER V1800.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER V1900.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
