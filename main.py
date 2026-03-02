@@ -24,7 +24,6 @@ class Config:
     TF_MACRO = '1h'   
     TF_MICRO = '5m'   
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 50_000 
     MIN_LEVERAGE = 2  
 
 class Log:
@@ -56,7 +55,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك الأموال الذكية 🧠 (SMC & QUANT ENGINE)
+# 3. محرك الزخم والبرايس أكشن 🧠 (VELOCITY ENGINE)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -68,25 +67,20 @@ class StrategyEngine:
     @staticmethod
     def analyze_mtf(symbol, h1_data, m5_data):
         try:
-            # 1️⃣ تحليل فريم الساعة (الماكرو)
+            # 1️⃣ تحليل فريم الساعة (تحديد الساحة)
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df_h1) < 100: return None 
+            if len(df_h1) < 250: return None 
             
             df_h1['ema21'] = ta.ema(df_h1['close'], length=21)
-            df_h1['ema50'] = ta.ema(df_h1['close'], length=50) 
             df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
+            df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
+            df_h1['atr'] = ta.atr(df_h1['high'], df_h1['low'], df_h1['close'], length=14)
             
-            # تحديد الدعوم والمقاومات التاريخية
             df_h1['hh20'] = df_h1['high'].rolling(20).max().shift(1) 
             df_h1['ll20'] = df_h1['low'].rolling(20).min().shift(1)  
+            df_h1['hh5'] = df_h1['high'].rolling(5).max().shift(1)   
+            df_h1['ll5'] = df_h1['low'].rolling(5).min().shift(1)    
             
-            # حساب الانضغاط الآمن (Bollinger Band Width)
-            df_h1['sma20'] = df_h1['close'].rolling(20).mean()
-            df_h1['std20'] = df_h1['close'].rolling(20).std()
-            df_h1['bb_width'] = (4 * df_h1['std20']) / df_h1['sma20']
-
-            # مؤشر MACD و RSI
-            df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
             macd_h1 = ta.macd(df_h1['close'])
             if macd_h1 is not None and len(macd_h1.columns) >= 2:
                 df_h1['macd_h'] = macd_h1.iloc[:, 1]
@@ -96,101 +90,99 @@ class StrategyEngine:
             h1 = df_h1.iloc[-1]
             h1_prev = df_h1.iloc[-2]
 
-            # 2️⃣ تحليل فريم 5 دقائق (نقطة الدخول الدقيقة)
+            # التأكد أن العملة تتحرك وليست ميتة سريرياً
+            if (h1['atr'] / h1['close']) * 100 < 0.2: return None
+
+            # 2️⃣ تحليل فريم 5 دقائق (الزخم السعري الخالص - لا فوليوم)
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
             
-            # حماية تأخر البيانات (Stale Data Protection)
             last_timestamp = int(df_m5['time'].iloc[-1])
             current_timestamp = int(datetime.now(timezone.utc).timestamp() * 1000)
             if current_timestamp - last_timestamp > 1800000: return None
             
             df_m5['ema21'] = ta.ema(df_m5['close'], length=21)
             df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
-            df_m5['vol_ma'] = df_m5['vol'].rolling(10).mean()
             
-            # الهيكل اللحظي
-            df_m5['hh10'] = df_m5['high'].rolling(10).max().shift(1)
             df_m5['ll10'] = df_m5['low'].rolling(10).min().shift(1)
+            df_m5['hh10'] = df_m5['high'].rolling(10).max().shift(1)
 
             m5 = df_m5.iloc[-1]
             m5_prev = df_m5.iloc[-2]
             entry = float(m5['close'])
             m5_atr = float(df_m5['atr'].iloc[-1])
 
-            if pd.isna(h1['ema200']) or pd.isna(m5_atr): return None
+            if pd.isna(h1['ema200']) or pd.isna(m5_atr) or pd.isna(m5['ema21']): return None
 
-            # 🚨 تشريح الشمعة والزخم (Price Action)
+            # 🚨 تقنية تشريح الزخم السعري (Price Velocity Anatomy)
             m5_body = abs(m5['close'] - m5['open'])
+            m5_prev_body = abs(m5_prev['close'] - m5_prev['open'])
             m5_upper_wick = m5['high'] - max(m5['open'], m5['close'])
             m5_lower_wick = min(m5['open'], m5['close']) - m5['low']
-            vol_surge = m5['vol'] > (m5['vol_ma'] * 1.5)
             
-            # شموع قوية وصلبة
-            m5_strong_green = (m5['close'] > m5['open']) and (m5_body > m5_atr * 0.4) and (m5_upper_wick < m5_body * 0.5)
-            m5_strong_red = (m5['close'] < m5['open']) and (m5_body > m5_atr * 0.4) and (m5_lower_wick < m5_body * 0.5)
+            # الشمعة الكاسرة القوية: يجب أن تكون أكبر من 60% من الـ ATR، وخالية من ذيول الرفض المعاكسة
+            m5_impulse_green = (m5['close'] > m5['open']) and (m5_body > m5_atr * 0.6) and (m5_upper_wick < m5_body * 0.3)
+            m5_impulse_red = (m5['close'] < m5['open']) and (m5_body > m5_atr * 0.6) and (m5_lower_wick < m5_body * 0.3)
             
-            # منع الشموع العملاقة لتجنب الشراء في القمة (FOMO Protection)
+            # الشمعة الابتلاعية (للانعكاسات)
+            is_bullish_engulfing = (m5['close'] > m5['open']) and (m5_prev['close'] < m5_prev['open']) and (m5_body > m5_prev_body) and (m5['close'] > m5_prev['open'])
+            is_bearish_engulfing = (m5['close'] < m5['open']) and (m5_prev['close'] > m5_prev['open']) and (m5_body > m5_prev_body) and (m5['close'] < m5_prev['open'])
+
+            # درع منع الشراء في القمة (إذا كانت الشمعة أكبر من 1.5 ضعف حركتها الطبيعية، تجاهلها)
             if m5_body > (m5_atr * 1.5): return None 
 
-            # تحديد الترند العام
-            macro_bullish = h1['ema21'] > h1['ema50'] > h1['ema200']
-            macro_bearish = h1['ema21'] < h1['ema50'] < h1['ema200']
+            # الاتجاه العام
+            macro_bullish = h1['close'] > h1['ema200']
+            macro_bearish = h1['close'] < h1['ema200']
 
-            side = ""; strat = ""
+            strat = ""; side = ""
 
             # ==========================================
-            # 🧨 استراتيجيات SMC & Quant الفعالة 100%
+            # 🧨 الاستراتيجيات الـ 6 (بتقنية البرايس أكشن النقي)
             # ==========================================
 
-            # 1. SMC Liquidity Sweep (صيد السيولة وضرب الستوبات)
-            # السعر نزل تحت الدعم لضرب الستوبات، ثم أغلق شمعة 5د للأعلى بقوة تاركاً ذيلاً.
-            if m5['low'] < h1['ll20'] and m5['close'] > h1['ll20'] and m5_lower_wick > m5_body * 1.0 and m5_strong_green:
-                side = "LONG"; strat = "SMC Liquidity Sweep"
-            elif m5['high'] > h1['hh20'] and m5['close'] < h1['hh20'] and m5_upper_wick > m5_body * 1.0 and m5_strong_red:
-                side = "SHORT"; strat = "SMC Liquidity Sweep"
+            # 1. Break & Retest (تعتمد على ذيل الرفض - Liquidity Wick)
+            if macro_bullish and (m5['low'] <= h1['ema21']) and (m5['close'] > h1['ema21']) and (m5_lower_wick > m5_body * 1.5):
+                strat = "Break & Retest (Wick Rejection)"; side = "LONG"
+            elif macro_bearish and (m5['high'] >= h1['ema21']) and (m5['close'] < h1['ema21']) and (m5_upper_wick > m5_body * 1.5):
+                strat = "Break & Retest (Wick Rejection)"; side = "SHORT"
 
-            # 2. Volatility Squeeze Breakout (انفجار الانضغاط الكمّي)
-            # البولينجر باند ضيق جداً (أقل من 3%)، والـ 5 دقائق كسرت المقاومة بفوليوم
-            elif h1['bb_width'] < 0.03:
-                if m5_prev['close'] <= h1['hh20'] and m5['close'] > h1['hh20'] and m5_strong_green and vol_surge:
-                    side = "LONG"; strat = "Squeeze Breakout"
-                elif m5_prev['close'] >= h1['ll20'] and m5['close'] < h1['ll20'] and m5_strong_red and vol_surge:
-                    side = "SHORT"; strat = "Squeeze Breakout"
+            # 2. Support Breakdown (كسر قوي ومغلق بالقرب من الدعم - مسافة صفرية)
+            elif macro_bearish and (m5_prev['close'] >= h1['ll20']) and (m5['close'] < h1['ll20']) and (h1['ll20'] - m5['close'] <= m5_atr * 0.8) and m5_impulse_red:
+                strat = "Support Breakdown (Impulse)"; side = "SHORT"
 
-            # 3. Golden Trend Pullback (الارتداد المؤسساتي مع الترند)
-            elif macro_bullish and (m5['low'] <= h1['ema21']) and m5['close'] > h1['ema21'] and m5_strong_green and (m5_lower_wick > m5_body * 0.5):
-                side = "LONG"; strat = "Trend Pullback"
-            elif macro_bearish and (m5['high'] >= h1['ema21']) and m5['close'] < h1['ema21'] and m5_strong_red and (m5_upper_wick > m5_body * 0.5):
-                side = "SHORT"; strat = "Trend Pullback"
+            # 3. Resistance Breakout (اختراق قوي ومغلق بالقرب من المقاومة - مسافة صفرية)
+            elif macro_bullish and (m5_prev['close'] <= h1['hh20']) and (m5['close'] > h1['hh20']) and (m5['close'] - h1['hh20'] <= m5_atr * 0.8) and m5_impulse_green:
+                strat = "Resistance Breakout (Impulse)"; side = "LONG"
 
-            # 4. ChoCH / Structure Reversal (انعكاس الهيكل الداخلي)
-            # تشبع شرائي/بيعي على الساعة، يتبعه كسر لآخر قاع/قمة على 5 دقائق
-            elif h1_prev['rsi'] > 75 and m5_prev['close'] >= m5['ll10'] and m5['close'] < m5['ll10'] and m5_strong_red:
-                side = "SHORT"; strat = "Structure Reversal"
-            elif h1_prev['rsi'] < 25 and m5_prev['close'] <= m5['hh10'] and m5['close'] > m5['hh10'] and m5_strong_green:
-                side = "LONG"; strat = "Structure Reversal"
+            # 4. Bump and Run Reversal (انعكاس من تشبع يعتمد على شمعة ابتلاعية)
+            elif h1_prev['rsi'] > 75 and is_bearish_engulfing and m5['close'] < m5['ema21']:
+                strat = "Bump & Run (Engulfing)"; side = "SHORT"
+            elif h1_prev['rsi'] < 25 and is_bullish_engulfing and m5['close'] > m5['ema21']:
+                strat = "Bump & Run (Engulfing)"; side = "LONG"
 
-            # 5. Clean Breakout (الكسر النظيف - المسافة الصفرية)
-            # كسر مقاومة أو دعم، ويجب أن تغلق الشمعة قريبة جداً من خط الكسر (تجنب الدخول المتأخر)
-            elif macro_bullish and m5_prev['close'] <= h1['hh20'] and m5['close'] > h1['hh20'] and (m5['close'] - h1['hh20'] < m5_atr * 0.8) and m5_strong_green:
-                side = "LONG"; strat = "Clean Breakout"
-            elif macro_bearish and m5_prev['close'] >= h1['ll20'] and m5['close'] < h1['ll20'] and (h1['ll20'] - m5['close'] < m5_atr * 0.8) and m5_strong_red:
-                side = "SHORT"; strat = "Clean Breakout"
+            # 5. H&S / Double Top (تغير زخم המاكد + كسر الهيكل بنبضة سعرية)
+            elif macro_bearish and h1['macd_h'] < h1_prev['macd_h'] and (m5_prev['close'] >= h1['ll5']) and (m5['close'] < h1['ll5']) and m5_impulse_red:
+                 strat = "Double Top Breakdown"; side = "SHORT"
+
+            # 6. Inverse H&S / Double Bottom (تغير زخم الماكد + اختراق الهيكل بنبضة سعرية)
+            elif macro_bullish and h1['macd_h'] > h1_prev['macd_h'] and (m5_prev['close'] <= h1['hh5']) and (m5['close'] > h1['hh5']) and m5_impulse_green:
+                 strat = "Double Bottom Breakout"; side = "LONG"
 
             # ==========================================
             # 📐 الأهداف والستوب والرافعة الديناميكية
             # ==========================================
             if side != "":
-                # ستوب لوس محمي خلف الهيكل اللحظي (آمن جداً)
+                
+                # ستوب لوس محمي ومخفي خلف ذيول الشموع الأخيرة
                 if side == "LONG":
-                    sl = df_m5['low'].iloc[-3:].min() - (m5_atr * 0.2)
+                    sl = df_m5['low'].iloc[-5:].min() - (m5_atr * 0.2)
                 else:
-                    sl = df_m5['high'].iloc[-3:].max() + (m5_atr * 0.2)
+                    sl = df_m5['high'].iloc[-5:].max() + (m5_atr * 0.2)
 
                 risk_abs = abs(entry - sl)
                 
-                # تقييد المخاطرة 
+                # تقييد المخاطرة لضمان عقلانية الستوب لوس
                 max_allowed_risk = m5_atr * 3.0 
                 min_allowed_risk = m5_atr * 0.5
                 
@@ -204,7 +196,7 @@ class StrategyEngine:
                 tps = []
                 pnls = []
                 
-                # رافعة مالية رياضية تستهدف خسارة 12% فقط عند ضرب الستوب
+                # رافعة مالية رياضية (مخاطرة بـ 12% من الهامش فقط عند الستوب)
                 risk_pct = (risk_abs / entry) * 100
                 if risk_pct > 0:
                     lev = int(12.0 / risk_pct) 
@@ -212,6 +204,7 @@ class StrategyEngine:
                 else:
                     lev = Config.MIN_LEVERAGE 
 
+                # الأهداف موزعة بذكاء يعتمد على الـ ATR الحقيقي للعملة لضمان ضرب الأهداف
                 step_size = max(risk_abs * 0.8, m5_atr * 1.5) 
 
                 for i in range(1, 11):
@@ -232,7 +225,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت (BULLETPROOF TASK MANAGER)
+# 4. مدير البوت (STEALTH EXECUTION)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -245,8 +238,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 WALL STREET MASTER: V2200.0 (SMC Engine)", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V2200.0 Online.</b>\nSMC & Smart Quant Algorithms Active 🐋⚡")
+        Log.print("🚀 WALL STREET MASTER: V2400.0 (Velocity Sniper)", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V2400.0 Online.</b>\nPrice Velocity Engine Active (No Volume Dependency) 🎯")
 
     async def shutdown(self):
         self.running = False
@@ -261,8 +254,10 @@ class TradingSystem:
             raw_info = market_info.get('info', {})
             base_coin_name = raw_info.get('baseCoinName', '')
             
-            if base_coin_name: exact_app_name = f"{base_coin_name}USDT"
-            else: exact_app_name = sym.split(':')[0].replace('/', '')
+            if base_coin_name:
+                exact_app_name = f"{base_coin_name}USDT"
+            else:
+                exact_app_name = sym.split(':')[0].replace('/', '')
             
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
             targets_msg = ""
@@ -290,9 +285,9 @@ class TradingSystem:
                 trade['last_sl_price'] = trade['sl']
                 self.active_trades[sym] = trade
                 self.stats["signals"] += 1
-                Log.print(f"🚀 SMC SETUP FIRED: {exact_app_name} | {trade['strat']}", Log.GREEN)
+                Log.print(f"🚀 PATTERN FIRED: {exact_app_name} | {trade['strat']}", Log.GREEN)
         except Exception as e:
-            Log.print(f"Execution Error on {trade['symbol']}: {e}", Log.RED)
+            Log.print(f"Execution Error: {e}", Log.RED)
 
     async def fetch_mtf_data(self, symbol):
         try:
@@ -317,9 +312,10 @@ class TradingSystem:
             
             try:
                 tickers = await self.exchange.fetch_tickers()
-                valid_coins = [sym for sym, d in tickers.items() if 'USDT' in sym and ':' in sym and d.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC'])]
+                # جلب العملات ذات السيولة المرتفعة فقط للابتعاد عن العملات الميتة
+                valid_coins = [sym for sym, d in tickers.items() if 'USDT' in sym and ':' in sym and d.get('quoteVolume', 0) >= 100_000 and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC'])]
                 
-                Log.print(f"⚡ SMC Scanner Active on {len(valid_coins)} Pairs...", Log.BLUE)
+                Log.print(f"⚡ Velocity Scanner Active on {len(valid_coins)} Pairs...", Log.BLUE)
                 
                 chunk_size = 10 
                 for i in range(0, len(valid_coins), chunk_size):
@@ -441,7 +437,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER V2200.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER V2400.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
