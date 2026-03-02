@@ -57,7 +57,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك الرؤية الهندسية الآمن 🧠 (GEOMETRIC PATTERN ENGINE)
+# 3. محرك النخبة الكمّي المحصن 🧠 (BULLETPROOF QUANT ENGINE)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -68,7 +68,6 @@ class StrategyEngine:
 
     @staticmethod
     def get_swing_pivots(df, window=5):
-        # نسخة محسنة ومحمية من أخطاء الذاكرة (SettingWithCopyWarning)
         df_copy = df.copy()
         rolling_max = df_copy['high'].rolling(window, center=True).max()
         rolling_min = df_copy['low'].rolling(window, center=True).min()
@@ -79,8 +78,7 @@ class StrategyEngine:
         highs = df_copy['swing_high'].dropna().values
         lows = df_copy['swing_low'].dropna().values
         
-        if len(highs) < 3 or len(lows) < 3:
-            return None, None
+        if len(highs) < 3 or len(lows) < 3: return None, None
         return highs[-3:], lows[-3:]
 
     @staticmethod
@@ -92,22 +90,40 @@ class StrategyEngine:
             df_h1['ema50'] = ta.ema(df_h1['close'], length=50) 
             df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
             df_h1['atr'] = ta.atr(df_h1['high'], df_h1['low'], df_h1['close'], length=14)
+            df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
+            df_h1['hh20'] = df_h1['high'].rolling(20).max().shift(1) 
+            df_h1['ll20'] = df_h1['low'].rolling(20).min().shift(1)  
+            df_h1['hh5'] = df_h1['high'].rolling(5).max().shift(1)   
+            df_h1['ll5'] = df_h1['low'].rolling(5).min().shift(1)
             
+            df_h1['obv'] = ta.obv(df_h1['close'], df_h1['vol'])
+            df_h1['obv_ema'] = ta.ema(df_h1['obv'], length=10)
+            df_h1['ema50_slope'] = (df_h1['ema50'].diff(3) / df_h1['ema50'].shift(3)) * 100
+            
+            adx_h1 = ta.adx(df_h1['high'], df_h1['low'], df_h1['close'], length=14)
+            df_h1['adx'] = adx_h1.iloc[:, 0] if adx_h1 is not None and not adx_h1.empty else 0.0
+
+            macd_h1 = ta.macd(df_h1['close'])
+            if macd_h1 is not None and len(macd_h1.columns) >= 2:
+                df_h1['macd_h'] = macd_h1.iloc[:, 1]
+            else:
+                df_h1['macd_h'] = 0
+
             h1 = df_h1.iloc[-1]
-            
+            h1_prev = df_h1.iloc[-2]
+
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
             
-            # 🚨 حماية النبض: التأكد أن العملة لم تُشطب وليست متوقفة
             last_timestamp = int(df_m5['time'].iloc[-1])
             current_timestamp = int(datetime.now(timezone.utc).timestamp() * 1000)
-            if current_timestamp - last_timestamp > 1800000: # أكثر من 30 دقيقة
-                return None
+            if current_timestamp - last_timestamp > 1800000: return None
             
             df_m5['ema21'] = ta.ema(df_m5['close'], length=21)
             df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
-            df_m5['vol_ma'] = df_m5['vol'].rolling(10).mean()
-            
+            df_m5['ll10'] = df_m5['low'].rolling(10).min().shift(1)
+            df_m5['hh10'] = df_m5['high'].rolling(10).max().shift(1)
+
             m5 = df_m5.iloc[-1]
             m5_prev = df_m5.iloc[-2]
             entry = float(m5['close'])
@@ -115,102 +131,93 @@ class StrategyEngine:
 
             if pd.isna(h1['ema200']) or pd.isna(m5_atr): return None
 
-            # استخراج آمن لمؤشر ADX
-            adx_h1 = ta.adx(df_h1['high'], df_h1['low'], df_h1['close'], length=14)
-            current_adx = float(adx_h1.iloc[-1, 0]) if adx_h1 is not None and not adx_h1.empty else 0.0
-
-            # 🚨 تشريح الشمعة والزخم (Micro Action)
             m5_body = abs(m5['close'] - m5['open'])
-            m5_upper_wick = m5['high'] - max(m5['open'], m5['close'])
-            m5_lower_wick = min(m5['open'], m5['close']) - m5['low']
-            vol_surge = m5['vol'] > (m5['vol_ma'] * 1.5)
+            m5_total = m5['high'] - m5['low']
+            bqi = (m5_body / m5_total) if m5_total > 0 else 0
             
-            m5_strong_green = (m5['close'] > m5['open']) and (m5_body > m5_atr * 0.5) and (m5_upper_wick < m5_body * 0.3)
-            m5_strong_red = (m5['close'] < m5['open']) and (m5_body > m5_atr * 0.5) and (m5_lower_wick < m5_body * 0.3)
+            m5_strong_green = (m5['close'] > m5['open']) and (m5_body > m5_atr * 0.5) and (bqi >= 0.65)
+            m5_strong_red = (m5['close'] < m5['open']) and (m5_body > m5_atr * 0.5) and (bqi >= 0.65)
             
-            if m5_body > (m5_atr * 1.8): return None # منع الـ FOMO
+            if m5_body > (m5_atr * 1.5): return None 
 
-            # استخراج القمم والقيعان الهندسية
             h1_highs, h1_lows = StrategyEngine.get_swing_pivots(df_h1, window=5)
             if h1_highs is None or h1_lows is None: return None
 
             h1_h1, h1_h2, h1_h3 = h1_highs[0], h1_highs[1], h1_highs[2]
             h1_l1, h1_l2, h1_l3 = h1_lows[0], h1_lows[1], h1_lows[2]
 
-            macro_bullish = (h1['ema50'] > h1['ema200']) and (current_adx > 20)
-            macro_bearish = (h1['ema50'] < h1['ema200']) and (current_adx > 20)
+            old_range = h1_h1 - h1_l1
+            recent_range = h1_h3 - h1_l3
+            is_compressed = recent_range < (old_range * 0.80) if old_range > 0 else False
+
+            # فلاتر الأمان القصوى
+            macro_bullish = (h1['ema50'] > h1['ema200']) and (h1['adx'] > 20) and (h1['ema50_slope'] > 0.05) and (h1['obv'] > h1['obv_ema'])
+            macro_bearish = (h1['ema50'] < h1['ema200']) and (h1['adx'] > 20) and (h1['ema50_slope'] < -0.05) and (h1['obv'] < h1['obv_ema'])
             
             tol = h1['close'] * 0.003 
             side = ""; strat = ""
 
-            # ==========================================
-            # 🧨 النماذج الفنية الهندسية (Analyst Eyes)
-            # ==========================================
-
-            # 1. Bull Flag (علم صاعد)
+            # 1. Bull Flag 
             if macro_bullish and (h1_h3 < h1_h2) and (h1_l3 < h1_l2):
                 if m5_prev['close'] <= h1_h3 and m5['close'] > h1_h3 and m5_strong_green:
-                    side = "LONG"; strat = "Bull Flag Breakout"
+                    side = "LONG"; strat = "Bull Flag"
 
-            # 2. Bear Flag (علم هابط)
+            # 2. Bear Flag
             elif macro_bearish and (h1_l3 > h1_l2) and (h1_h3 > h1_h2):
                 if m5_prev['close'] >= h1_l3 and m5['close'] < h1_l3 and m5_strong_red:
-                    side = "SHORT"; strat = "Bear Flag Breakdown"
+                    side = "SHORT"; strat = "Bear Flag"
 
-            # 3. Symmetrical Triangle (مثلث متماثل)
-            elif (h1_h3 < h1_h2) and (h1_l3 > h1_l2):
+            # 3. Symmetrical Triangle 
+            elif is_compressed and (h1_h3 < h1_h2) and (h1_l3 > h1_l2):
                 if macro_bullish and m5_prev['close'] <= h1_h3 and m5['close'] > h1_h3 and m5_strong_green:
-                    side = "LONG"; strat = "Symmetrical Triangle Breakout"
+                    side = "LONG"; strat = "Sym Triangle"
                 elif macro_bearish and m5_prev['close'] >= h1_l3 and m5['close'] < h1_l3 and m5_strong_red:
-                    side = "SHORT"; strat = "Symmetrical Triangle Breakdown"
+                    side = "SHORT"; strat = "Sym Triangle"
 
-            # 4. Ascending Triangle (مثلث صاعد)
-            elif abs(h1_h3 - h1_h2) < tol and (h1_l3 > h1_l2):
-                if m5_prev['close'] <= max(h1_h3, h1_h2) and m5['close'] > max(h1_h3, h1_h2) and m5_strong_green:
-                    side = "LONG"; strat = "Ascending Triangle Breakout"
+            # 4. Ascending Triangle 
+            elif is_compressed and abs(h1_h3 - h1_h2) < tol and (h1_l3 > h1_l2):
+                if macro_bullish and m5_prev['close'] <= max(h1_h3, h1_h2) and m5['close'] > max(h1_h3, h1_h2) and m5_strong_green:
+                    side = "LONG"; strat = "Asc Triangle"
 
-            # 5. Descending Triangle (مثلث هابط)
-            elif abs(h1_l3 - h1_l2) < tol and (h1_h3 < h1_h2):
-                if m5_prev['close'] >= min(h1_l3, h1_l2) and m5['close'] < min(h1_l3, h1_l2) and m5_strong_red:
-                    side = "SHORT"; strat = "Descending Triangle Breakdown"
+            # 5. Descending Triangle
+            elif is_compressed and abs(h1_l3 - h1_l2) < tol and (h1_h3 < h1_h2):
+                if macro_bearish and m5_prev['close'] >= min(h1_l3, h1_l2) and m5['close'] < min(h1_l3, h1_l2) and m5_strong_red:
+                    side = "SHORT"; strat = "Desc Triangle"
 
-            # 6. Falling Wedge (وتد هابط)
-            elif (h1_h2 - h1_h3) > (h1_l2 - h1_l3) > 0:
-                if m5_prev['close'] <= h1_h3 and m5['close'] > h1_h3 and m5_strong_green and vol_surge:
-                    side = "LONG"; strat = "Falling Wedge Reversal"
+            # 6. Falling Wedge Reversal 
+            elif is_compressed and (h1_h2 - h1_h3) > (h1_l2 - h1_l3) > 0:
+                if m5_prev['close'] <= h1_h3 and m5['close'] > h1_h3 and m5_strong_green:
+                    side = "LONG"; strat = "Falling Wedge"
 
-            # 7. Rising Wedge (وتد صاعد)
-            elif (h1_l3 - h1_l2) > (h1_h3 - h1_h2) > 0:
-                if m5_prev['close'] >= h1_l3 and m5['close'] < h1_l3 and m5_strong_red and vol_surge:
-                    side = "SHORT"; strat = "Rising Wedge Reversal"
+            # 7. Rising Wedge Reversal
+            elif is_compressed and (h1_l3 - h1_l2) > (h1_h3 - h1_h2) > 0:
+                if m5_prev['close'] >= h1_l3 and m5['close'] < h1_l3 and m5_strong_red:
+                    side = "SHORT"; strat = "Rising Wedge"
 
-            # 8. Double Bottom (قاع مزدوج)
-            elif abs(h1_l3 - h1_l2) < tol:
+            # 8. Double Bottom 
+            elif abs(h1_l3 - h1_l2) < tol and (h1['obv'] > h1['obv_ema']):
                 neckline = h1_h2 
                 if m5_prev['close'] <= neckline and m5['close'] > neckline and m5_strong_green:
-                    side = "LONG"; strat = "Double Bottom Breakout"
+                    side = "LONG"; strat = "Double Bottom"
 
-            # 9. Double Top (قمة مزدوجة)
-            elif abs(h1_h3 - h1_h2) < tol:
+            # 9. Double Top
+            elif abs(h1_h3 - h1_h2) < tol and (h1['obv'] < h1['obv_ema']):
                 neckline = h1_l3 
                 if m5_prev['close'] >= neckline and m5['close'] < neckline and m5_strong_red:
-                    side = "SHORT"; strat = "Double Top Breakdown"
+                    side = "SHORT"; strat = "Double Top"
 
-            # 10. Head & Shoulders (رأس وكتفين)
-            elif (h1_h2 > h1_h1) and (h1_h2 > h1_h3) and abs(h1_h1 - h1_h3) < (tol * 2):
+            # 10. Head & Shoulders
+            elif (h1_h2 > h1_h1) and (h1_h2 > h1_h3) and abs(h1_h1 - h1_h3) < (tol * 2) and (h1['obv'] < h1['obv_ema']):
                 neckline = min(h1_l2, h1_l3)
                 if m5_prev['close'] >= neckline and m5['close'] < neckline and m5_strong_red:
-                    side = "SHORT"; strat = "Head & Shoulders Breakdown"
+                    side = "SHORT"; strat = "Head & Shoulders"
 
-            # 11. Inverse Head & Shoulders (رأس وكتفين مقلوب)
-            elif (h1_l2 < h1_l1) and (h1_l2 < h1_l3) and abs(h1_l1 - h1_l3) < (tol * 2):
+            # 11. Inverse Head & Shoulders
+            elif (h1_l2 < h1_l1) and (h1_l2 < h1_l3) and abs(h1_l1 - h1_l3) < (tol * 2) and (h1['obv'] > h1['obv_ema']):
                 neckline = max(h1_h2, h1_h3)
                 if m5_prev['close'] <= neckline and m5['close'] > neckline and m5_strong_green:
-                    side = "LONG"; strat = "Inv Head & Shoulders Breakout"
+                    side = "LONG"; strat = "Inv Head & Shoulders"
 
-            # ==========================================
-            # 📐 الأهداف والستوب والرافعة الديناميكية
-            # ==========================================
             if side != "":
                 if side == "LONG":
                     sl = df_m5['low'].iloc[-3:].min() - (m5_atr * 0.2)
@@ -218,7 +225,6 @@ class StrategyEngine:
                     sl = df_m5['high'].iloc[-3:].max() + (m5_atr * 0.2)
 
                 risk_abs = abs(entry - sl)
-                
                 max_allowed_risk = m5_atr * 3.0 
                 min_allowed_risk = m5_atr * 0.5
                 
@@ -261,7 +267,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت الآمن (SAFE TASK MANAGER)
+# 4. مدير البوت (BULLETPROOF TASK MANAGER)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -274,8 +280,8 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 WALL STREET MASTER: V2000.0 (Flawless Diamond)", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V2000.0 Online.</b>\nDeep Audit Complete | Zero-Error Engine 💎⚡")
+        Log.print("🚀 WALL STREET MASTER: V2100.1 (Bulletproof Edition)", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V2100.1 Online.</b>\nDeep Code Audit Complete | 100% Safe Execution 🛡️⚡")
 
     async def shutdown(self):
         self.running = False
@@ -283,44 +289,47 @@ class TradingSystem:
         await self.exchange.close()
 
     async def execute_trade(self, trade):
-        sym = trade['symbol']
-        
-        market_info = self.exchange.markets.get(sym, {})
-        raw_info = market_info.get('info', {})
-        base_coin_name = raw_info.get('baseCoinName', '')
-        
-        if base_coin_name:
-            exact_app_name = f"{base_coin_name}USDT"
-        else:
-            exact_app_name = sym.split(':')[0].replace('/', '')
-        
-        icon = "🟢" if trade['side'] == "LONG" else "🔴"
-        targets_msg = ""
-        for idx in range(10):
-            targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{self.exchange.price_to_precision(sym, trade['tps'][idx])}</code> (+{trade['pnls'][idx]:.1f}%)\n"
+        try:
+            sym = trade['symbol']
+            
+            market_info = self.exchange.markets.get(sym, {})
+            raw_info = market_info.get('info', {})
+            base_coin_name = raw_info.get('baseCoinName', '')
+            
+            if base_coin_name:
+                exact_app_name = f"{base_coin_name}USDT"
+            else:
+                exact_app_name = sym.split(':')[0].replace('/', '')
+            
+            icon = "🟢" if trade['side'] == "LONG" else "🔴"
+            targets_msg = ""
+            for idx in range(10):
+                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{self.exchange.price_to_precision(sym, trade['tps'][idx])}</code> (+{trade['pnls'][idx]:.1f}%)\n"
 
-        pnl_sl_raw = StrategyEngine.calc_actual_roe(trade['entry'], trade['sl'], trade['side'], trade['leverage'])
+            pnl_sl_raw = StrategyEngine.calc_actual_roe(trade['entry'], trade['sl'], trade['side'], trade['leverage'])
 
-        msg = (
-            f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
-            f"────────────────\n"
-            f"🛒 <b>Entry:</b> <code>{self.exchange.price_to_precision(sym, trade['entry'])}</code>\n"
-            f"⚖️ <b>Leverage:</b> <b>{trade['leverage']}x</b>\n"
-            f"────────────────\n"
-            f"{targets_msg}"
-            f"────────────────\n"
-            f"🛑 <b>Stop Loss:</b> <code>{self.exchange.price_to_precision(sym, trade['sl'])}</code> ({pnl_sl_raw:.1f}% ROE)"
-        )
-        
-        msg_id = await self.tg.send(msg)
-        if msg_id:
-            trade['msg_id'] = msg_id
-            trade['step'] = 0
-            trade['last_tp_hit'] = 0
-            trade['last_sl_price'] = trade['sl']
-            self.active_trades[sym] = trade
-            self.stats["signals"] += 1
-            Log.print(f"🚀 INSTANT FIRE: {exact_app_name} | {trade['strat']}", Log.GREEN)
+            msg = (
+                f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
+                f"────────────────\n"
+                f"🛒 <b>Entry:</b> <code>{self.exchange.price_to_precision(sym, trade['entry'])}</code>\n"
+                f"⚖️ <b>Leverage:</b> <b>{trade['leverage']}x</b>\n"
+                f"────────────────\n"
+                f"{targets_msg}"
+                f"────────────────\n"
+                f"🛑 <b>Stop Loss:</b> <code>{self.exchange.price_to_precision(sym, trade['sl'])}</code> ({pnl_sl_raw:.1f}% ROE)"
+            )
+            
+            msg_id = await self.tg.send(msg)
+            if msg_id:
+                trade['msg_id'] = msg_id
+                trade['step'] = 0
+                trade['last_tp_hit'] = 0
+                trade['last_sl_price'] = trade['sl']
+                self.active_trades[sym] = trade
+                self.stats["signals"] += 1
+                Log.print(f"🚀 A+ SETUP FIRED: {exact_app_name} | {trade['strat']}", Log.GREEN)
+        except Exception as e:
+            Log.print(f"Execution Error on {trade['symbol']}: {e}", Log.RED)
 
     async def fetch_mtf_data(self, symbol):
         try:
@@ -347,9 +356,8 @@ class TradingSystem:
                 tickers = await self.exchange.fetch_tickers()
                 valid_coins = [sym for sym, d in tickers.items() if 'USDT' in sym and ':' in sym and d.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC'])]
                 
-                Log.print(f"⚡ Flawless Scanner Active on {len(valid_coins)} Pairs...", Log.BLUE)
+                Log.print(f"⚡ Shielded Scanner Active on {len(valid_coins)} Pairs...", Log.BLUE)
                 
-                # 🚨 تقليص الحزمة إلى 10 فقط لحماية اتصالك من الحظر من قبل MEXC
                 chunk_size = 10 
                 
                 for i in range(0, len(valid_coins), chunk_size):
@@ -364,7 +372,7 @@ class TradingSystem:
                             if len(self.active_trades) < Config.MAX_TRADES_AT_ONCE:
                                 await self.execute_trade(res)
                     
-                    await asyncio.sleep(0.8) # تأخير محسوب بدقة لأمان الـ API
+                    await asyncio.sleep(0.8) 
 
                 await asyncio.sleep(2) 
                 gc.collect() 
@@ -471,7 +479,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER V2000.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER V2100.1 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
