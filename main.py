@@ -13,8 +13,7 @@ from fastapi.responses import HTMLResponse
 import uvicorn
 from contextlib import asynccontextmanager
 
-warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", category=RuntimeWarning)
+warnings.filterwarnings("ignore")
 
 # ==========================================
 # 1. الإعدادات المركزية (CONFIG)
@@ -23,9 +22,12 @@ class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TIMEFRAME = '15m'  
+    # محرك الفريمات المزدوج: ساعة للرادار + 5 دقائق للقنص
+    TF_MACRO = '1h'   
+    TF_MICRO = '5m'   
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 50_000 
+    MIN_LEVERAGE = 2  # أقل رافعة مالية مسموحة
     MAX_SPREAD_PCT = 0.005 
 
 class Log:
@@ -57,7 +59,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك النماذج الاحترافي 🧠 (MTF SNIPER ENGINE)
+# 3. محرك الاستراتيجيات المدمج 🧠 (H1 + M5 TRUE MTF)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -69,106 +71,117 @@ class StrategyEngine:
             return float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def analyze_data(symbol, ohlcv):
+    def analyze_mtf(symbol, h1_data, m5_data):
         try:
-            df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            df['time'] = pd.to_datetime(df['time'], unit='ms')
-            df.set_index('time', inplace=True)
-            df.sort_index(inplace=True)
+            # 1️⃣ تحليل فريم الساعة (الصورة الكبرى والنماذج)
+            df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            if len(df_h1) < 250: return None # التأكد من وجود بيانات كافية
             
-            if len(df) < 850 or df['vol'].iloc[-2] == 0: 
-                return None
-
-            curr, prev = df.iloc[-1], df.iloc[-2]
-            entry = float(curr['close'])
-
-            # 📊 متوسطات مدمجة: فريم 15د يقرأ قوة فريم الساعة
-            df['ema21'] = ta.ema(df['close'], length=21) 
-            df['ema50'] = ta.ema(df['close'], length=50) 
-            df['ema200'] = ta.ema(df['close'], length=200) 
-            df['ema800'] = ta.ema(df['close'], length=800) 
-            df['rsi'] = ta.rsi(df['close'], length=14)
-            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            df_h1['ema21'] = ta.ema(df_h1['close'], length=21)
+            df_h1['ema50'] = ta.ema(df_h1['close'], length=50)
+            df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
+            df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
+            df_h1['hh20'] = df_h1['high'].rolling(20).max().shift(1) # مقاومة قوية
+            df_h1['ll20'] = df_h1['low'].rolling(20).min().shift(1)  # دعم قوي
+            df_h1['hh5'] = df_h1['high'].rolling(5).max().shift(1)   # مقاومة فرعية
+            df_h1['ll5'] = df_h1['low'].rolling(5).min().shift(1)    # دعم فرعي
             
-            macd = ta.macd(df['close'])
-            if macd is not None and not macd.empty:
-                df['macd_h'] = macd.iloc[:, 1] 
+            # حماية ذكية لاستخراج الماكدي وتجنب أخطاء المصفوفات
+            macd_h1 = ta.macd(df_h1['close'])
+            if macd_h1 is not None and len(macd_h1.columns) >= 2:
+                df_h1['macd_h'] = macd_h1.iloc[:, 1]
             else:
-                df['macd_h'] = 0
+                df_h1['macd_h'] = 0
 
-            df['hh40'] = df['high'].rolling(40, min_periods=10).max().shift(1) 
-            df['ll40'] = df['low'].rolling(40, min_periods=10).min().shift(1)  
-            df['hh10'] = df['high'].rolling(10, min_periods=3).max().shift(1)   
-            df['ll10'] = df['low'].rolling(10, min_periods=3).min().shift(1)
+            h1 = df_h1.iloc[-1]
+            h1_prev = df_h1.iloc[-2]
 
-            if pd.isna(df['atr'].iloc[-1]) or pd.isna(df['ema800'].iloc[-1]): return None
-
-            atr = float(df['atr'].iloc[-1])
-            atr_pct = (atr / entry) * 100
-            if atr_pct < 0.15: return None 
-
-            avg_vol = df['vol'].iloc[-20:-1].mean()
-            vol_surge = curr['vol'] > (avg_vol * 1.3) 
-
-            is_green = curr['close'] > curr['open']
-            is_red = curr['close'] < curr['open']
-            body = abs(curr['close'] - curr['open'])
-            lower_wick = min(curr['open'], curr['close']) - curr['low']
-            upper_wick = curr['high'] - max(curr['open'], curr['close'])
-
-            if upper_wick > body * 1.5 or lower_wick > body * 1.5: return None
-            if body > (atr * 1.5): return None 
+            # 2️⃣ تحليل فريم 5 دقائق (نقطة الدخول والقنص)
+            df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            if len(df_m5) < 50: return None
             
-            strong_body = body > (atr * 0.5)
+            df_m5['ema21'] = ta.ema(df_m5['close'], length=21)
+            df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
+            df_m5['vol_ma'] = df_m5['vol'].rolling(10).mean()
+            
+            # قيعان وقمم الـ 5 دقائق للستوب المجهري
+            df_m5['ll10'] = df_m5['low'].rolling(10).min().shift(1)
+            df_m5['hh10'] = df_m5['high'].rolling(10).max().shift(1)
 
-            macro_bullish = curr['close'] > df['ema800'].iloc[-1]
-            macro_bearish = curr['close'] < df['ema800'].iloc[-1]
+            m5 = df_m5.iloc[-1]
+            m5_prev = df_m5.iloc[-2]
+            entry = float(m5['close'])
+            m5_atr = float(df_m5['atr'].iloc[-1])
 
-            fresh_break_res = prev['close'] <= df['hh40'].iloc[-1] and curr['close'] > df['hh40'].iloc[-1]
-            fresh_break_sup = prev['close'] >= df['ll40'].iloc[-1] and curr['close'] < df['ll40'].iloc[-1]
-            fresh_minor_res = prev['close'] <= df['hh10'].iloc[-1] and curr['close'] > df['hh10'].iloc[-1]
-            fresh_minor_sup = prev['close'] >= df['ll10'].iloc[-1] and curr['close'] < df['ll10'].iloc[-1]
+            if pd.isna(h1['ema200']) or pd.isna(m5_atr): return None
+
+            # فلاتر الـ 5 دقائق (تأكيد الانفجار اللحظي)
+            m5_vol_surge = m5['vol'] > (m5['vol_ma'] * 1.5) 
+            m5_body = abs(m5['close'] - m5['open'])
+            m5_upper_wick = m5['high'] - max(m5['open'], m5['close'])
+            m5_lower_wick = min(m5['open'], m5['close']) - m5['low']
+            
+            m5_strong_green = (m5['close'] > m5['open']) and (m5_body > m5_atr * 0.4) 
+            m5_strong_red = (m5['close'] < m5['open']) and (m5_body > m5_atr * 0.4) 
+            
+            # مضاد الـ FOMO الصارم لفريم 5 دقائق
+            if m5_upper_wick > m5_body * 1.5 or m5_lower_wick > m5_body * 1.5: return None
+            if m5_body > (m5_atr * 2.2): return None 
+
+            # الاتجاه العام (الماكرو) من فريم الساعة
+            macro_bullish = h1['close'] > h1['ema200']
+            macro_bearish = h1['close'] < h1['ema200']
 
             strat = ""; side = ""
 
             # ==========================================
-            # 🧨 استراتيجيات القنص المبكر
+            # 🧨 استراتيجيات الـ MTF (نموذج الساعة + تأكيد 5 دقائق)
             # ==========================================
 
-            if is_green and df['close'].iloc[-5:-1].max() > df['hh40'].iloc[-5] and curr['low'] <= df['ema21'].iloc[-1] and curr['close'] > df['ema21'].iloc[-1] and lower_wick > body * 1.2 and macro_bullish:
-                strat = "15m Break & Retest"; side = "LONG"
-            elif is_red and df['close'].iloc[-5:-1].min() < df['ll40'].iloc[-5] and curr['high'] >= df['ema21'].iloc[-1] and curr['close'] < df['ema21'].iloc[-1] and upper_wick > body * 1.2 and macro_bearish:
-                strat = "15m Break & Retest"; side = "SHORT"
+            # 1. Break & Retest 
+            if macro_bullish and (m5['low'] <= h1['ema21']) and (m5['close'] > h1['ema21']) and m5_lower_wick > m5_body * 1.2 and m5_strong_green:
+                strat = "LONG_BR"; side = "LONG"
+            elif macro_bearish and (m5['high'] >= h1['ema21']) and (m5['close'] < h1['ema21']) and m5_upper_wick > m5_body * 1.2 and m5_strong_red:
+                strat = "SHORT_BR"; side = "SHORT"
 
-            elif is_red and fresh_break_sup and strong_body and vol_surge and macro_bearish:
-                strat = "15m Support Breakdown"; side = "SHORT"
+            # 2. Support Breakdown
+            elif macro_bearish and (m5_prev['close'] >= h1['ll20']) and (m5['close'] < h1['ll20']) and m5_strong_red and m5_vol_surge:
+                strat = "SHORT_SB"; side = "SHORT"
 
-            elif is_green and fresh_break_res and strong_body and vol_surge and macro_bullish:
-                strat = "15m Resistance Breakout"; side = "LONG"
+            # 3. Resistance Breakout
+            elif macro_bullish and (m5_prev['close'] <= h1['hh20']) and (m5['close'] > h1['hh20']) and m5_strong_green and m5_vol_surge:
+                strat = "LONG_RB"; side = "LONG"
 
-            elif is_red and df['rsi'].rolling(10).max().iloc[-2] > 75 and curr['close'] < df['ema21'].iloc[-1] and strong_body and vol_surge:
-                strat = "15m Reversal Setup"; side = "SHORT"
+            # 4. Bump and Run Reversal
+            elif h1_prev['rsi'] > 72 and m5['close'] < m5['ema21'] and m5_strong_red and m5_vol_surge:
+                strat = "SHORT_BARR"; side = "SHORT"
+            elif h1_prev['rsi'] < 28 and m5['close'] > m5['ema21'] and m5_strong_green and m5_vol_surge:
+                strat = "LONG_BARR"; side = "LONG"
 
-            elif is_red and fresh_minor_sup and df['macd_h'].iloc[-1] < df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].max() > df['ema200'].iloc[-1] and strong_body and vol_surge and macro_bearish:
-                 strat = "15m H&S / Double Top"; side = "SHORT"
+            # 5. H&S / Double Top
+            elif macro_bearish and h1['macd_h'] < h1_prev['macd_h'] and (m5_prev['close'] >= h1['ll5']) and (m5['close'] < h1['ll5']) and m5_strong_red and m5_vol_surge:
+                 strat = "SHORT_DT"; side = "SHORT"
 
-            elif is_green and fresh_minor_res and df['macd_h'].iloc[-1] > df['macd_h'].iloc[-2] and df['close'].iloc[-15:-1].min() < df['ema200'].iloc[-1] and strong_body and vol_surge and macro_bullish:
-                 strat = "15m Inv H&S / Double Bottom"; side = "LONG"
+            # 6. Inverse H&S / Double Bottom
+            elif macro_bullish and h1['macd_h'] > h1_prev['macd_h'] and (m5_prev['close'] <= h1['hh5']) and (m5['close'] > h1['hh5']) and m5_strong_green and m5_vol_surge:
+                 strat = "LONG_DB"; side = "LONG"
 
             # ==========================================
             # 📐 الأهداف والستوب والرافعة الديناميكية
             # ==========================================
             if strat != "":
                 
+                # الستوب لوس مجهري يوضع خلف قيعان/قمم فريم 5 دقائق لحمايتك
                 if side == "LONG":
-                    struct_sl = df['ll10'].iloc[-1]
-                    sl = min(entry - (atr * 1.5), struct_sl - (atr * 0.2))
+                    struct_sl = df_m5['ll10'].iloc[-1]
+                    sl = min(entry - (m5_atr * 1.5), struct_sl - (m5_atr * 0.2))
                 else:
-                    struct_sl = df['hh10'].iloc[-1]
-                    sl = max(entry + (atr * 1.5), struct_sl + (atr * 0.2))
+                    struct_sl = df_m5['hh10'].iloc[-1]
+                    sl = max(entry + (m5_atr * 1.5), struct_sl + (m5_atr * 0.2))
 
+                # حماية الستوب من التذبذب غير الطبيعي
                 risk_abs = abs(entry - sl)
-                risk_abs = max(entry * 0.005, min(entry * 0.10, risk_abs)) 
+                risk_abs = max(entry * 0.003, min(entry * 0.08, risk_abs)) 
                 
                 if side == "LONG":
                     sl = entry - risk_abs
@@ -178,15 +191,15 @@ class StrategyEngine:
                 tps = []
                 pnls = []
                 
-                # 🚀 رافعة مالية ديناميكية بالكامل وبدون قيود سقف
+                # الرافعة المالية تبدأ من 2x كحد أدنى وتتوسع حسب أمان الصفقة
                 risk_pct = (risk_abs / entry) * 100
                 if risk_pct > 0:
-                    lev = int(15.0 / risk_pct)
-                    lev = max(1, lev) # التأكد فقط من أن الرافعة لا تكون صفر أو بالسالب
+                    lev = int(15.0 / risk_pct) 
+                    lev = max(Config.MIN_LEVERAGE, min(125, lev)) 
                 else:
-                    lev = 10 
+                    lev = Config.MIN_LEVERAGE 
 
-                step_size = risk_abs * 0.80 
+                step_size = risk_abs * 0.85 
 
                 for i in range(1, 11):
                     if side == "LONG":
@@ -196,19 +209,19 @@ class StrategyEngine:
                     tps.append(float(target))
                     pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
 
-                del df
+                del df_h1, df_m5
                 return {
                     "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
                     "leverage": lev, "strat": strat
                 }
 
-            del df
+            del df_h1, df_m5
             return None
         except Exception as e:
             return None
 
 # ==========================================
-# 4. مدير البوت المتطور (10 TARGETS & TRAILING SL)
+# 4. مدير البوت المتطور (MTF TASK MANAGER)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -221,27 +234,27 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
-        Log.print("🚀 WALL STREET MASTER ONLINE: V400.0 (15m Sniper)", Log.GREEN)
-        await self.tg.send("🟢 <b>Fortress V400.0 Online.</b>\n15m Early Sniper Engine | Dynamic Leverage | 10 Targets 🏦")
+        Log.print("🚀 WALL STREET MASTER: V700.0 (H1+M5 Engine)", Log.GREEN)
+        await self.tg.send("🟢 <b>Fortress V700.0 Online.</b>\nRadar: 1H | Sniper: 5m\nSystem Ready 🏦")
 
     async def shutdown(self):
         self.running = False
         await self.tg.stop()
         await self.exchange.close()
 
-    async def fetch_and_analyze(self, symbol):
-        for attempt in range(3):
-            try:
-                ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe=Config.TIMEFRAME, limit=1000) 
-                if ohlcv:
-                    res = await asyncio.to_thread(StrategyEngine.analyze_data, symbol, ohlcv)
-                    if res: 
-                        res['symbol'] = symbol 
-                        return res
-                break
-            except Exception: 
-                if attempt < 2:
-                    await asyncio.sleep(1)
+    async def fetch_mtf_data(self, symbol):
+        try:
+            # 🚀 سحب 500 شمعة للساعة لضمان دقة الـ EMA200 
+            h1, m5 = await asyncio.gather(
+                self.exchange.fetch_ohlcv(symbol, Config.TF_MACRO, limit=500),
+                self.exchange.fetch_ohlcv(symbol, Config.TF_MICRO, limit=100)
+            )
+            if h1 and m5:
+                res = await asyncio.to_thread(StrategyEngine.analyze_mtf, symbol, h1, m5)
+                if res: 
+                    res['symbol'] = symbol 
+                    return res
+        except Exception: pass
         return None
 
     async def scan_market(self):
@@ -264,14 +277,14 @@ class TradingSystem:
                                 if ((ask - bid) / bid) <= Config.MAX_SPREAD_PCT:
                                     valid_coins.append(sym)
                 
-                Log.print(f"⚡ MTF 15m Sniper Scan Started on {len(valid_coins)} Pairs...", Log.BLUE)
+                Log.print(f"⚡ MTF Radar (1H/5m) Scanning {len(valid_coins)} Pairs...", Log.BLUE)
                 
-                chunk_size = 20 
+                chunk_size = 15 
                 for i in range(0, len(valid_coins), chunk_size):
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     
                     chunk = valid_coins[i:i+chunk_size]
-                    tasks = [asyncio.create_task(self.fetch_and_analyze(sym)) for sym in chunk]
+                    tasks = [asyncio.create_task(self.fetch_mtf_data(sym)) for sym in chunk]
                     
                     for coro in asyncio.as_completed(tasks):
                         if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
@@ -293,6 +306,7 @@ class TradingSystem:
                             for idx in range(10):
                                 targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{fmt(tps[idx])}</code> (+{pnls[idx]:.1f}%)\n"
 
+                            # 🚀 إزالة اسم الاستراتيجية من الرسالة لتكون أنظف وأكثر احترافية
                             msg = (
                                 f"{icon} <b><code>{clean_name}</code> ({side})</b>\n"
                                 f"────────────────\n"
@@ -311,7 +325,7 @@ class TradingSystem:
                                     "msg_id": msg_id, "lev": lev, "pnl_sl": pnl_sl_raw, "step": 0, "last_tp_hit": 0
                                 }
                                 self.stats["signals"] += 1
-                                Log.print(f"🚀 PATTERN FIRED: {clean_name} | {strat} | Lev: {lev}x", Log.GREEN)
+                                Log.print(f"🚀 PATTERN FIRED: {clean_name} | Lev: {lev}x", Log.GREEN)
 
                     await asyncio.sleep(0.5) 
 
@@ -340,7 +354,7 @@ class TradingSystem:
                         actual_roe = StrategyEngine.calc_actual_roe(entry, current_sl, side, lev)
                         
                         if step == 0:
-                            msg = f"🛑 <b>Trade Closed at SL</b> ({actual_roe:+.1f}% ROE)\n💸 Actual PNL calculated."
+                            msg = f"🛑 <b>Trade Closed at SL</b> ({actual_roe:+.1f}% ROE)"
                             self.stats['losses'] += 1
                             self.stats['net_pnl'] += actual_roe
                         elif step == 1:
@@ -420,7 +434,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER V400.0 ONLINE</h1></body></html>"
+    return "<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER V700.0 ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
