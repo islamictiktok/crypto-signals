@@ -30,7 +30,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V8500.0" # 👈 Order Book Unpack Fix
+    VERSION = "V8700.0" # 👈 Volume Surge Filter Removed - Pure Price Action
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -115,8 +115,8 @@ class StrategyEngine:
 
             market_regime = "TREND" if h1['adx'] >= 25 else "RANGE"
 
-            h1_struct_bull = h1['high'] > h1_prev['hh20']
-            h1_struct_bear = h1['low'] < h1_prev['ll20']
+            h1_struct_bull = h1['close'] > h1_prev['hh20']
+            h1_struct_bear = h1['close'] < h1_prev['ll20']
 
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
@@ -128,8 +128,6 @@ class StrategyEngine:
             
             df_m5['ema21'] = ta.ema(df_m5['close'], length=21)
             df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
-            df_m5['vol_ma'] = df_m5['vol'].rolling(10).mean()
-            df_m5['vol_20_max'] = df_m5['vol'].rolling(20).max().shift(1).fillna(0)
 
             df_m5.dropna(inplace=True)
             if len(df_m5) < 5: return None
@@ -146,10 +144,8 @@ class StrategyEngine:
             candle_range = m5['high'] - m5['low']
             if candle_range <= 0: return None
             m5_body = abs(m5['close'] - m5['open'])
-            if m5_body < (candle_range * 0.6): return None 
-            if candle_range < (m5_atr * 1.2): return None
-
-            vol_surge = (m5['vol'] > m5['vol_ma'] * 1.8) and (m5['vol'] > m5['vol_20_max'] * 0.7)
+            if m5_body < (candle_range * 0.5): return None 
+            if candle_range < (m5_atr * 0.8): return None 
             
             m5_strong_green = m5['close'] > m5['open']
             m5_strong_red = m5['close'] < m5['open']
@@ -163,22 +159,23 @@ class StrategyEngine:
             strat = ""; side = ""
             valid_setups = []
 
+            # 👈 تم إزالة شرط الـ vol_surge من جميع الاستراتيجيات هنا
             if market_regime == "TREND":
-                if macro_bullish and h1_struct_bull and m5_strong_green and vol_surge:
-                    if (m5_prev['close'] > h1['ema21']) and (m5['close'] > h1['ema21']) and (m5['low'] <= h1['ema21'] or m5_prev['low'] <= h1['ema21']):
+                if macro_bullish and h1_struct_bull and m5_strong_green:
+                    if (m5_prev['close'] > m5['ema21']) and (m5['close'] > m5['ema21']) and (m5['low'] <= m5['ema21'] or m5_prev['low'] <= m5['ema21']):
                         valid_setups.append((1, "Break & Retest", "LONG"))
-                if macro_bearish and h1_struct_bear and m5_strong_red and vol_surge:
-                    if (m5_prev['close'] < h1['ema21']) and (m5['close'] < h1['ema21']) and (m5['high'] >= h1['ema21'] or m5_prev['high'] >= h1['ema21']):
+                if macro_bearish and h1_struct_bear and m5_strong_red:
+                    if (m5_prev['close'] < m5['ema21']) and (m5['close'] < m5['ema21']) and (m5['high'] >= m5['ema21'] or m5_prev['high'] >= m5['ema21']):
                         valid_setups.append((1, "Break & Retest", "SHORT"))
                         
-                if macro_bullish and (m5['open'] <= h1['hh20']) and (m5['close'] > h1['hh20']) and m5_strong_green and vol_surge:
+                if macro_bullish and (m5['open'] <= h1['hh20']) and (m5['close'] > h1['hh20']) and m5_strong_green:
                     valid_setups.append((2, "Resistance Breakout", "LONG"))
-                if macro_bearish and (m5['open'] >= h1['ll20']) and (m5['close'] < h1['ll20']) and m5_strong_red and vol_surge:
+                if macro_bearish and (m5['open'] >= h1['ll20']) and (m5['close'] < h1['ll20']) and m5_strong_red:
                     valid_setups.append((2, "Support Breakdown", "SHORT"))
                     
-                if (h1_prev['rsi'] < 25) and (m5['close'] > m5['ema21']) and m5_strong_green and vol_surge:
+                if (h1_prev['rsi'] < 30) and (m5['close'] > m5['ema21']) and m5_strong_green:
                     valid_setups.append((3, "Bump & Run Reversal", "LONG"))
-                if (h1_prev['rsi'] > 75) and (m5['close'] < m5['ema21']) and m5_strong_red and vol_surge:
+                if (h1_prev['rsi'] > 70) and (m5['close'] < m5['ema21']) and m5_strong_red:
                     valid_setups.append((3, "Bump & Run Reversal", "SHORT"))
 
             elif market_regime == "RANGE":
@@ -349,7 +346,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nOrderbook Bug Fixed! 🎯")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nVolume Filter Removed - Pure Price Action Active 🚀")
 
     async def process_symbol(self, sym, btc_trend):
         async with self.semaphore:
@@ -413,7 +410,6 @@ class TradingSystem:
             available_liquidity = 0.0
             book_side = ob['asks'] if trade['side'] == "LONG" else ob['bids']
             
-            # 👈 Fix: Safely iterate over order book levels regardless of length
             for level in book_side:
                 price = float(level[0])
                 vol = float(level[1])
