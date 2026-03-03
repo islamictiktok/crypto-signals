@@ -24,13 +24,13 @@ class Config:
     TF_MACRO = '1h'   
     TF_MICRO = '5m'   
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 5_000_000 # 👈 تم رفعه لـ 5 مليون دولار لضمان سيولة حقيقية عالية الجودة
+    MIN_24H_VOLUME_USDT = 5_000_000 
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V4100.0" # 👈 The Absolute Masterpiece (True Volume Fix & A-Z Audit)
+    VERSION = "V4200.0" # 👈 تم تحديث تقسيم الأهداف (0.5R) والرياضيات الخاصة بها
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -189,7 +189,7 @@ class StrategyEngine:
                 sl = struct_extreme + (m5_atr * 0.3) 
 
             risk_distance = abs(entry - sl)
-            if risk_distance <= 0: return None # حماية رياضية قاطعة
+            if risk_distance <= 0: return None 
 
             min_risk = m5_atr * 0.8
             max_risk = m5_atr * 3.0
@@ -203,7 +203,9 @@ class StrategyEngine:
 
             tps = []
             pnls = [] 
-            step_size = risk_distance 
+            
+            # 👈 تقسيم الأهداف: الهدف الأول على مسافة 0.5 من الستوب، ثم زيادة بـ 0.5 لكل هدف
+            step_size = risk_distance * 0.5 
 
             for i in range(1, 11):
                 target = entry + (step_size * i) if side == "LONG" else entry - (step_size * i)
@@ -304,7 +306,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nTrue Volume Filter & Complete ROE Mapping Active 🛡️⚡")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFast Breakeven Mode (0.5R Targets) Active! 🎯🛡️")
 
     async def shutdown(self):
         self.running = False
@@ -379,7 +381,6 @@ class TradingSystem:
             lev = safe_entry / risk_distance
             lev = int(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)))
 
-            # 👈 حساب الـ ROE لكل الأهداف هنا لاستخدامها في الرسالة والردود
             for target in safe_tps:
                 trade['pnls'].append(StrategyEngine.calc_actual_roe(safe_entry, target, trade['side'], lev))
 
@@ -397,8 +398,6 @@ class TradingSystem:
             
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
             targets_msg = ""
-            
-            # 👈 إضافة الـ ROE في رسالة التليجرام الأساسية (كما طلبت)
             for idx, tp in enumerate(safe_tps):
                 targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code> (+{trade['pnls'][idx]:.1f}% ROE)\n"
 
@@ -440,9 +439,7 @@ class TradingSystem:
                 self.cached_valid_coins = []
                 for sym, d in tickers.items():
                     if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
-                        # 👈 الحل الجذري للسيولة: الاعتماد فقط على quoteVolume الحقيقي (USDT)
                         vol = float(d.get('quoteVolume') or 0)
-                        
                         if vol >= Config.MIN_24H_VOLUME_USDT:
                             self.cached_valid_coins.append(sym)
                 
@@ -524,9 +521,8 @@ class TradingSystem:
 
                         self._update_equity_and_drawdown(pnl)
 
-                        if step == 0: r_multiple = -1.0
-                        elif step == 1: r_multiple = 0.0
-                        else: r_multiple = float(step - 1)
+                        # 👈 تصحيح رياضي: حساب الـ R بناءً على الربح الفعلي بدلاً من الاعتماد على الخطوات لأن الخطوات أصبحت نصف R
+                        r_multiple = pnl / trade['risk_amount'] if trade['risk_amount'] > 0 else 0.0
 
                         actual_roe = StrategyEngine.calc_actual_roe(entry, current_sl, side, trade['leverage'])
 
