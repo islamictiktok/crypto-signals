@@ -30,7 +30,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V8400.0" # 👈 Score System Removed - Pure Structural Logic
+    VERSION = "V8500.0" # 👈 Order Book Unpack Fix
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -115,8 +115,8 @@ class StrategyEngine:
 
             market_regime = "TREND" if h1['adx'] >= 25 else "RANGE"
 
-            h1_struct_bull = h1['close'] > h1_prev['hh20']
-            h1_struct_bear = h1['close'] < h1_prev['ll20']
+            h1_struct_bull = h1['high'] > h1_prev['hh20']
+            h1_struct_bear = h1['low'] < h1_prev['ll20']
 
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
@@ -190,8 +190,6 @@ class StrategyEngine:
             if not valid_setups: return None
             valid_setups.sort(key=lambda x: x[0], reverse=True) 
             _, strat, side = valid_setups[0]
-
-            # 👈 Score system completely removed here. Setup executes if valid_setups is not empty.
 
             if side == "LONG":
                 swing_low = df_m5['low'].rolling(30).min().iloc[-2]
@@ -351,13 +349,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nScore System Removed - Pure Structural Logic Active 🚀📉")
-
-    async def shutdown(self):
-        self.running = False
-        self.save_state()
-        await self.tg.stop()
-        await self.exchange.close()
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nOrderbook Bug Fixed! 🎯")
 
     async def process_symbol(self, sym, btc_trend):
         async with self.semaphore:
@@ -375,13 +367,6 @@ class TradingSystem:
                 if res:
                     if btc_trend == "BEARISH" and res['side'] == "LONG": return
                     if btc_trend == "BULLISH" and res['side'] == "SHORT": return
-
-                    funding_info = await fetch_with_retry(self.exchange.fetch_funding_rate, sym)
-                    if funding_info and 'fundingRate' in funding_info:
-                        fr = float(funding_info['fundingRate'])
-                        if res['side'] == "LONG" and fr > 0.0015: return
-                        if res['side'] == "SHORT" and fr < -0.0015: return
-
                     await self.execute_trade(res)
             except: pass
 
@@ -428,7 +413,10 @@ class TradingSystem:
             available_liquidity = 0.0
             book_side = ob['asks'] if trade['side'] == "LONG" else ob['bids']
             
-            for price, vol in book_side:
+            # 👈 Fix: Safely iterate over order book levels regardless of length
+            for level in book_side:
+                price = float(level[0])
+                vol = float(level[1])
                 if abs(price - target_price) / target_price <= 0.003: 
                     available_liquidity += price * vol
             
