@@ -30,7 +30,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V8701.0" # 👈 Shutdown Routine Restored
+    VERSION = "V8800.0" # 👈 Unrestricted Apex (Shutdown Fixed, OB Improved, Logic Relaxed)
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -69,7 +69,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك الاستراتيجيات (Strict Quant & Structure)
+# 3. محرك الاستراتيجيات (Smooth Price Action)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -104,8 +104,6 @@ class StrategyEngine:
                 df_h1['macd_h'] = macd_h1[macd_cols[0]] if macd_cols else 0
             else:
                 df_h1['macd_h'] = 0
-                
-            df_h1['macd_std'] = df_h1['macd_h'].rolling(20).std().fillna(0)
 
             df_h1.dropna(inplace=True)
             if len(df_h1) < 5: return None
@@ -113,10 +111,15 @@ class StrategyEngine:
             h1 = df_h1.iloc[-2] 
             h1_prev = df_h1.iloc[-3]
 
-            market_regime = "TREND" if h1['adx'] >= 25 else "RANGE"
+            # 👈 تخفيض الـ ADX إلى 20 لصيد الترندات مبكراً
+            market_regime = "TREND" if h1['adx'] >= 20 else "RANGE"
 
             h1_struct_bull = h1['close'] > h1_prev['hh20']
             h1_struct_bear = h1['close'] < h1_prev['ll20']
+
+            # 👈 تبسيط شرط الماكد ليكون أكثر مرونة
+            macd_bullish = h1['macd_h'] > h1_prev['macd_h']
+            macd_bearish = h1['macd_h'] < h1_prev['macd_h']
 
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
@@ -153,9 +156,6 @@ class StrategyEngine:
             macro_bullish = h1['ema21'] > h1['ema50'] > h1['ema200']
             macro_bearish = h1['ema21'] < h1['ema50'] < h1['ema200']
 
-            macd_diff = abs(h1['macd_h'] - h1_prev['macd_h'])
-            macd_confirmed = macd_diff >= (h1['macd_std'] * 0.2)
-
             strat = ""; side = ""
             valid_setups = []
 
@@ -178,9 +178,10 @@ class StrategyEngine:
                     valid_setups.append((3, "Bump & Run Reversal", "SHORT"))
 
             elif market_regime == "RANGE":
-                if (h1_prev['rsi'] < 35) and macd_confirmed and (h1['macd_h'] > h1_prev['macd_h']) and m5_strong_green:
+                # 👈 استخدام مؤشر الماكد المرن
+                if (h1_prev['rsi'] < 35) and macd_bullish and m5_strong_green:
                     valid_setups.append((4, "Double Bottom (Range)", "LONG"))
-                if (h1_prev['rsi'] > 65) and macd_confirmed and (h1['macd_h'] < h1_prev['macd_h']) and m5_strong_red:
+                if (h1_prev['rsi'] > 65) and macd_bearish and m5_strong_red:
                     valid_setups.append((4, "Double Top (Range)", "SHORT"))
 
             if not valid_setups: return None
@@ -214,14 +215,15 @@ class StrategyEngine:
 
             if (risk_distance / entry) > 0.03: return None
 
+            # 👈 تخفيف حارس المساحة إلى 1.5R للسماح بفرص أكثر
             if side == "LONG":
                 if h1['recent_res'] > entry:
                     max_move = h1['recent_res'] - entry
-                    if max_move < (risk_distance * 2): return None
+                    if max_move < (risk_distance * 1.5): return None
             else:
                 if h1['recent_sup'] < entry:
                     max_move = entry - h1['recent_sup']
-                    if max_move < (risk_distance * 2): return None
+                    if max_move < (risk_distance * 1.5): return None
 
             step_factor = 0.5 if h1['adx'] > 30 else 0.8
             step_size = risk_distance * step_factor 
@@ -236,7 +238,7 @@ class StrategyEngine:
                 step_size = available_space / 10.0
 
             if step_size < (m5_atr * 0.3): return None
-            if (step_size * 10) < (risk_distance * 2): return None 
+            if (step_size * 10) < (risk_distance * 1.5): return None 
 
             tps = []
             pnls = [] 
@@ -335,6 +337,7 @@ class TradingSystem:
             ema50 = ta.ema(df['close'], length=50).iloc[-2]
             adx = ta.adx(df['high'], df['low'], df['close'], length=14).iloc[-2, 0]
             
+            # 👈 تم تخفيف فلتر البيتكوين أيضاً إلى 20
             if ema21 > ema50 and adx > 20: return "BULLISH"
             elif ema21 < ema50 and adx > 20: return "BEARISH"
         except: pass
@@ -345,14 +348,16 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nShutdown Routine Restored 🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nShutdown Fixed, Orderbook Upgraded & Logic Relaxed! 🚀")
 
-    # 👈 تم إرجاع دالة الإغلاق (Shutdown) التي تسببت في الخطأ
+    # 👈 تم استعادة دالة الإغلاق الآمن بشكل صحيح
     async def shutdown(self):
+        Log.print("Initiating graceful shutdown...", Log.YELLOW)
         self.running = False
         self.save_state()
         await self.tg.stop()
         await self.exchange.close()
+        Log.print("Shutdown complete.", Log.GREEN)
 
     async def process_symbol(self, sym, btc_trend):
         async with self.semaphore:
@@ -409,7 +414,8 @@ class TradingSystem:
                 notional = position_size * safe_entry
                 risk_amount = position_size * risk_distance
 
-            ob = await fetch_with_retry(self.exchange.fetch_order_book, sym, limit=20)
+            # 👈 تحسين دفتر الأوامر: عمق أكبر (50)، انزلاق 0.4%، واستحواذ 30% لكي لا تلغى الصفقات الممتازة عبثاً
+            ob = await fetch_with_retry(self.exchange.fetch_order_book, sym, limit=50)
             if not ob or not ob.get('bids') or not ob.get('asks'): return
             
             target_price = ask if trade['side'] == "LONG" else bid
@@ -419,10 +425,10 @@ class TradingSystem:
             for level in book_side:
                 price = float(level[0])
                 vol = float(level[1])
-                if abs(price - target_price) / target_price <= 0.003: 
+                if abs(price - target_price) / target_price <= 0.004: 
                     available_liquidity += price * vol
             
-            if notional > (available_liquidity * 0.25): return
+            if notional > (available_liquidity * 0.30): return
 
             lev = safe_entry / risk_distance
             lev = int(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)))
