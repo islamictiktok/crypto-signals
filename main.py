@@ -24,13 +24,13 @@ class Config:
     TF_MACRO = '1h'   
     TF_MICRO = '5m'   
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 1_000_000 # 👈 تم إعادة السيولة إلى مليون دولار كما طلبت
+    MIN_24H_VOLUME_USDT = 1_000_000 
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V7000.1" # 👈 تم التحديث
+    VERSION = "V8100.0" # 👈 Anti-Sweep Guard (Close-based Structure)
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -115,9 +115,9 @@ class StrategyEngine:
 
             market_regime = "TREND" if h1['adx'] >= 25 else "RANGE"
 
-            # 👈 1. True Structure Logic (Compare Current High/Low to previous HH/LL)
-            h1_struct_bull = h1['high'] > h1_prev['hh20']
-            h1_struct_bear = h1['low'] < h1_prev['ll20']
+            # 👈 1. True Structure Logic (Close-based validation to reject Liquidity Sweeps)
+            h1_struct_bull = h1['close'] > h1_prev['hh20']
+            h1_struct_bear = h1['close'] < h1_prev['ll20']
 
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
@@ -164,7 +164,6 @@ class StrategyEngine:
             strat = ""; side = ""
             valid_setups = []
 
-            # 👈 2. Strict Regime Separation
             if market_regime == "TREND":
                 if macro_bullish and h1_struct_bull and m5_strong_green and vol_surge:
                     if (m5_prev['close'] > h1['ema21']) and (m5['close'] > h1['ema21']) and (m5['low'] <= h1['ema21'] or m5_prev['low'] <= h1['ema21']):
@@ -184,7 +183,6 @@ class StrategyEngine:
                     valid_setups.append((3, "Bump & Run Reversal", "SHORT"))
 
             elif market_regime == "RANGE":
-                # Range Strategies rely on overbought/oversold and MACD, ignoring EMA stack
                 if (h1_prev['rsi'] < 35) and macd_confirmed and (h1['macd_h'] > h1_prev['macd_h']) and m5_strong_green:
                     valid_setups.append((4, "Double Bottom (Range)", "LONG"))
                 if (h1_prev['rsi'] > 65) and macd_confirmed and (h1['macd_h'] < h1_prev['macd_h']) and m5_strong_red:
@@ -210,7 +208,24 @@ class StrategyEngine:
                 sl = swing_high + (m5_atr * 0.2) 
 
             risk_distance = abs(entry - sl)
-            if risk_distance <= 0 or (risk_distance / entry) > 0.03: return None 
+            if risk_distance <= 0: return None 
+
+            hard_min_risk = entry * 0.004
+            if risk_distance < hard_min_risk:
+                risk_distance = hard_min_risk
+                sl = entry - risk_distance if side == "LONG" else entry + risk_distance
+
+            min_risk = m5_atr * 0.8
+            max_risk = m5_atr * 3.0
+
+            if risk_distance < min_risk:
+                risk_distance = min_risk
+                sl = entry - risk_distance if side == "LONG" else entry + risk_distance
+            elif risk_distance > max_risk:
+                risk_distance = max_risk
+                sl = entry - risk_distance if side == "LONG" else entry + risk_distance
+
+            if (risk_distance / entry) > 0.03: return None
 
             if side == "LONG":
                 max_move = h1['recent_res'] - entry
@@ -222,7 +237,6 @@ class StrategyEngine:
             step_factor = 0.5 if h1['adx'] > 30 else 0.8
             step_size = risk_distance * step_factor 
 
-            # 👈 4. TP Compression Guard Logic
             theoretical_tp10 = entry + (step_size * 10) if side == "LONG" else entry - (step_size * 10)
             
             if side == "LONG" and theoretical_tp10 > h1['recent_res']:
@@ -232,9 +246,8 @@ class StrategyEngine:
                 available_space = entry - h1['recent_sup']
                 step_size = available_space / 10.0
 
-            # Guard against absurdly small compressed targets
             if step_size < (m5_atr * 0.3): return None
-            if (step_size * 10) < (risk_distance * 2): return None # Must yield at least 2R total
+            if (step_size * 10) < (risk_distance * 2): return None 
 
             tps = []
             pnls = [] 
@@ -320,7 +333,6 @@ class TradingSystem:
             
         self.stats['strats'][strat_name][result_type] += 1
         
-        # 👈 7. Performance Accounting: Add R-val even for break_evens (due to slippage simulation)
         self.stats['all_time']['total_r'] += r_val
         self.stats['daily']['total_r'] += r_val
         self.stats['strats'][strat_name]['total_r'] += r_val
@@ -344,7 +356,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nActive Volume Filter: 1 Million USDT 📊")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nAnti-Sweep Guard Active: Strict Close-Based Structure Validated 🛡️🎯")
 
     async def shutdown(self):
         self.running = False
@@ -411,6 +423,20 @@ class TradingSystem:
             notional = position_size * safe_entry
             if notional > max_notional:
                 position_size = max_notional / safe_entry
+                notional = position_size * safe_entry
+
+            ob = await fetch_with_retry(self.exchange.fetch_order_book, sym, limit=20)
+            if not ob or not ob.get('bids') or not ob.get('asks'): return
+            
+            target_price = ask if trade['side'] == "LONG" else bid
+            available_liquidity = 0.0
+            book_side = ob['asks'] if trade['side'] == "LONG" else ob['bids']
+            
+            for price, vol in book_side:
+                if abs(price - target_price) / target_price <= 0.002: 
+                    available_liquidity += price * vol
+            
+            if notional > (available_liquidity * 0.1): return
 
             lev = safe_entry / risk_distance
             lev = int(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)))
@@ -500,7 +526,6 @@ class TradingSystem:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     await self.process_symbol(sym, btc_trend)
 
-                # 👈 8. Server Relief: Wait 15s between scans since M5 changes slowly
                 await asyncio.sleep(15) 
             except: await asyncio.sleep(5)
 
@@ -592,7 +617,6 @@ class TradingSystem:
                             trade['last_sl_price'] = trade['entry'] 
                             msg = f"✅ <b>TP1 HIT! ({tp_roe:+.1f}% ROE)</b>\n🛡️ SL moved to Entry."
                         else:
-                            # 👈 5. Trailing SL Guard (Never go worse than Entry)
                             prev_tp = trade['tps'][idx_hit - 1]
                             if side == "LONG":
                                 new_sl = prev_tp - (atr * 0.5)
@@ -601,7 +625,7 @@ class TradingSystem:
                                 new_sl = prev_tp + (atr * 0.5)
                                 trade['last_sl_price'] = min(trade['entry'], new_sl)
                                 
-                            msg = f"🔥 <b>TP{highest_tp_hit} HIT! ({tp_roe:+.1f}% ROE)</b>\n📈 Trailing SL moved to {trade['last_sl_price']}."
+                            msg = f"🔥 <b>TP{highest_tp_hit} HIT! ({tp_roe:+.1f}% ROE)</b>\n📈 Trailing SL secured."
                             
                         if highest_tp_hit == 10: 
                             exit_price = current_price
