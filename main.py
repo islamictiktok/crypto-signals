@@ -30,7 +30,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V3900.0" # 👈 The Apex Predator (Absolute Institutional Quant)
+    VERSION = "V4000.0" # 👈 الإصدار النهائي (Volume Fix + Institutional Core)
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -302,7 +302,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nApex Quant: Perfect Risk Math & Dynamic Protection 🛡️📉")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFinal Apex: Solved Volume Ghosting & Ready to Hunt! 🛡️⚡")
 
     async def shutdown(self):
         self.running = False
@@ -358,7 +358,7 @@ class TradingSystem:
             risk_distance = abs(safe_entry - safe_sl)
             if risk_distance == 0: return 
             
-            # 👈 1. Dynamic Risk Reduction based on CURRENT Drawdown
+            # 👈 Dynamic Risk Reduction based on CURRENT Drawdown
             peak = self.stats['peak_equity']
             equity = self.stats['virtual_equity']
             current_dd = ((peak - equity) / peak) * 100 if peak > 0 else 0.0
@@ -370,13 +370,13 @@ class TradingSystem:
             risk_amount = equity * risk_factor
             position_size = risk_amount / risk_distance
 
-            # 👈 2. Max Notional Cap (Protect from microscopic ATRs blowing up exposure)
+            # 👈 Max Notional Cap (Protect from microscopic ATRs blowing up exposure)
             max_notional = equity * 5.0
             notional = position_size * safe_entry
             if notional > max_notional:
                 position_size = max_notional / safe_entry
 
-            # 👈 3. Correct Leverage Math
+            # 👈 Correct Leverage Math
             lev = safe_entry / risk_distance
             lev = int(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)))
 
@@ -428,17 +428,24 @@ class TradingSystem:
 
     async def update_valid_coins_cache(self):
         current_ts = int(datetime.now(timezone.utc).timestamp())
+        # 👈 الحل الجذري لمشكلة الـ Valid Pairs: 0 (استخدام fetch_tickers للحصول على السيولة اللحظية)
         if current_ts - self.last_cache_time > 3600 or not self.cached_valid_coins:
             try:
+                tickers = await fetch_with_retry(self.exchange.fetch_tickers)
+                if not tickers: return
+                
                 self.cached_valid_coins = []
-                for sym, d in self.exchange.markets.items():
+                for sym, d in tickers.items():
                     if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
                         info = d.get('info', {})
-                        vol = float(info.get('quoteVolume') or info.get('volume24') or 0)
+                        vol = float(info.get('quoteVolume') or info.get('volume24') or d.get('quoteVolume') or 0)
+                        
                         if vol >= Config.MIN_24H_VOLUME_USDT:
                             self.cached_valid_coins.append(sym)
                 
-                self.last_cache_time = current_ts
+                if self.cached_valid_coins: 
+                    self.last_cache_time = current_ts
+                    
                 Log.print(f"🔄 Coins Cache Updated. Valid Pairs: {len(self.cached_valid_coins)}", Log.BLUE)
             except Exception as e:
                 Log.print(f"Cache Error: {e}", Log.RED)
@@ -457,7 +464,6 @@ class TradingSystem:
                 
                 btc_trend = await self.analyze_btc_trend()
                 
-                # 👈 معالجة الازدواجية في الـ Concurrency 
                 for sym in scan_list:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
                         break
@@ -481,7 +487,7 @@ class TradingSystem:
                 continue
             
             try:
-                # 👈 استخدام fetch_with_retry لكل ticker لحل مشكلة استقرار المنصة
+                # 👈 معالجة استقرار API المراقبة
                 symbols_to_fetch = list(self.active_trades.keys())
                 tasks = [fetch_with_retry(self.exchange.fetch_ticker, sym) for sym in symbols_to_fetch]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -565,13 +571,13 @@ class TradingSystem:
                             msg = f"🔥 <b>TP{highest_tp_hit} HIT! ({tp_roe:+.1f}% ROE)</b>\n📈 Trailing SL moved to TP{idx_hit}."
                             
                         if highest_tp_hit == 10: 
-                            # 👈 حساب دقيق لربح TP10 بالاعتماد على Current Price للحصول على الواقعية التامة
                             exit_price = current_price
                             if side == "LONG": pnl = (exit_price - entry) * pos_size
                             else: pnl = (entry - exit_price) * pos_size
                             
                             self._update_equity_and_drawdown(pnl)
                             
+                            # 👈 حساب دقيق لربح الهدف الأخير من دون تفاؤل مفرط
                             r_multiple = pnl / trade['risk_amount'] if trade['risk_amount'] > 0 else 0.0
                             
                             msg = f"🏆 <b>ALL 10 TARGETS SMASHED! ({tp_roe:+.1f}% ROE | {r_multiple:+.2f}R)</b> 🏦\nTrade Completed."
