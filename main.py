@@ -31,7 +31,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V3100.1" # 👈 تم التحديث
+    VERSION = "V3200.0" # 👈 تحديث إصدار التقرير الشامل للـ ROE
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -40,7 +40,6 @@ class Log:
         ts = datetime.now().strftime("%H:%M:%S")
         print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
 
-# 👈 تم إصلاح الدالة لتستقبل **kwargs وتمرر كلمة limit بنجاح
 async def fetch_with_retry(coro, *args, retries=3, delay=1.5, **kwargs):
     for i in range(retries):
         try:
@@ -211,7 +210,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت 
+# 4. مدير البوت
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -264,8 +263,8 @@ class TradingSystem:
         await self.tg.start()
         await self.exchange.load_markets()
         self.load_state() 
-        Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION} (The Master Blueprint)", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nDeep QA Passed | Keyword Argument Bug Fixed 🛠️")
+        Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION} (The Perfect Reporter)", Log.GREEN)
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFull ROE Reporting Active 📊🚀")
 
     async def shutdown(self):
         self.running = False
@@ -302,8 +301,12 @@ class TradingSystem:
             
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
             targets_msg = ""
+            
+            # 👈 إضافة كلمة ROE بجانب الأهداف
             for idx, tp in enumerate(safe_tps):
-                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code>\n"
+                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code> (+{trade['pnls'][idx]:.1f}% ROE)\n"
+
+            pnl_sl_raw = StrategyEngine.calc_actual_roe(trade['entry'], trade['sl'], trade['side'], trade['leverage'])
 
             msg = (
                 f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
@@ -313,7 +316,8 @@ class TradingSystem:
                 f"────────────────\n"
                 f"{targets_msg}"
                 f"────────────────\n"
-                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code>"
+                # 👈 توضيح الـ ROE عند الستوب الأساسي
+                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)"
             )
             
             msg_id = await self.tg.send(msg)
@@ -417,6 +421,8 @@ class TradingSystem:
                     hit_sl = (current_price <= current_sl) if side == "LONG" else (current_price >= current_sl)
                     
                     if hit_sl:
+                        actual_roe = StrategyEngine.calc_actual_roe(entry, current_sl, side, lev=trade['leverage'])
+                        
                         trade_risk_amount = self.stats['virtual_equity'] * 0.02 
                         profit_amount = trade_risk_amount * r_multiple
                         self.stats['virtual_equity'] += profit_amount
@@ -426,19 +432,20 @@ class TradingSystem:
                         dd = ((self.stats['peak_equity'] - self.stats['virtual_equity']) / self.stats['peak_equity']) * 100
                         if dd > self.stats['max_drawdown_pct']: self.stats['max_drawdown_pct'] = dd
 
+                        # 👈 دمج الـ ROE والـ R في رسائل الإغلاق
                         if step == 0:
-                            msg = f"🛑 <b>Trade Closed at SL</b> ({r_multiple:+.2f}R)"
+                            msg = f"🛑 <b>Trade Closed at SL</b> ({actual_roe:+.1f}% ROE | {r_multiple:+.2f}R)"
                             self.stats['losses'] += 1
                         elif step == 1:
-                            msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (0.00R)\n🎯 Last hit: TP{trade['last_tp_hit']}"
+                            msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (0.0% ROE | 0.00R)\n🎯 Last hit: TP{trade['last_tp_hit']}"
                             self.stats['break_evens'] += 1 
                         else:
-                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> ({r_multiple:+.2f}R)\n🎯 Last hit: TP{trade['last_tp_hit']}"
+                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> ({actual_roe:+.1f}% ROE | {r_multiple:+.2f}R)\n🎯 Last hit: TP{trade['last_tp_hit']}"
                             self.stats['wins'] += 1 
                             self.stats['total_r'] += r_multiple
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
-                        Log.print(f"Trade Closed: {sym} | R: {r_multiple:+.2f}R", Log.YELLOW) 
+                        Log.print(f"Trade Closed: {sym} | ROE: {actual_roe:+.1f}% | R: {r_multiple:+.2f}R", Log.YELLOW) 
                         await self.tg.send(msg, trade['msg_id'])
                         del self.active_trades[sym]
                         self.save_state() 
@@ -455,12 +462,15 @@ class TradingSystem:
                         trade['last_tp_hit'] = highest_tp_hit
                         idx_hit = highest_tp_hit - 1
                         
+                        # 👈 استخراج نسبة الـ ROE للهدف المضروب للتو
+                        tp_roe = trade['pnls'][idx_hit]
+                        
                         if highest_tp_hit == 1:
                             trade['last_sl_price'] = trade['entry'] 
-                            msg = f"✅ <b>TP1 HIT!</b>\n🛡️ SL moved to Entry."
+                            msg = f"✅ <b>TP1 HIT! (+{tp_roe:+.1f}% ROE)</b>\n🛡️ SL moved to Entry."
                         else:
                             trade['last_sl_price'] = trade['tps'][idx_hit - 1] 
-                            msg = f"🔥 <b>TP{highest_tp_hit} HIT!</b>\n📈 Trailing SL moved to TP{idx_hit}."
+                            msg = f"🔥 <b>TP{highest_tp_hit} HIT! (+{tp_roe:+.1f}% ROE)</b>\n📈 Trailing SL moved to TP{idx_hit}."
                             
                         if highest_tp_hit == 10: 
                             trade_risk_amount = self.stats['virtual_equity'] * 0.02
@@ -470,7 +480,7 @@ class TradingSystem:
                             if self.stats['virtual_equity'] > self.stats['peak_equity']:
                                 self.stats['peak_equity'] = self.stats['virtual_equity']
                                 
-                            msg = f"🏆 <b>ALL 10 TARGETS SMASHED! ({r_multiple:+.2f}R)</b> 🏦\nTrade Completed."
+                            msg = f"🏆 <b>ALL 10 TARGETS SMASHED! (+{tp_roe:+.1f}% ROE | {r_multiple:+.2f}R)</b> 🏦\nTrade Completed."
                             self.stats['wins'] += 1 
                             self.stats['total_r'] += r_multiple
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
