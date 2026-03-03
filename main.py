@@ -30,7 +30,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V8300.0" # 👈 Final Audit: Context-Aware Score Engine
+    VERSION = "V8400.0" # 👈 Score System Removed - Pure Structural Logic
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -191,16 +191,7 @@ class StrategyEngine:
             valid_setups.sort(key=lambda x: x[0], reverse=True) 
             _, strat, side = valid_setups[0]
 
-            # 👈 إصلاح نظام التقييم ليكون عادلاً لكل من التذبذب والترند
-            score = 0
-            if vol_surge: score += 1
-            if macd_confirmed: score += 1
-            if (side == "LONG" and macro_bullish) or (side == "SHORT" and macro_bearish): score += 1
-            
-            if market_regime == "TREND" and h1['adx'] > 20: score += 1
-            if market_regime == "RANGE" and ((side == "LONG" and h1_prev['rsi'] < 35) or (side == "SHORT" and h1_prev['rsi'] > 65)): score += 1
-            
-            if score < 3: return None 
+            # 👈 Score system completely removed here. Setup executes if valid_setups is not empty.
 
             if side == "LONG":
                 swing_low = df_m5['low'].rolling(30).min().iloc[-2]
@@ -360,7 +351,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFinal Audit Passed: Context-Aware Scoring Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nScore System Removed - Pure Structural Logic Active 🚀📉")
 
     async def shutdown(self):
         self.running = False
