@@ -26,12 +26,12 @@ class Config:
     TF_MICRO = '5m'   
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 1_000_000 
-    MAX_ALLOWED_SPREAD = 0.003 # أقصى سبريد مسموح 0.3%
+    MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V3100.0" 
+    VERSION = "V3100.1" # 👈 تم التحديث
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -40,11 +40,11 @@ class Log:
         ts = datetime.now().strftime("%H:%M:%S")
         print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
 
-# 👈 نظام إعادة المحاولة الآمن (Retry Mechanism)
-async def fetch_with_retry(coro, *args, retries=3, delay=1.5):
+# 👈 تم إصلاح الدالة لتستقبل **kwargs وتمرر كلمة limit بنجاح
+async def fetch_with_retry(coro, *args, retries=3, delay=1.5, **kwargs):
     for i in range(retries):
         try:
-            return await coro(*args)
+            return await coro(*args, **kwargs)
         except Exception as e:
             if i == retries - 1:
                 Log.print(f"API Failed after {retries} retries: {e}", Log.RED)
@@ -77,11 +77,14 @@ class TelegramNotifier:
 # ==========================================
 class StrategyEngine:
     @staticmethod
+    def calc_actual_roe(entry, exit_price, side, lev):
+        if entry <= 0: return 0.0 
+        if side == "LONG": return float(((exit_price - entry) / entry) * 100.0 * lev)
+        else: return float(((entry - exit_price) / entry) * 100.0 * lev)
+
+    @staticmethod
     def analyze_mtf(symbol, h1_data, m5_data):
         try:
-            # ------------------------------------
-            # 1. H1 MACRO ANALYSIS
-            # ------------------------------------
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_h1) < 100: return None 
             
@@ -98,7 +101,6 @@ class StrategyEngine:
             df_h1['hh5'] = df_h1['high'].rolling(5).max().shift(1)   
             df_h1['ll5'] = df_h1['low'].rolling(5).min().shift(1)
             
-            # 👈 الاستخراج الآمن للماكد بالاسم الحقيقي
             macd_h1 = ta.macd(df_h1['close'])
             if macd_h1 is not None and not macd_h1.empty:
                 macd_cols = [c for c in macd_h1.columns if c.startswith('MACDh')]
@@ -106,21 +108,20 @@ class StrategyEngine:
             else:
                 df_h1['macd_h'] = 0
 
-            # 👈 تنظيف البيانات من NaN
             df_h1.dropna(inplace=True)
             if len(df_h1) < 5: return None
 
             h1 = df_h1.iloc[-2] 
             h1_prev = df_h1.iloc[-3]
 
-            # ------------------------------------
-            # 2. M5 MICRO ANALYSIS
-            # ------------------------------------
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
             
-            # 👈 المزامنة الزمنية الصارمة (التأكد أن الـ 5 دقائق يقع ضمن آخر بيانات الساعة المتاحة)
             if h1['time'] > df_m5['time'].iloc[-1]: return None 
+            
+            last_timestamp = int(df_m5['time'].iloc[-1])
+            current_timestamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+            if current_timestamp - last_timestamp > 600000: return None 
             
             df_m5['ema21'] = ta.ema(df_m5['close'], length=21)
             df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
@@ -137,10 +138,9 @@ class StrategyEngine:
             entry = float(m5['close']) 
             m5_atr = float(m5['atr'])
 
-            # 👈 Price Sanity & Dynamic ATR Volatility Checks
             if entry <= 0 or m5_atr <= 0: return None 
             atr_pct = m5_atr / entry
-            if atr_pct < 0.0005 or atr_pct > 0.03: return None # تجاهل الميت جداً أو المجنون جداً (أخبار)
+            if atr_pct < 0.0005 or atr_pct > 0.03: return None 
 
             m5_body = abs(m5['close'] - m5['open'])
             vol_surge = m5['vol'] > (m5['vol_ma'] * 1.3) if m5['vol_ma'] > 0 else False
@@ -156,34 +156,25 @@ class StrategyEngine:
             strat = ""; side = ""
             valid_setups = []
 
-            # ==========================================
-            # 🧨 STRATEGIES EVALUATION 
-            # ==========================================
-            # 1. Break & Retest
             if macro_bullish and (m5['low'] <= h1['ema21']) and (m5['close'] > h1['ema21']) and m5_strong_green and vol_surge:
                 valid_setups.append((1, "Break & Retest", "LONG"))
             if macro_bearish and (m5['high'] >= h1['ema21']) and (m5['close'] < h1['ema21']) and m5_strong_red and vol_surge:
                 valid_setups.append((1, "Break & Retest", "SHORT"))
 
-            # 2. Support Breakdown (True Breakout check: Open >= Level & Close < Level)
             if macro_bearish and (m5['open'] >= h1['ll20']) and (m5['close'] < h1['ll20']) and (h1['ll20'] - m5['close'] <= m5_atr * 1.2) and m5_strong_red and vol_surge:
                 valid_setups.append((2, "Support Breakdown", "SHORT"))
 
-            # 3. Resistance Breakout (True Breakout check)
             if macro_bullish and (m5['open'] <= h1['hh20']) and (m5['close'] > h1['hh20']) and (m5['close'] - h1['hh20'] <= m5_atr * 1.2) and m5_strong_green and vol_surge:
                 valid_setups.append((2, "Resistance Breakout", "LONG"))
 
-            # 4. Bump and Run Reversal
             if (h1_prev['rsi'] > 75) and (h1_prev['adx'] > 25) and (m5['close'] < m5['ema21']) and m5_strong_red and vol_surge:
                 valid_setups.append((3, "Bump & Run Reversal", "SHORT"))
             if (h1_prev['rsi'] < 25) and (h1_prev['adx'] > 25) and (m5['close'] > m5['ema21']) and m5_strong_green and vol_surge:
                 valid_setups.append((3, "Bump & Run Reversal", "LONG"))
 
-            # 5. H&S / Double Top (Structure break confirmation)
             if macro_bearish and (h1['macd_h'] < h1_prev['macd_h']) and (m5['close'] < m5['ll10']) and m5_strong_red:
                 valid_setups.append((4, "Double Top / Breakdown", "SHORT"))
 
-            # 6. Inverse H&S / Double Bottom
             if macro_bullish and (h1['macd_h'] > h1_prev['macd_h']) and (m5['close'] > m5['hh10']) and m5_strong_green:
                 valid_setups.append((4, "Double Bottom / Breakout", "LONG"))
 
@@ -191,29 +182,28 @@ class StrategyEngine:
             valid_setups.sort(key=lambda x: x[0], reverse=True) 
             _, strat, side = valid_setups[0]
 
-            # ==========================================
-            # 📐 RISK MATH (Pre-Precision)
-            # ==========================================
             risk_distance = m5_atr * 1.5 
             sl = entry - risk_distance if side == "LONG" else entry + risk_distance
 
             if abs(entry - sl) < (entry * 0.001): return None
 
-            risk_pct = (risk_distance / entry) * 100
-            lev = int(10.0 / risk_pct) if risk_pct > 0 else Config.MIN_LEVERAGE
+            risk_pct = max(0.5, (risk_distance / entry) * 100) 
+            lev = int(10.0 / risk_pct) 
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)) 
 
             tps = []
-            step_size = risk_distance # RR 1:1
+            pnls = []
+            step_size = risk_distance 
 
             for i in range(1, 11):
                 target = entry + (step_size * i) if side == "LONG" else entry - (step_size * i)
                 tps.append(float(target))
+                pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
 
             del df_h1, df_m5
             return {
-                "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, 
-                "leverage": lev, "strat": strat, "original_sl": sl # 👈 نحتفظ بالـ SL الأصلي لحساب الـ R
+                "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
+                "leverage": lev, "strat": strat, "original_sl": sl, "risk_pct": risk_pct
             }
 
         except Exception as e:
@@ -221,7 +211,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت (المركب وذو الذاكرة المنيعة)
+# 4. مدير البوت 
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -232,9 +222,8 @@ class TradingSystem:
         self.cached_valid_coins = [] 
         self.last_cache_time = 0
         
-        # 👈 الإحصائيات المركبة (Compound Equity)
         self.stats = {
-            "virtual_equity": 1000.0, # رصيد افتراضي مركب
+            "virtual_equity": 1000.0, 
             "peak_equity": 1000.0,
             "max_drawdown_pct": 0.0,
             "signals": 0, "wins": 0, "losses": 0, "break_evens": 0, 
@@ -276,7 +265,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION} (The Master Blueprint)", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nDeep QA Passed | Compound Equity Active 📈")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nDeep QA Passed | Keyword Argument Bug Fixed 🛠️")
 
     async def shutdown(self):
         self.running = False
@@ -288,7 +277,6 @@ class TradingSystem:
         try:
             sym = trade['symbol']
             
-            # 👈 فلتر السبريد قبل الدخول الفعلي (Spread Check)
             ticker = await fetch_with_retry(self.exchange.fetch_ticker, sym)
             if not ticker or 'bid' not in ticker or 'ask' not in ticker: return
             
@@ -299,7 +287,6 @@ class TradingSystem:
                     Log.print(f"Spread too high for {sym}: {spread_pct:.4f}%", Log.YELLOW)
                     return
 
-            # 👈 دقة المنصة الصارمة (Precision Enforcement)
             safe_entry = float(self.exchange.price_to_precision(sym, trade['entry']))
             safe_sl = float(self.exchange.price_to_precision(sym, trade['sl']))
             safe_tps = [float(self.exchange.price_to_precision(sym, tp)) for tp in trade['tps']]
@@ -335,6 +322,7 @@ class TradingSystem:
                 trade['step'] = 0
                 trade['last_tp_hit'] = 0
                 trade['last_sl_price'] = safe_sl
+                trade['r_value'] = trade['risk_pct'] 
                 self.active_trades[sym] = trade
                 self.stats["signals"] += 1
                 self.save_state() 
@@ -402,7 +390,6 @@ class TradingSystem:
                 continue
             
             try:
-                # 👈 سحب بيانات جميع الصفقات المفتوحة بطلب واحد (API Optimization)
                 symbols_to_fetch = list(self.active_trades.keys())
                 tickers = await fetch_with_retry(self.exchange.fetch_tickers, symbols_to_fetch)
                 if not tickers: 
@@ -413,7 +400,6 @@ class TradingSystem:
                     ticker = tickers.get(sym)
                     if not ticker or not ticker.get('bid') or not ticker.get('ask'): continue
                     
-                    # 👈 الاعتماد على Bid و Ask لعدم الخداع بالـ Spikes
                     side = trade['side']
                     current_price = ticker['bid'] if side == "LONG" else ticker['ask']
                     
@@ -421,8 +407,8 @@ class TradingSystem:
                     entry = trade['entry']
                     original_sl = trade['original_sl']
                     current_sl = trade.get('last_sl_price', trade['sl'])
+                    r_value = trade.get('r_value', 1.0)
                     
-                    # 👈 حساب مسافة المخاطرة الأصلية والـ R (الأساس الرياضي الحقيقي)
                     risk_abs = abs(entry - original_sl)
                     if risk_abs == 0: risk_abs = entry * 0.01
                     pnl_abs = (current_price - entry) if side == "LONG" else (entry - current_price)
@@ -431,7 +417,7 @@ class TradingSystem:
                     hit_sl = (current_price <= current_sl) if side == "LONG" else (current_price >= current_sl)
                     
                     if hit_sl:
-                        trade_risk_amount = self.stats['virtual_equity'] * 0.02 # مخاطرة 2% للصفقة
+                        trade_risk_amount = self.stats['virtual_equity'] * 0.02 
                         profit_amount = trade_risk_amount * r_multiple
                         self.stats['virtual_equity'] += profit_amount
                         
@@ -458,7 +444,6 @@ class TradingSystem:
                         self.save_state() 
                         continue
 
-                    # 👈 معالجة ذكية للقفزات السعرية (TP Jump Logic)
                     highest_tp_hit = step
                     for i in range(step, 10):
                         target = trade['tps'][i]
@@ -503,7 +488,6 @@ class TradingSystem:
         while self.running:
             await asyncio.sleep(86400)
             
-            # 👈 Win Rate دقيق وشامل للتعادل
             total_trades = self.stats['wins'] + self.stats['losses'] + self.stats['break_evens']
             wr = (self.stats['wins'] / total_trades * 100) if total_trades > 0 else 0
             
@@ -524,7 +508,6 @@ class TradingSystem:
                 f"💵 <b>Simulated Equity:</b> ${self.stats['virtual_equity']:.2f}\n"
             )
             await self.tg.send(msg)
-            # تصفير عدادات الإشارات فقط، مع الإبقاء على Equity و Drawdown للمسار الطويل
             self.stats['signals'] = 0; self.stats['wins'] = 0; self.stats['losses'] = 0
             self.stats['break_evens'] = 0; self.stats['total_r'] = 0.0
             self.save_state()
