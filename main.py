@@ -30,7 +30,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V8100.0" # 👈 Anti-Sweep Guard (Close-based Structure)
+    VERSION = "V8300.0" # 👈 Final Audit: Context-Aware Score Engine
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -115,7 +115,6 @@ class StrategyEngine:
 
             market_regime = "TREND" if h1['adx'] >= 25 else "RANGE"
 
-            # 👈 1. True Structure Logic (Close-based validation to reject Liquidity Sweeps)
             h1_struct_bull = h1['close'] > h1_prev['hh20']
             h1_struct_bear = h1['close'] < h1_prev['ll20']
 
@@ -192,11 +191,14 @@ class StrategyEngine:
             valid_setups.sort(key=lambda x: x[0], reverse=True) 
             _, strat, side = valid_setups[0]
 
+            # 👈 إصلاح نظام التقييم ليكون عادلاً لكل من التذبذب والترند
             score = 0
-            if h1['adx'] > 20: score += 1
             if vol_surge: score += 1
-            if (side == "LONG" and macro_bullish) or (side == "SHORT" and macro_bearish): score += 1
             if macd_confirmed: score += 1
+            if (side == "LONG" and macro_bullish) or (side == "SHORT" and macro_bearish): score += 1
+            
+            if market_regime == "TREND" and h1['adx'] > 20: score += 1
+            if market_regime == "RANGE" and ((side == "LONG" and h1_prev['rsi'] < 35) or (side == "SHORT" and h1_prev['rsi'] > 65)): score += 1
             
             if score < 3: return None 
 
@@ -228,21 +230,23 @@ class StrategyEngine:
             if (risk_distance / entry) > 0.03: return None
 
             if side == "LONG":
-                max_move = h1['recent_res'] - entry
-                if max_move < (risk_distance * 2): return None
+                if h1['recent_res'] > entry:
+                    max_move = h1['recent_res'] - entry
+                    if max_move < (risk_distance * 2): return None
             else:
-                max_move = entry - h1['recent_sup']
-                if max_move < (risk_distance * 2): return None
+                if h1['recent_sup'] < entry:
+                    max_move = entry - h1['recent_sup']
+                    if max_move < (risk_distance * 2): return None
 
             step_factor = 0.5 if h1['adx'] > 30 else 0.8
             step_size = risk_distance * step_factor 
 
             theoretical_tp10 = entry + (step_size * 10) if side == "LONG" else entry - (step_size * 10)
             
-            if side == "LONG" and theoretical_tp10 > h1['recent_res']:
+            if side == "LONG" and h1['recent_res'] > entry and theoretical_tp10 > h1['recent_res']:
                 available_space = h1['recent_res'] - entry
                 step_size = available_space / 10.0
-            elif side == "SHORT" and theoretical_tp10 < h1['recent_sup']:
+            elif side == "SHORT" and h1['recent_sup'] < entry and theoretical_tp10 < h1['recent_sup']:
                 available_space = entry - h1['recent_sup']
                 step_size = available_space / 10.0
 
@@ -356,7 +360,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nAnti-Sweep Guard Active: Strict Close-Based Structure Validated 🛡️🎯")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFinal Audit Passed: Context-Aware Scoring Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False
@@ -424,6 +428,7 @@ class TradingSystem:
             if notional > max_notional:
                 position_size = max_notional / safe_entry
                 notional = position_size * safe_entry
+                risk_amount = position_size * risk_distance
 
             ob = await fetch_with_retry(self.exchange.fetch_order_book, sym, limit=20)
             if not ob or not ob.get('bids') or not ob.get('asks'): return
@@ -433,10 +438,10 @@ class TradingSystem:
             book_side = ob['asks'] if trade['side'] == "LONG" else ob['bids']
             
             for price, vol in book_side:
-                if abs(price - target_price) / target_price <= 0.002: 
+                if abs(price - target_price) / target_price <= 0.003: 
                     available_liquidity += price * vol
             
-            if notional > (available_liquidity * 0.1): return
+            if notional > (available_liquidity * 0.25): return
 
             lev = safe_entry / risk_distance
             lev = int(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)))
