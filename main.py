@@ -30,7 +30,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V4200.0" # 👈 تم تحديث تقسيم الأهداف (0.5R) والرياضيات الخاصة بها
+    VERSION = "V7000.0" # 👈 Apex Quant V2 (Absolute Structure & Math Fidelity)
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -66,12 +66,10 @@ class TelegramNotifier:
             async with self.session.post(self.base_url, json=payload) as resp:
                 data = await resp.json()
                 return data.get('result', {}).get('message_id') if resp.status == 200 else None
-        except Exception as e:
-            Log.print(f"TG Error: {e}", Log.RED)
-            return None
+        except: return None
 
 # ==========================================
-# 3. محرك الاستراتيجيات (Strict & Guarded)
+# 3. محرك الاستراتيجيات (Strict Quant & Structure)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -96,8 +94,9 @@ class StrategyEngine:
             
             df_h1['hh20'] = df_h1['high'].rolling(20).max().shift(1) 
             df_h1['ll20'] = df_h1['low'].rolling(20).min().shift(1)  
-            df_h1['hh5'] = df_h1['high'].rolling(5).max().shift(1)   
-            df_h1['ll5'] = df_h1['low'].rolling(5).min().shift(1)
+            
+            df_h1['recent_res'] = df_h1['high'].rolling(50).max().shift(1)
+            df_h1['recent_sup'] = df_h1['low'].rolling(50).min().shift(1)
             
             macd_h1 = ta.macd(df_h1['close'])
             if macd_h1 is not None and not macd_h1.empty:
@@ -105,6 +104,8 @@ class StrategyEngine:
                 df_h1['macd_h'] = macd_h1[macd_cols[0]] if macd_cols else 0
             else:
                 df_h1['macd_h'] = 0
+                
+            df_h1['macd_std'] = df_h1['macd_h'].rolling(20).std().fillna(0)
 
             df_h1.dropna(inplace=True)
             if len(df_h1) < 5: return None
@@ -112,9 +113,14 @@ class StrategyEngine:
             h1 = df_h1.iloc[-2] 
             h1_prev = df_h1.iloc[-3]
 
+            market_regime = "TREND" if h1['adx'] >= 25 else "RANGE"
+
+            # 👈 1. True Structure Logic (Compare Current High/Low to previous HH/LL)
+            h1_struct_bull = h1['high'] > h1_prev['hh20']
+            h1_struct_bear = h1['low'] < h1_prev['ll20']
+
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
-            
             if h1['time'] > df_m5['time'].iloc[-1]: return None 
             
             last_timestamp = int(df_m5['time'].iloc[-1])
@@ -124,9 +130,7 @@ class StrategyEngine:
             df_m5['ema21'] = ta.ema(df_m5['close'], length=21)
             df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
             df_m5['vol_ma'] = df_m5['vol'].rolling(10).mean()
-
-            df_m5['ll10'] = df_m5['low'].rolling(10).min().shift(1)
-            df_m5['hh10'] = df_m5['high'].rolling(10).max().shift(1)
+            df_m5['vol_20_max'] = df_m5['vol'].rolling(20).max().shift(1).fillna(0)
 
             df_m5.dropna(inplace=True)
             if len(df_m5) < 5: return None
@@ -138,75 +142,102 @@ class StrategyEngine:
 
             if entry <= 0 or m5_atr <= 0: return None 
             atr_pct = m5_atr / entry
-            
             if atr_pct < 0.0005 or atr_pct > 0.05: return None 
 
+            candle_range = m5['high'] - m5['low']
+            if candle_range <= 0: return None
             m5_body = abs(m5['close'] - m5['open'])
-            vol_surge = m5['vol'] > (m5['vol_ma'] * 1.8) if m5['vol_ma'] > 0 else False
+            if m5_body < (candle_range * 0.6): return None 
+            if candle_range < (m5_atr * 1.2): return None
+
+            vol_surge = (m5['vol'] > m5['vol_ma'] * 1.8) and (m5['vol'] > m5['vol_20_max'] * 0.7)
             
-            m5_strong_green = (m5['close'] > m5['open']) and (m5_body > m5_atr * 0.5)
-            m5_strong_red = (m5['close'] < m5['open']) and (m5_body > m5_atr * 0.5)
-            
-            if m5_body > (m5_atr * 2.0): return None 
+            m5_strong_green = m5['close'] > m5['open']
+            m5_strong_red = m5['close'] < m5['open']
 
             macro_bullish = h1['ema21'] > h1['ema50'] > h1['ema200']
             macro_bearish = h1['ema21'] < h1['ema50'] < h1['ema200']
 
+            macd_diff = abs(h1['macd_h'] - h1_prev['macd_h'])
+            macd_confirmed = macd_diff >= (h1['macd_std'] * 0.2)
+
             strat = ""; side = ""
             valid_setups = []
 
-            if macro_bullish and (m5['low'] <= h1['ema21']) and (m5['close'] > h1['ema21']) and m5_strong_green and vol_surge:
-                valid_setups.append((1, "Break & Retest", "LONG"))
-            if macro_bearish and (m5['high'] >= h1['ema21']) and (m5['close'] < h1['ema21']) and m5_strong_red and vol_surge:
-                valid_setups.append((1, "Break & Retest", "SHORT"))
+            # 👈 2. Strict Regime Separation
+            if market_regime == "TREND":
+                if macro_bullish and h1_struct_bull and m5_strong_green and vol_surge:
+                    if (m5_prev['close'] > h1['ema21']) and (m5['close'] > h1['ema21']) and (m5['low'] <= h1['ema21'] or m5_prev['low'] <= h1['ema21']):
+                        valid_setups.append((1, "Break & Retest", "LONG"))
+                if macro_bearish and h1_struct_bear and m5_strong_red and vol_surge:
+                    if (m5_prev['close'] < h1['ema21']) and (m5['close'] < h1['ema21']) and (m5['high'] >= h1['ema21'] or m5_prev['high'] >= h1['ema21']):
+                        valid_setups.append((1, "Break & Retest", "SHORT"))
+                        
+                if macro_bullish and (m5['open'] <= h1['hh20']) and (m5['close'] > h1['hh20']) and m5_strong_green and vol_surge:
+                    valid_setups.append((2, "Resistance Breakout", "LONG"))
+                if macro_bearish and (m5['open'] >= h1['ll20']) and (m5['close'] < h1['ll20']) and m5_strong_red and vol_surge:
+                    valid_setups.append((2, "Support Breakdown", "SHORT"))
+                    
+                if (h1_prev['rsi'] < 25) and (m5['close'] > m5['ema21']) and m5_strong_green and vol_surge:
+                    valid_setups.append((3, "Bump & Run Reversal", "LONG"))
+                if (h1_prev['rsi'] > 75) and (m5['close'] < m5['ema21']) and m5_strong_red and vol_surge:
+                    valid_setups.append((3, "Bump & Run Reversal", "SHORT"))
 
-            if macro_bearish and (m5['open'] >= h1['ll20']) and (m5['close'] < h1['ll20']) and (h1['ll20'] - m5['close'] <= m5_atr * 1.2) and m5_strong_red and vol_surge:
-                valid_setups.append((2, "Support Breakdown", "SHORT"))
-
-            if macro_bullish and (m5['open'] <= h1['hh20']) and (m5['close'] > h1['hh20']) and (m5['close'] - h1['hh20'] <= m5_atr * 1.2) and m5_strong_green and vol_surge:
-                valid_setups.append((2, "Resistance Breakout", "LONG"))
-
-            if (h1_prev['rsi'] > 75) and (h1_prev['adx'] > 25) and (m5['close'] < m5['ema21']) and m5_strong_red and vol_surge:
-                valid_setups.append((3, "Bump & Run Reversal", "SHORT"))
-            if (h1_prev['rsi'] < 25) and (h1_prev['adx'] > 25) and (m5['close'] > m5['ema21']) and m5_strong_green and vol_surge:
-                valid_setups.append((3, "Bump & Run Reversal", "LONG"))
-
-            if macro_bearish and (h1['macd_h'] < h1_prev['macd_h']) and (m5['close'] < m5['ll10']) and m5_strong_red:
-                valid_setups.append((4, "Double Top / Breakdown", "SHORT"))
-
-            if macro_bullish and (h1['macd_h'] > h1_prev['macd_h']) and (m5['close'] > m5['hh10']) and m5_strong_green:
-                valid_setups.append((4, "Double Bottom / Breakout", "LONG"))
+            elif market_regime == "RANGE":
+                # Range Strategies rely on overbought/oversold and MACD, ignoring EMA stack
+                if (h1_prev['rsi'] < 35) and macd_confirmed and (h1['macd_h'] > h1_prev['macd_h']) and m5_strong_green:
+                    valid_setups.append((4, "Double Bottom (Range)", "LONG"))
+                if (h1_prev['rsi'] > 65) and macd_confirmed and (h1['macd_h'] < h1_prev['macd_h']) and m5_strong_red:
+                    valid_setups.append((4, "Double Top (Range)", "SHORT"))
 
             if not valid_setups: return None
             valid_setups.sort(key=lambda x: x[0], reverse=True) 
             _, strat, side = valid_setups[0]
 
+            score = 0
+            if h1['adx'] > 20: score += 1
+            if vol_surge: score += 1
+            if (side == "LONG" and macro_bullish) or (side == "SHORT" and macro_bearish): score += 1
+            if macd_confirmed: score += 1
+            
+            if score < 3: return None 
+
             if side == "LONG":
-                struct_extreme = df_m5['low'].iloc[-6:-1].min() 
-                sl = struct_extreme - (m5_atr * 0.3) 
+                swing_low = df_m5['low'].rolling(30).min().iloc[-2]
+                sl = swing_low - (m5_atr * 0.2) 
             else:
-                struct_extreme = df_m5['high'].iloc[-6:-1].max() 
-                sl = struct_extreme + (m5_atr * 0.3) 
+                swing_high = df_m5['high'].rolling(30).max().iloc[-2]
+                sl = swing_high + (m5_atr * 0.2) 
 
             risk_distance = abs(entry - sl)
-            if risk_distance <= 0: return None 
+            if risk_distance <= 0 or (risk_distance / entry) > 0.03: return None 
 
-            min_risk = m5_atr * 0.8
-            max_risk = m5_atr * 3.0
+            if side == "LONG":
+                max_move = h1['recent_res'] - entry
+                if max_move < (risk_distance * 2): return None
+            else:
+                max_move = entry - h1['recent_sup']
+                if max_move < (risk_distance * 2): return None
 
-            if risk_distance < min_risk:
-                risk_distance = min_risk
-                sl = entry - risk_distance if side == "LONG" else entry + risk_distance
-            elif risk_distance > max_risk:
-                risk_distance = max_risk
-                sl = entry - risk_distance if side == "LONG" else entry + risk_distance
+            step_factor = 0.5 if h1['adx'] > 30 else 0.8
+            step_size = risk_distance * step_factor 
+
+            # 👈 4. TP Compression Guard Logic
+            theoretical_tp10 = entry + (step_size * 10) if side == "LONG" else entry - (step_size * 10)
+            
+            if side == "LONG" and theoretical_tp10 > h1['recent_res']:
+                available_space = h1['recent_res'] - entry
+                step_size = available_space / 10.0
+            elif side == "SHORT" and theoretical_tp10 < h1['recent_sup']:
+                available_space = entry - h1['recent_sup']
+                step_size = available_space / 10.0
+
+            # Guard against absurdly small compressed targets
+            if step_size < (m5_atr * 0.3): return None
+            if (step_size * 10) < (risk_distance * 2): return None # Must yield at least 2R total
 
             tps = []
             pnls = [] 
-            
-            # 👈 تقسيم الأهداف: الهدف الأول على مسافة 0.5 من الستوب، ثم زيادة بـ 0.5 لكل هدف
-            step_size = risk_distance * 0.5 
-
             for i in range(1, 11):
                 target = entry + (step_size * i) if side == "LONG" else entry - (step_size * i)
                 tps.append(float(target))
@@ -214,7 +245,7 @@ class StrategyEngine:
             del df_h1, df_m5
             return {
                 "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
-                "strat": strat, "original_sl": sl
+                "strat": strat, "original_sl": sl, "risk_distance": risk_distance, "atr": m5_atr
             }
 
         except Exception as e:
@@ -222,7 +253,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت (Apex Quant Architecture)
+# 4. مدير البوت (Institutional Management)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -239,7 +270,8 @@ class TradingSystem:
             "peak_equity": 1000.0,
             "max_drawdown_pct": 0.0,
             "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_r": 0.0},
-            "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_r": 0.0} 
+            "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_r": 0.0},
+            "strats": {} 
         } 
         self.running = True
 
@@ -252,8 +284,7 @@ class TradingSystem:
         }
         try:
             with open(Config.STATE_FILE, "w") as f: json.dump(state, f)
-        except Exception as e:
-            Log.print(f"State Save Error: {e}", Log.RED)
+        except: pass
 
     def load_state(self):
         if os.path.exists(Config.STATE_FILE):
@@ -269,8 +300,7 @@ class TradingSystem:
                 else:
                     Log.print(f"🔄 Version Update Detected ({Config.VERSION}). Wiping Old State...", Log.YELLOW)
                     os.remove(Config.STATE_FILE)
-            except Exception as e:
-                Log.print(f"State Load Error: {e}", Log.RED)
+            except: pass
 
     def _update_equity_and_drawdown(self, pnl):
         self.stats['virtual_equity'] += pnl
@@ -281,12 +311,19 @@ class TradingSystem:
             dd = ((self.stats['peak_equity'] - self.stats['virtual_equity']) / self.stats['peak_equity']) * 100
             self.stats['max_drawdown_pct'] = max(self.stats['max_drawdown_pct'], dd)
 
-    def _log_trade_result(self, result_type, r_val):
+    def _log_trade_result(self, result_type, r_val, strat_name):
         self.stats['all_time'][result_type] += 1
         self.stats['daily'][result_type] += 1
-        if result_type in ['wins', 'losses']:
-            self.stats['all_time']['total_r'] += r_val
-            self.stats['daily']['total_r'] += r_val
+        
+        if strat_name not in self.stats['strats']:
+            self.stats['strats'][strat_name] = {"wins": 0, "losses": 0, "break_evens": 0, "total_r": 0.0}
+            
+        self.stats['strats'][strat_name][result_type] += 1
+        
+        # 👈 7. Performance Accounting: Add R-val even for break_evens (due to slippage simulation)
+        self.stats['all_time']['total_r'] += r_val
+        self.stats['daily']['total_r'] += r_val
+        self.stats['strats'][strat_name]['total_r'] += r_val
 
     async def analyze_btc_trend(self):
         try:
@@ -295,10 +332,11 @@ class TradingSystem:
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             ema21 = ta.ema(df['close'], length=21).iloc[-2]
             ema50 = ta.ema(df['close'], length=50).iloc[-2]
-            if ema21 > ema50: return "BULLISH"
-            elif ema21 < ema50: return "BEARISH"
-        except Exception as e:
-            Log.print(f"BTC Trend Analysis Error: {e}", Log.RED)
+            adx = ta.adx(df['high'], df['low'], df['close'], length=14).iloc[-2, 0]
+            
+            if ema21 > ema50 and adx > 20: return "BULLISH"
+            elif ema21 < ema50 and adx > 20: return "BEARISH"
+        except: pass
         return "NEUTRAL"
 
     async def initialize(self):
@@ -306,7 +344,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFast Breakeven Mode (0.5R Targets) Active! 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFinal Matrix: TP Guards, Dynamic Regime & Slippage Model Active 🛡️📉")
 
     async def shutdown(self):
         self.running = False
@@ -338,8 +376,7 @@ class TradingSystem:
                         if res['side'] == "SHORT" and fr < -0.0015: return
 
                     await self.execute_trade(res)
-            except Exception as e:
-                Log.print(f"Process Symbol Error ({sym}): {e}", Log.RED)
+            except: pass
 
     async def execute_trade(self, trade):
         try:
@@ -351,16 +388,13 @@ class TradingSystem:
             bid, ask = ticker['bid'], ticker['ask']
             if bid and ask:
                 spread_pct = (ask - bid) / bid
-                if spread_pct > Config.MAX_ALLOWED_SPREAD:
-                    Log.print(f"Spread too high for {sym}: {spread_pct:.4f}%", Log.YELLOW)
-                    return
+                if spread_pct > Config.MAX_ALLOWED_SPREAD: return
 
             safe_entry = float(self.exchange.price_to_precision(sym, trade['entry']))
             safe_sl = float(self.exchange.price_to_precision(sym, trade['sl']))
             safe_tps = [float(self.exchange.price_to_precision(sym, tp)) for tp in trade['tps']]
 
-            risk_distance = abs(safe_entry - safe_sl)
-            if risk_distance == 0: return 
+            risk_distance = trade['risk_distance']
             
             peak = self.stats['peak_equity']
             equity = self.stats['virtual_equity']
@@ -399,9 +433,7 @@ class TradingSystem:
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
             targets_msg = ""
             for idx, tp in enumerate(safe_tps):
-                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code> (+{trade['pnls'][idx]:.1f}% ROE)\n"
-
-            pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], lev)
+                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code>\n"
 
             msg = (
                 f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
@@ -411,7 +443,7 @@ class TradingSystem:
                 f"────────────────\n"
                 f"{targets_msg}"
                 f"────────────────\n"
-                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)"
+                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code>"
             )
             
             msg_id = await self.tg.send(msg)
@@ -426,8 +458,7 @@ class TradingSystem:
                 self.stats['daily']['signals'] += 1
                 self.save_state() 
                 Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name} | Pos Size: {position_size:.4f}", Log.GREEN)
-        except Exception as e:
-            Log.print(f"Trade Execution Error: {e}", Log.RED)
+        except: pass
 
     async def update_valid_coins_cache(self):
         current_ts = int(datetime.now(timezone.utc).timestamp())
@@ -445,10 +476,8 @@ class TradingSystem:
                 
                 if self.cached_valid_coins: 
                     self.last_cache_time = current_ts
-                    
                 Log.print(f"🔄 Coins Cache Updated. Valid Pairs: {len(self.cached_valid_coins)}", Log.BLUE)
-            except Exception as e:
-                Log.print(f"Cache Error: {e}", Log.RED)
+            except: pass
 
     async def scan_market(self):
         while self.running:
@@ -465,19 +494,16 @@ class TradingSystem:
                 btc_trend = await self.analyze_btc_trend()
                 
                 for sym in scan_list:
-                    if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
-                        break
+                    if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     await self.process_symbol(sym, btc_trend)
 
-                await asyncio.sleep(2) 
-            except Exception as e:
-                Log.print(f"Scan Loop Error: {e}", Log.RED)
-                await asyncio.sleep(5)
+                # 👈 8. Server Relief: Wait 15s between scans since M5 changes slowly
+                await asyncio.sleep(15) 
+            except: await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
         while self.running:
             if self.stats.get('max_drawdown_pct', 0.0) > 20.0:
-                Log.print("⚠️ SYSTEM HALTED: Max Drawdown Exceeded 20%!", Log.RED)
                 await self.tg.send("⚠️ <b>SYSTEM HALTED</b>: Max Drawdown Exceeded 20%!\nTrading paused to protect capital.")
                 self.running = False
                 break
@@ -507,34 +533,32 @@ class TradingSystem:
                     entry = trade['entry']
                     current_sl = trade.get('last_sl_price', trade['sl'])
                     pos_size = trade['position_size']
+                    strat_name = trade['strat']
+                    atr = trade.get('atr', entry * 0.01) 
                     
-                    slippage_buffer = entry * 0.0002 
-                    if side == "LONG":
-                        hit_sl = current_price <= (current_sl + slippage_buffer)
-                    else:
-                        hit_sl = current_price >= (current_sl - slippage_buffer)
+                    slippage_penalty = 0.0005 
+                    
+                    if side == "LONG": hit_sl = current_price <= current_sl
+                    else: hit_sl = current_price >= current_sl
                     
                     if hit_sl:
-                        exit_price = current_sl
-                        if side == "LONG": pnl = (exit_price - entry) * pos_size
-                        else: pnl = (entry - exit_price) * pos_size
-
+                        exit_price = current_sl * (1 - slippage_penalty) if side == "LONG" else current_sl * (1 + slippage_penalty)
+                        
+                        pnl = (exit_price - entry) * pos_size if side == "LONG" else (entry - exit_price) * pos_size
                         self._update_equity_and_drawdown(pnl)
 
-                        # 👈 تصحيح رياضي: حساب الـ R بناءً على الربح الفعلي بدلاً من الاعتماد على الخطوات لأن الخطوات أصبحت نصف R
+                        actual_roe = StrategyEngine.calc_actual_roe(entry, exit_price, side, trade['leverage'])
                         r_multiple = pnl / trade['risk_amount'] if trade['risk_amount'] > 0 else 0.0
-
-                        actual_roe = StrategyEngine.calc_actual_roe(entry, current_sl, side, trade['leverage'])
 
                         if step == 0:
                             msg = f"🛑 <b>Trade Closed at SL</b> ({actual_roe:+.1f}% ROE | {r_multiple:+.2f}R)"
-                            self._log_trade_result('losses', r_multiple)
+                            self._log_trade_result('losses', r_multiple, strat_name)
                         elif step == 1:
-                            msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (0.0% ROE | 0.00R)\n🎯 Last hit: TP{trade['last_tp_hit']}"
-                            self._log_trade_result('break_evens', 0.0)
+                            msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> ({actual_roe:+.1f}% ROE | {r_multiple:+.2f}R)\n🎯 Last hit: TP{trade['last_tp_hit']}"
+                            self._log_trade_result('break_evens', r_multiple, strat_name)
                         else:
                             msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> ({actual_roe:+.1f}% ROE | {r_multiple:+.2f}R)\n🎯 Last hit: TP{trade['last_tp_hit']}"
-                            self._log_trade_result('wins', r_multiple)
+                            self._log_trade_result('wins', r_multiple, strat_name)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
                         Log.print(f"Trade Closed: {sym} | R: {r_multiple:+.2f}R", Log.YELLOW) 
@@ -543,19 +567,19 @@ class TradingSystem:
                         self.save_state() 
                         continue
 
-                    price_reached_next_tp = True
-                    highest_tp_hit = step
+                    price_reached_next_tp = False
+                    target = trade['tps'][step] if step < 10 else None
                     
-                    while highest_tp_hit < 10 and price_reached_next_tp:
-                        target = trade['tps'][highest_tp_hit]
-                        if side == "LONG" and current_price >= (target - slippage_buffer):
-                            highest_tp_hit += 1
-                        elif side == "SHORT" and current_price <= (target + slippage_buffer):
-                            highest_tp_hit += 1
-                        else:
-                            price_reached_next_tp = False
-                    
-                    if highest_tp_hit > step:
+                    if target:
+                        if (side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target):
+                            check_m1 = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, '1m', limit=2)
+                            if check_m1 and len(check_m1) > 1:
+                                closed_price = check_m1[-2][4]
+                                if (side == "LONG" and closed_price > target) or (side == "SHORT" and closed_price < target):
+                                    price_reached_next_tp = True
+
+                    if price_reached_next_tp:
+                        highest_tp_hit = step + 1
                         trade['step'] = highest_tp_hit
                         trade['last_tp_hit'] = highest_tp_hit
                         idx_hit = highest_tp_hit - 1
@@ -565,20 +589,25 @@ class TradingSystem:
                             trade['last_sl_price'] = trade['entry'] 
                             msg = f"✅ <b>TP1 HIT! ({tp_roe:+.1f}% ROE)</b>\n🛡️ SL moved to Entry."
                         else:
-                            trade['last_sl_price'] = trade['tps'][idx_hit - 1] 
-                            msg = f"🔥 <b>TP{highest_tp_hit} HIT! ({tp_roe:+.1f}% ROE)</b>\n📈 Trailing SL moved to TP{idx_hit}."
+                            # 👈 5. Trailing SL Guard (Never go worse than Entry)
+                            prev_tp = trade['tps'][idx_hit - 1]
+                            if side == "LONG":
+                                new_sl = prev_tp - (atr * 0.5)
+                                trade['last_sl_price'] = max(trade['entry'], new_sl)
+                            else:
+                                new_sl = prev_tp + (atr * 0.5)
+                                trade['last_sl_price'] = min(trade['entry'], new_sl)
+                                
+                            msg = f"🔥 <b>TP{highest_tp_hit} HIT! ({tp_roe:+.1f}% ROE)</b>\n📈 Trailing SL secured."
                             
                         if highest_tp_hit == 10: 
                             exit_price = current_price
-                            if side == "LONG": pnl = (exit_price - entry) * pos_size
-                            else: pnl = (entry - exit_price) * pos_size
-                            
+                            pnl = (exit_price - entry) * pos_size if side == "LONG" else (entry - exit_price) * pos_size
                             self._update_equity_and_drawdown(pnl)
                             
                             r_multiple = pnl / trade['risk_amount'] if trade['risk_amount'] > 0 else 0.0
-                            
                             msg = f"🏆 <b>ALL 10 TARGETS SMASHED! ({tp_roe:+.1f}% ROE | {r_multiple:+.2f}R)</b> 🏦\nTrade Completed."
-                            self._log_trade_result('wins', r_multiple)
+                            self._log_trade_result('wins', r_multiple, strat_name)
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
                             
@@ -586,8 +615,7 @@ class TradingSystem:
                         await self.tg.send(msg, trade['msg_id'])
                         self.save_state() 
                             
-            except Exception as e:
-                Log.print(f"Monitor Loop Error: {e}", Log.RED)
+            except Exception as e: pass
             await asyncio.sleep(2) 
 
     async def daily_report(self):
@@ -599,8 +627,18 @@ class TradingSystem:
             total_decisive = d_stats['wins'] + d_stats['losses']
             
             wr = (d_stats['wins'] / total_decisive * 100) if total_decisive > 0 else 0
-            avg_r = (d_stats['total_r'] / total_decisive) if total_decisive > 0 else 0
+            avg_r = (d_stats['total_r'] / total_trades) if total_trades > 0 else 0 
             
+            strats_msg = "\n🔬 <b>Strategy Performance:</b>\n"
+            if self.stats.get('strats'):
+                for s_name, s_data in self.stats['strats'].items():
+                    s_trades = s_data['wins'] + s_data['losses'] + s_data['break_evens']
+                    s_decisive = s_data['wins'] + s_data['losses']
+                    if s_trades > 0:
+                        s_wr = (s_data['wins'] / s_decisive * 100) if s_decisive > 0 else 0
+                        s_avg_r = s_data['total_r'] / s_trades
+                        strats_msg += f"▪️ {s_name}: {s_wr:.0f}% WR | {s_avg_r:.2f}R\n"
+
             msg = (
                 f"📈 <b>INSTITUTIONAL REPORT (24H)</b> 📉\n"
                 f"────────────────\n"
@@ -611,8 +649,9 @@ class TradingSystem:
                 f"📊 <b>Decisive Win Rate:</b> {wr:.1f}%\n"
                 f"────────────────\n"
                 f"📉 <b>Max Drawdown:</b> {self.stats['max_drawdown_pct']:.2f}%\n"
-                f"📐 <b>Avg Daily R:</b> {avg_r:.2f}R\n"
+                f"📐 <b>True Expectancy (Avg R):</b> {avg_r:.2f}R\n"
                 f"💵 <b>Simulated Equity:</b> ${self.stats['virtual_equity']:.2f}\n"
+                f"────────────────{strats_msg}"
             )
             await self.tg.send(msg)
             
