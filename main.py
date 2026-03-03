@@ -30,7 +30,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V8700.0" # 👈 Volume Surge Filter Removed - Pure Price Action
+    VERSION = "V8701.0" # 👈 Shutdown Routine Restored
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -159,7 +159,6 @@ class StrategyEngine:
             strat = ""; side = ""
             valid_setups = []
 
-            # 👈 تم إزالة شرط الـ vol_surge من جميع الاستراتيجيات هنا
             if market_regime == "TREND":
                 if macro_bullish and h1_struct_bull and m5_strong_green:
                     if (m5_prev['close'] > m5['ema21']) and (m5['close'] > m5['ema21']) and (m5['low'] <= m5['ema21'] or m5_prev['low'] <= m5['ema21']):
@@ -346,7 +345,14 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nVolume Filter Removed - Pure Price Action Active 🚀")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nShutdown Routine Restored 🛡️")
+
+    # 👈 تم إرجاع دالة الإغلاق (Shutdown) التي تسببت في الخطأ
+    async def shutdown(self):
+        self.running = False
+        self.save_state()
+        await self.tg.stop()
+        await self.exchange.close()
 
     async def process_symbol(self, sym, btc_trend):
         async with self.semaphore:
