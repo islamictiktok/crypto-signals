@@ -31,7 +31,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V3200.0" # 👈 تحديث إصدار التقرير الشامل للـ ROE
+    VERSION = "V3300.0" # 👈 تم تحديث الإصدار لتطبيق التنسيق الجديد
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -210,7 +210,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت
+# 4. مدير البوت 
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -263,8 +263,8 @@ class TradingSystem:
         await self.tg.start()
         await self.exchange.load_markets()
         self.load_state() 
-        Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION} (The Perfect Reporter)", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFull ROE Reporting Active 📊🚀")
+        Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nClean Signals & Smart Replies Active 🎯")
 
     async def shutdown(self):
         self.running = False
@@ -300,13 +300,11 @@ class TradingSystem:
             exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
             
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
-            targets_msg = ""
             
-            # 👈 إضافة كلمة ROE بجانب الأهداف
+            # 👈 الرسالة الأساسية نظيفة تماماً بدون ROE
+            targets_msg = ""
             for idx, tp in enumerate(safe_tps):
-                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code> (+{trade['pnls'][idx]:.1f}% ROE)\n"
-
-            pnl_sl_raw = StrategyEngine.calc_actual_roe(trade['entry'], trade['sl'], trade['side'], trade['leverage'])
+                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code>\n"
 
             msg = (
                 f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
@@ -316,8 +314,7 @@ class TradingSystem:
                 f"────────────────\n"
                 f"{targets_msg}"
                 f"────────────────\n"
-                # 👈 توضيح الـ ROE عند الستوب الأساسي
-                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)"
+                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code>"
             )
             
             msg_id = await self.tg.send(msg)
@@ -409,6 +406,7 @@ class TradingSystem:
                     
                     step = trade['step']
                     entry = trade['entry']
+                    lev = trade['leverage']
                     original_sl = trade['original_sl']
                     current_sl = trade.get('last_sl_price', trade['sl'])
                     r_value = trade.get('r_value', 1.0)
@@ -421,7 +419,8 @@ class TradingSystem:
                     hit_sl = (current_price <= current_sl) if side == "LONG" else (current_price >= current_sl)
                     
                     if hit_sl:
-                        actual_roe = StrategyEngine.calc_actual_roe(entry, current_sl, side, lev=trade['leverage'])
+                        # 👈 تم إضافة الـ ROE في رسائل الستوب لوس
+                        actual_roe = StrategyEngine.calc_actual_roe(entry, current_sl, side, lev)
                         
                         trade_risk_amount = self.stats['virtual_equity'] * 0.02 
                         profit_amount = trade_risk_amount * r_multiple
@@ -432,7 +431,6 @@ class TradingSystem:
                         dd = ((self.stats['peak_equity'] - self.stats['virtual_equity']) / self.stats['peak_equity']) * 100
                         if dd > self.stats['max_drawdown_pct']: self.stats['max_drawdown_pct'] = dd
 
-                        # 👈 دمج الـ ROE والـ R في رسائل الإغلاق
                         if step == 0:
                             msg = f"🛑 <b>Trade Closed at SL</b> ({actual_roe:+.1f}% ROE | {r_multiple:+.2f}R)"
                             self.stats['losses'] += 1
@@ -462,7 +460,7 @@ class TradingSystem:
                         trade['last_tp_hit'] = highest_tp_hit
                         idx_hit = highest_tp_hit - 1
                         
-                        # 👈 استخراج نسبة الـ ROE للهدف المضروب للتو
+                        # 👈 سحب الـ ROE الخاص بالهدف من الذاكرة وإضافته في رسائل الأهداف
                         tp_roe = trade['pnls'][idx_hit]
                         
                         if highest_tp_hit == 1:
