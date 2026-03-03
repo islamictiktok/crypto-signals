@@ -24,13 +24,13 @@ class Config:
     TF_MACRO = '1h'   
     TF_MICRO = '5m'   
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 1_000_000 
+    MIN_24H_VOLUME_USDT = 5_000_000 # 👈 تم رفعه لـ 5 مليون دولار لضمان سيولة حقيقية عالية الجودة
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V4000.0" # 👈 الإصدار النهائي (Volume Fix + Institutional Core)
+    VERSION = "V4100.0" # 👈 The Absolute Masterpiece (True Volume Fix & A-Z Audit)
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -189,6 +189,8 @@ class StrategyEngine:
                 sl = struct_extreme + (m5_atr * 0.3) 
 
             risk_distance = abs(entry - sl)
+            if risk_distance <= 0: return None # حماية رياضية قاطعة
+
             min_risk = m5_atr * 0.8
             max_risk = m5_atr * 3.0
 
@@ -302,7 +304,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFinal Apex: Solved Volume Ghosting & Ready to Hunt! 🛡️⚡")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nTrue Volume Filter & Complete ROE Mapping Active 🛡️⚡")
 
     async def shutdown(self):
         self.running = False
@@ -358,7 +360,6 @@ class TradingSystem:
             risk_distance = abs(safe_entry - safe_sl)
             if risk_distance == 0: return 
             
-            # 👈 Dynamic Risk Reduction based on CURRENT Drawdown
             peak = self.stats['peak_equity']
             equity = self.stats['virtual_equity']
             current_dd = ((peak - equity) / peak) * 100 if peak > 0 else 0.0
@@ -370,16 +371,15 @@ class TradingSystem:
             risk_amount = equity * risk_factor
             position_size = risk_amount / risk_distance
 
-            # 👈 Max Notional Cap (Protect from microscopic ATRs blowing up exposure)
             max_notional = equity * 5.0
             notional = position_size * safe_entry
             if notional > max_notional:
                 position_size = max_notional / safe_entry
 
-            # 👈 Correct Leverage Math
             lev = safe_entry / risk_distance
             lev = int(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)))
 
+            # 👈 حساب الـ ROE لكل الأهداف هنا لاستخدامها في الرسالة والردود
             for target in safe_tps:
                 trade['pnls'].append(StrategyEngine.calc_actual_roe(safe_entry, target, trade['side'], lev))
 
@@ -397,8 +397,12 @@ class TradingSystem:
             
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
             targets_msg = ""
+            
+            # 👈 إضافة الـ ROE في رسالة التليجرام الأساسية (كما طلبت)
             for idx, tp in enumerate(safe_tps):
-                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code>\n"
+                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code> (+{trade['pnls'][idx]:.1f}% ROE)\n"
+
+            pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], lev)
 
             msg = (
                 f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
@@ -408,7 +412,7 @@ class TradingSystem:
                 f"────────────────\n"
                 f"{targets_msg}"
                 f"────────────────\n"
-                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code>"
+                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)"
             )
             
             msg_id = await self.tg.send(msg)
@@ -428,7 +432,6 @@ class TradingSystem:
 
     async def update_valid_coins_cache(self):
         current_ts = int(datetime.now(timezone.utc).timestamp())
-        # 👈 الحل الجذري لمشكلة الـ Valid Pairs: 0 (استخدام fetch_tickers للحصول على السيولة اللحظية)
         if current_ts - self.last_cache_time > 3600 or not self.cached_valid_coins:
             try:
                 tickers = await fetch_with_retry(self.exchange.fetch_tickers)
@@ -437,8 +440,8 @@ class TradingSystem:
                 self.cached_valid_coins = []
                 for sym, d in tickers.items():
                     if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
-                        info = d.get('info', {})
-                        vol = float(info.get('quoteVolume') or info.get('volume24') or d.get('quoteVolume') or 0)
+                        # 👈 الحل الجذري للسيولة: الاعتماد فقط على quoteVolume الحقيقي (USDT)
+                        vol = float(d.get('quoteVolume') or 0)
                         
                         if vol >= Config.MIN_24H_VOLUME_USDT:
                             self.cached_valid_coins.append(sym)
@@ -487,7 +490,6 @@ class TradingSystem:
                 continue
             
             try:
-                # 👈 معالجة استقرار API المراقبة
                 symbols_to_fetch = list(self.active_trades.keys())
                 tasks = [fetch_with_retry(self.exchange.fetch_ticker, sym) for sym in symbols_to_fetch]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -577,7 +579,6 @@ class TradingSystem:
                             
                             self._update_equity_and_drawdown(pnl)
                             
-                            # 👈 حساب دقيق لربح الهدف الأخير من دون تفاؤل مفرط
                             r_multiple = pnl / trade['risk_amount'] if trade['risk_amount'] > 0 else 0.0
                             
                             msg = f"🏆 <b>ALL 10 TARGETS SMASHED! ({tp_roe:+.1f}% ROE | {r_multiple:+.2f}R)</b> 🏦\nTrade Completed."
