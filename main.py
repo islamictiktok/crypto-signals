@@ -24,13 +24,13 @@ class Config:
     TF_MACRO = '1h'   
     TF_MICRO = '5m'   
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 5_000_000 
+    MIN_24H_VOLUME_USDT = 1_000_000 # 👈 تم إعادة السيولة إلى مليون دولار كما طلبت
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V7000.0" # 👈 Apex Quant V2 (Absolute Structure & Math Fidelity)
+    VERSION = "V7000.1" # 👈 تم التحديث
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -344,7 +344,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFinal Matrix: TP Guards, Dynamic Regime & Slippage Model Active 🛡️📉")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nActive Volume Filter: 1 Million USDT 📊")
 
     async def shutdown(self):
         self.running = False
@@ -433,7 +433,9 @@ class TradingSystem:
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
             targets_msg = ""
             for idx, tp in enumerate(safe_tps):
-                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code>\n"
+                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code> (+{trade['pnls'][idx]:.1f}% ROE)\n"
+
+            pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], lev)
 
             msg = (
                 f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
@@ -443,7 +445,7 @@ class TradingSystem:
                 f"────────────────\n"
                 f"{targets_msg}"
                 f"────────────────\n"
-                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code>"
+                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)"
             )
             
             msg_id = await self.tg.send(msg)
@@ -458,7 +460,8 @@ class TradingSystem:
                 self.stats['daily']['signals'] += 1
                 self.save_state() 
                 Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name} | Pos Size: {position_size:.4f}", Log.GREEN)
-        except: pass
+        except Exception as e:
+            Log.print(f"Trade Execution Error: {e}", Log.RED)
 
     async def update_valid_coins_cache(self):
         current_ts = int(datetime.now(timezone.utc).timestamp())
@@ -598,7 +601,7 @@ class TradingSystem:
                                 new_sl = prev_tp + (atr * 0.5)
                                 trade['last_sl_price'] = min(trade['entry'], new_sl)
                                 
-                            msg = f"🔥 <b>TP{highest_tp_hit} HIT! ({tp_roe:+.1f}% ROE)</b>\n📈 Trailing SL secured."
+                            msg = f"🔥 <b>TP{highest_tp_hit} HIT! ({tp_roe:+.1f}% ROE)</b>\n📈 Trailing SL moved to {trade['last_sl_price']}."
                             
                         if highest_tp_hit == 10: 
                             exit_price = current_price
