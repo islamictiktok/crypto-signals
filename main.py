@@ -24,14 +24,14 @@ class Config:
     TF_MACRO = '1h'   
     TF_MICRO = '5m'   
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 3_000_000 # سيولة عالية لضمان الأمان
+    MIN_24H_VOLUME_USDT = 3_000_000 # السيولة 3 مليون
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
     MAX_SL_ROE = 80.0 # سقف الستوب لوس 80%
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V10000.3" # 👈 Ultimate Hybrid (استراتيجياتك الصارمة + المحرك الجديد)
+    VERSION = "V10100.0" # 👈 Perfect Macro Update
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -139,11 +139,9 @@ class StrategyEngine:
 
             if entry <= 0 or m5_atr <= 0: return None 
             
-            # حماية القسمة وحساب جسم الشمعة
             candle_range = max(m5['high'] - m5['low'], 0.000001)
             m5_body = abs(m5['close'] - m5['open'])
             
-            # فلتر يمنع الدخول في شموع الحيرة (Doji)
             if m5_body < (candle_range * 0.4): return None 
             
             macro_bullish = h1['ema21'] > h1['ema50'] > h1['ema200']
@@ -152,7 +150,6 @@ class StrategyEngine:
             strat = ""; side = ""
             valid_setups = []
 
-            # 👈 تم دمج استراتيجياتك الصارمة هنا بالضبط كما طلبت
             if market_regime == "TREND":
                 if macro_bullish and m5['close'] > h1['hh20'] and m5_prev['low'] <= m5['ema21'] and m5['close'] > m5['ema21'] and m5_body > m5_atr * 0.5:
                     valid_setups.append((1, "Break & Retest", "LONG"))
@@ -212,7 +209,6 @@ class StrategyEngine:
                     max_move = entry - h1['recent_sup']
                     if max_move < (risk_distance * 1.0): return None
 
-            # 👈 تحديد سرعة الأهداف
             if h1['adx'] > 35:
                 step_factor = 0.3
             elif h1['adx'] > 25:
@@ -275,7 +271,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nHybrid Strategy Engine & 80% Math Audit Passed 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nBTC Institutional Filter Active 🎯🛡️")
 
     async def shutdown(self):
         Log.print("Initiating graceful shutdown...", Log.YELLOW)
@@ -334,18 +330,39 @@ class TradingSystem:
         self.stats['daily']['total_r'] += r_val
         self.stats['strats'][strat_name]['total_r'] += r_val
 
+    # 👈 فلتر البيتكوين المؤسساتي المطور والمدرع
     async def analyze_btc_trend(self):
         try:
-            ohlcv = await fetch_with_retry(self.exchange.fetch_ohlcv, 'BTC/USDT:USDT', '1h', limit=100)
+            # جلب 250 شمعة لحساب الـ EMA200 بدقة
+            ohlcv = await fetch_with_retry(self.exchange.fetch_ohlcv, 'BTC/USDT:USDT', '1h', limit=250)
             if not ohlcv: return "NEUTRAL"
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            ema21 = ta.ema(df['close'], length=21).iloc[-2]
-            ema50 = ta.ema(df['close'], length=50).iloc[-2]
-            adx = ta.adx(df['high'], df['low'], df['close'], length=14).iloc[-2, 0]
             
-            if ema21 > ema50 and adx > 22: return "BULLISH"
-            elif ema21 < ema50 and adx > 22: return "BEARISH"
-        except: pass
+            df['ema21'] = ta.ema(df['close'], length=21)
+            df['ema50'] = ta.ema(df['close'], length=50)
+            df['ema200'] = ta.ema(df['close'], length=200)
+            df['rsi'] = ta.rsi(df['close'], length=14)
+            
+            adx_res = ta.adx(df['high'], df['low'], df['close'], length=14)
+            df['adx'] = adx_res.iloc[:, 0] if adx_res is not None else 0
+            
+            df.dropna(inplace=True)
+            if len(df) < 5: return "NEUTRAL"
+            
+            btc = df.iloc[-2]
+            
+            # الاصطفاف الهيكلي الصارم
+            bullish_alignment = btc['close'] > btc['ema21'] and btc['ema21'] > btc['ema50'] and btc['ema50'] > btc['ema200']
+            bearish_alignment = btc['close'] < btc['ema21'] and btc['ema21'] < btc['ema50'] and btc['ema50'] < btc['ema200']
+            
+            if bullish_alignment and btc['adx'] > 20 and btc['rsi'] < 75:
+                return "BULLISH"
+            elif bearish_alignment and btc['adx'] > 20 and btc['rsi'] > 25:
+                return "BEARISH"
+                
+        except Exception:
+            pass
+            
         return "NEUTRAL"
 
     async def process_symbol(self, sym, btc_trend):
@@ -374,7 +391,7 @@ class TradingSystem:
             sym = trade['symbol']
             
             ticker = await fetch_with_retry(self.exchange.fetch_ticker, sym)
-            if not ticker or 'last' not in ticker: return # 👈 الحماية من الـ NoneType
+            if not ticker or 'last' not in ticker: return 
             
             current_price = ticker['last']
             
@@ -395,7 +412,6 @@ class TradingSystem:
             risk_amount = equity * risk_factor
             position_size = risk_amount / risk_distance
 
-            # 👈 المعادلة المعصومة لضمان 80% ROE مع التقريب
             target_sl_roe = Config.MAX_SL_ROE / 100.0
             raw_lev = target_sl_roe * (safe_entry / risk_distance)
             lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
@@ -414,7 +430,6 @@ class TradingSystem:
             
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
             
-            # 👈 طباعة رسائل الأهداف مع نسبة الـ ROE
             targets_msg = ""
             for idx, tp in enumerate(safe_tps):
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, tp, trade['side'], lev)
@@ -422,6 +437,7 @@ class TradingSystem:
 
             pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], lev)
 
+            # 👈 تم إخفاء اسم الاستراتيجية من رسالة التليجرام كما طلبت للسرية والنظافة
             msg = (
                 f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
                 f"────────────────\n"
@@ -430,8 +446,7 @@ class TradingSystem:
                 f"────────────────\n"
                 f"{targets_msg}"
                 f"────────────────\n"
-                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)\n"
-                f"📊 <b>Strategy:</b> {trade['strat']}"
+                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)"
             )
             
             msg_id = await self.tg.send(msg)
@@ -445,6 +460,8 @@ class TradingSystem:
                 self.stats['all_time']['signals'] += 1
                 self.stats['daily']['signals'] += 1
                 self.save_state() 
+                
+                # 👈 اسم الاستراتيجية سيظهر هنا في السيرفر فقط لتعرفها أنت
                 Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name} | Lev: {lev}x", Log.GREEN)
         except Exception as e:
             Log.print(f"Trade Execution Error: {e}", Log.RED)
@@ -520,7 +537,7 @@ class TradingSystem:
 
                 for sym, trade in list(self.active_trades.items()):
                     ticker = tickers.get(sym)
-                    if not ticker or not ticker.get('last'): continue # 👈 الحماية من توقف الأسعار
+                    if not ticker or not ticker.get('last'): continue 
                     
                     side = trade['side']
                     current_price = ticker['last']
@@ -576,7 +593,6 @@ class TradingSystem:
                         trade['step'] = highest_tp_hit
                         trade['last_tp_hit'] = highest_tp_hit
                         
-                        # 👈 إظهار الـ ROE عند تحقيق كل هدف
                         tp_roe = StrategyEngine.calc_actual_roe(entry, target, side, trade['leverage'])
 
                         if highest_tp_hit == 1:
