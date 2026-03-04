@@ -28,10 +28,10 @@ class Config:
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
-    MAX_SL_ROE = 60.0 # 👈 سقف الستوب لوس المئوي
+    MAX_SL_ROE = 60.0 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V9100.0" # 👈 The Velocity Engine (True Async Gather & Strict Trailing)
+    VERSION = "V9300.0" # 👈 The Range Hunter (BTC Neutral Unlocked for Range Strats)
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -114,8 +114,8 @@ class StrategyEngine:
 
             market_regime = "TREND" if h1['adx'] >= 22 else "RANGE"
 
-            h1_struct_bull = h1['close'] > h1_prev['hh20']
-            h1_struct_bear = h1['close'] < h1_prev['ll20']
+            h1_struct_bull = h1['close'] > h1['hh20']
+            h1_struct_bear = h1['close'] < h1['ll20']
 
             macd_bullish = h1['macd_h'] > h1_prev['macd_h']
             macd_bearish = h1['macd_h'] < h1_prev['macd_h']
@@ -161,10 +161,10 @@ class StrategyEngine:
 
             if market_regime == "TREND":
                 if macro_bullish and h1_struct_bull and m5_strong_green:
-                    if (m5_prev['low'] <= m5['ema21']) and (m5['close'] > m5['ema21']) and (m5_body > m5_atr * 0.6):
+                    if (m5_prev['low'] <= m5['ema21']) and (m5['close'] > m5['ema21']) and (m5_body > m5_atr * 0.5):
                         valid_setups.append((1, "Break & Retest", "LONG"))
                 if macro_bearish and h1_struct_bear and m5_strong_red:
-                    if (m5_prev['high'] >= m5['ema21']) and (m5['close'] < m5['ema21']) and (m5_body > m5_atr * 0.6):
+                    if (m5_prev['high'] >= m5['ema21']) and (m5['close'] < m5['ema21']) and (m5_body > m5_atr * 0.5):
                         valid_setups.append((1, "Break & Retest", "SHORT"))
                         
                 if macro_bullish and h1['adx'] > 22 and (m5['open'] <= h1['hh20']) and (m5['close'] > h1['hh20']) and m5_strong_green:
@@ -178,9 +178,9 @@ class StrategyEngine:
                     valid_setups.append((3, "Bump & Run Reversal", "SHORT"))
 
             elif market_regime == "RANGE":
-                if (h1_prev['rsi'] < 38) and (h1['rsi'] > h1_prev['rsi']) and macd_bullish and m5_strong_green:
+                if (h1_prev['rsi'] < 40) and (h1['rsi'] > h1_prev['rsi']) and macd_bullish and m5_strong_green:
                     valid_setups.append((4, "Double Bottom (Range)", "LONG"))
-                if (h1_prev['rsi'] > 62) and (h1['rsi'] < h1_prev['rsi']) and macd_bearish and m5_strong_red:
+                if (h1_prev['rsi'] > 60) and (h1['rsi'] < h1_prev['rsi']) and macd_bearish and m5_strong_red:
                     valid_setups.append((4, "Double Top (Range)", "SHORT"))
 
             if not valid_setups: return None
@@ -189,7 +189,6 @@ class StrategyEngine:
 
             hard_min_risk = entry * 0.003
             
-            # 👈 تأكيد الستوب الهيكلي المنيع (ضمان عدم قربه من نقطة الدخول بأي شكل)
             if side == "LONG":
                 swing_low = df_m5['low'].rolling(30).min().iloc[-2]
                 sl = min(swing_low - (m5_atr * 0.2), entry - hard_min_risk)
@@ -215,11 +214,11 @@ class StrategyEngine:
             if side == "LONG":
                 if h1['recent_res'] > entry:
                     max_move = h1['recent_res'] - entry
-                    if max_move < (risk_distance * 1.7): return None
+                    if max_move < (risk_distance * 1.5): return None
             else:
                 if h1['recent_sup'] < entry:
                     max_move = entry - h1['recent_sup']
-                    if max_move < (risk_distance * 1.7): return None
+                    if max_move < (risk_distance * 1.5): return None
 
             if h1['adx'] > 35:
                 step_factor = 0.4
@@ -240,7 +239,7 @@ class StrategyEngine:
                 step_size = available_space / 10.0
 
             if step_size < (m5_atr * 0.3): return None
-            if (step_size * 10) < (risk_distance * 1.7): return None 
+            if (step_size * 10) < (risk_distance * 1.5): return None 
 
             tps = []
             pnls = [] 
@@ -268,7 +267,6 @@ class TradingSystem:
         self.cooldown_list = {} 
         self.cached_valid_coins = [] 
         self.last_cache_time = 0
-        # Semaphore لحماية المنصة من الحظر، مع السماح بالتحليل المتوازي
         self.semaphore = asyncio.Semaphore(15) 
         
         self.stats = {
@@ -349,7 +347,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nVelocity Engine Active: True Concurrency & Strict Trailing ⚡🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nBTC Matrix Upgraded: Range Hunting Active 🎯⚖️")
 
     async def shutdown(self):
         Log.print("Initiating graceful shutdown...", Log.YELLOW)
@@ -373,8 +371,14 @@ class TradingSystem:
                 res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, h1_data, m5_data)
                 
                 if res:
-                    if btc_trend == "BEARISH" and res['side'] == "LONG": return
+                    # 👈 فلتر البيتكوين الذكي الجديد (The Smart Lock)
                     if btc_trend == "BULLISH" and res['side'] == "SHORT": return
+                    if btc_trend == "BEARISH" and res['side'] == "LONG": return
+                    
+                    # 👈 إذا كان البيتكوين يتذبذب، نقبل صفقات الرينج فقط ونرفض اختراقات الترند
+                    if btc_trend == "NEUTRAL" and "Range" not in res['strat']:
+                        return
+
                     await self.execute_trade(res)
             except: pass
 
@@ -429,7 +433,6 @@ class TradingSystem:
             
             if notional > (available_liquidity * 0.30): return
 
-            # 👈 معادلة الرافعة المالية المعصومة (تضمن عدم تجاوز الستوب 60% ROE بأي حال)
             target_sl_roe = Config.MAX_SL_ROE / 100.0
             raw_lev = target_sl_roe * (safe_entry / risk_distance)
             lev = int(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev)))
@@ -515,11 +518,17 @@ class TradingSystem:
                 
                 btc_trend = await self.analyze_btc_trend()
                 
-                # 👈 1. التنفيذ المتوازي الحقيقي (True Concurrency) يسرّع الفحص 10 أضعاف
-                tasks = [self.process_symbol(sym, btc_trend) for sym in scan_list]
-                await asyncio.gather(*tasks)
+                # 👈 تم إزالة القفل الذي كان يوقف الفحص بالكامل. البوت سيستمر بالفحص حتى لو BTC محايد.
+                
+                chunk_size = 10
+                for i in range(0, len(scan_list), chunk_size):
+                    if not self.running: break
+                    chunk = scan_list[i:i+chunk_size]
+                    tasks = [self.process_symbol(sym, btc_trend) for sym in chunk]
+                    await asyncio.gather(*tasks)
+                    await asyncio.sleep(1) 
 
-                await asyncio.sleep(3) # دورة الرادار أصبحت أسرع
+                await asyncio.sleep(5) 
             except Exception as e: 
                 await asyncio.sleep(5)
 
@@ -604,13 +613,12 @@ class TradingSystem:
                         idx_hit = highest_tp_hit - 1
                         tp_roe = trade['pnls'][idx_hit]
 
-                        # 👈 4. التعديل الجذري: الستوب المتحرك يطابق الأهداف السابقة بالضبط لضمان دقة رسالة التليجرام
                         if highest_tp_hit == 1:
                             trade['last_sl_price'] = trade['entry'] 
                             msg = f"✅ <b>TP1 HIT! ({tp_roe:+.1f}% ROE)</b>\n🛡️ Move SL to Entry: <code>{trade['entry']}</code>"
                         else:
                             prev_tp_idx = highest_tp_hit - 2
-                            new_sl_price = trade['tps'][prev_tp_idx] # يقفل بالضبط على سعر الهدف السابق
+                            new_sl_price = trade['tps'][prev_tp_idx] 
                             trade['last_sl_price'] = new_sl_price
                             msg = f"🔥 <b>TP{highest_tp_hit} HIT! ({tp_roe:+.1f}% ROE)</b>\n📈 Move SL to TP{highest_tp_hit - 1}: <code>{new_sl_price}</code>"
                             
