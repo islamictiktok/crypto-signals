@@ -24,18 +24,18 @@ class Config:
     TF_MACRO = '1h'   
     TF_MICRO = '5m'   
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 3_000_000 
+    MIN_24H_VOLUME_USDT = 700_000 # 👈 تم التخفيض لزيادة الفرص وصيد العملات الصغيرة
     MAX_ALLOWED_SPREAD = 0.003 
     
-    # 👈 نظام الرافعة الديناميكية الجديد (تكافؤ التقلب)
-    BASE_LEVERAGE = 20           # الرافعة القياسية لعملة طبيعية
-    TARGET_VOLATILITY_PCT = 1.0  # التذبذب القياسي (1%)
+    # نظام الرافعة الديناميكية (تكافؤ التقلب)
+    BASE_LEVERAGE = 20           
+    TARGET_VOLATILITY_PCT = 1.0  
     MIN_LEVERAGE = 2
     MAX_LEVERAGE_CAP = 50       
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V10700.0" # 👈 Volatility Parity Edition
+    VERSION = "V10700.1" # 👈 Low-Cap Hunter Edition
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -158,7 +158,6 @@ class StrategyEngine:
             strat = ""; side = ""
             valid_setups = []
 
-            # 👈 الاستراتيجيات الكلاسيكية الذهبية
             if market_regime == "TREND":
                 if macro_bullish and m5['close'] > h1['hh20'] and m5_prev['low'] <= m5['ema21'] and m5['close'] > m5['ema21'] and m5_body > m5_atr * 0.5:
                     valid_setups.append((1, "Break & Retest", "LONG"))
@@ -218,9 +217,12 @@ class StrategyEngine:
                     max_move = entry - h1['recent_sup']
                     if max_move < (risk_distance * 1.0): return None
 
-            if h1['adx'] > 35: step_factor = 0.3
-            elif h1['adx'] > 25: step_factor = 0.5
-            else: step_factor = 0.8
+            if h1['adx'] > 35:
+                step_factor = 0.3
+            elif h1['adx'] > 25:
+                step_factor = 0.5
+            else:
+                step_factor = 0.8
                 
             step_size = risk_distance * step_factor 
 
@@ -277,7 +279,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nVolatility Parity Leverage Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nVolatility Parity Leverage Active (700K Vol) 🎯🛡️")
 
     async def shutdown(self):
         Log.print("Initiating graceful shutdown...", Log.YELLOW)
@@ -426,15 +428,9 @@ class TradingSystem:
             risk_amount = equity * risk_factor
             position_size = risk_amount / risk_distance
 
-            # 👈 الرافعة الديناميكية المعتمدة على تذبذب العملة (Volatility Parity)
-            # نقيس تذبذب العملة اللحظي كنسبة مئوية
+            # الرافعة الديناميكية المعتمدة على تذبذب العملة (Volatility Parity)
             coin_volatility_pct = (trade['atr'] / safe_entry) * 100
-            
-            # إذا كان التذبذب 1% (طبيعي) = الرافعة 20x
-            # إذا كان التذبذب 4% (مجنون) = الرافعة 5x
-            # إذا كان التذبذب 0.5% (هادئ) = الرافعة 40x
             raw_lev = Config.BASE_LEVERAGE * (Config.TARGET_VOLATILITY_PCT / coin_volatility_pct)
-            
             lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
 
             trade['entry'] = safe_entry
