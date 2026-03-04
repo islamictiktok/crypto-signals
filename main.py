@@ -28,10 +28,10 @@ class Config:
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
-    MAX_SL_ROE = 60.0 
+    MAX_SL_ROE = 60.0 # سقف الستوب لوس 60%
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V9301.0" # 👈 Radar Heartbeat Added (Visible Scan Logs)
+    VERSION = "V9700.0" # 👈 1H Structural SL & Perfected Math
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -70,7 +70,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 3. محرك الاستراتيجيات (High Precision Engine)
+# 3. محرك الاستراتيجيات (1H Structural Engine)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -82,6 +82,7 @@ class StrategyEngine:
     @staticmethod
     def analyze_mtf(symbol, h1_data, m5_data):
         try:
+            # ----------------- H1 MACRO ANALYSIS -----------------
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_h1) < 50: return None 
             
@@ -89,6 +90,7 @@ class StrategyEngine:
             df_h1['ema50'] = ta.ema(df_h1['close'], length=50)
             df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
             df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
+            df_h1['atr'] = ta.atr(df_h1['high'], df_h1['low'], df_h1['close'], length=14) # 👈 حساب ATR لفريم الساعة
             
             adx_res = ta.adx(df_h1['high'], df_h1['low'], df_h1['close'], length=14)
             df_h1['adx'] = adx_res.iloc[:, 0] if adx_res is not None and not adx_res.empty else 0
@@ -111,6 +113,7 @@ class StrategyEngine:
 
             h1 = df_h1.iloc[-2] 
             h1_prev = df_h1.iloc[-3]
+            h1_atr = float(h1['atr'])
 
             market_regime = "TREND" if h1['adx'] >= 22 else "RANGE"
 
@@ -120,6 +123,7 @@ class StrategyEngine:
             macd_bullish = h1['macd_h'] > h1_prev['macd_h']
             macd_bearish = h1['macd_h'] < h1_prev['macd_h']
 
+            # ----------------- M5 MICRO EXECUTION -----------------
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
             if h1['time'] > df_m5['time'].iloc[-1]: return None 
@@ -159,6 +163,7 @@ class StrategyEngine:
             strat = ""; side = ""
             valid_setups = []
 
+            # 👈 الـ 5 دقائق للزناد والتأكيد فقط
             if market_regime == "TREND":
                 if macro_bullish and h1_struct_bull and m5_strong_green:
                     if (m5_prev['low'] <= m5['ema21']) and (m5['close'] > m5['ema21']) and (m5_body > m5_atr * 0.5):
@@ -187,45 +192,58 @@ class StrategyEngine:
             valid_setups.sort(key=lambda x: x[0], reverse=True) 
             _, strat, side = valid_setups[0]
 
-            hard_min_risk = entry * 0.003
-            
-            if side == "LONG":
-                swing_low = df_m5['low'].rolling(30).min().iloc[-2]
-                sl = min(swing_low - (m5_atr * 0.2), entry - hard_min_risk)
-            else:
-                swing_high = df_m5['high'].rolling(30).max().iloc[-2]
-                sl = max(swing_high + (m5_atr * 0.2), entry + hard_min_risk)
+            # ----------------- DYNAMIC H1 STRUCTURAL SL -----------------
+            hard_min_risk = entry * 0.005 # الحد الأدنى للستوب 0.5% ليتناسب مع فريم الساعة
+            sl = 0.0
+
+            # 👈 الستوب لوس معتمد تماماً وبشكل صارم على فريم الساعة (1H) وهيكل الاستراتيجية
+            if "Break & Retest" in strat:
+                # كسر متوسط الساعة ينهي الترند
+                if side == "LONG": sl = h1['ema21'] - (h1_atr * 0.3)
+                else:              sl = h1['ema21'] + (h1_atr * 0.3)
+
+            elif "Breakout" in strat or "Breakdown" in strat:
+                # العودة أسفل خط الكسر بفريم الساعة = كسر كاذب
+                if side == "LONG": sl = min(h1['hh20'] - (h1_atr * 0.3), df_h1['low'].rolling(3).min().iloc[-2])
+                else:              sl = max(h1['ll20'] + (h1_atr * 0.3), df_h1['high'].rolling(3).max().iloc[-2])
+
+            elif "Reversal" in strat:
+                # قاع الانعكاس لفريم الساعة
+                if side == "LONG": sl = df_h1['low'].rolling(5).min().iloc[-2] - (h1_atr * 0.2)
+                else:              sl = df_h1['high'].rolling(5).max().iloc[-2] + (h1_atr * 0.2)
+
+            elif "Range" in strat:
+                # قاع الرينج العام لفريم الساعة
+                if side == "LONG": sl = df_h1['low'].rolling(15).min().iloc[-2] - (h1_atr * 0.2)
+                else:              sl = df_h1['high'].rolling(15).max().iloc[-2] + (h1_atr * 0.2)
+
+            # حماية المسافة الدنيا لضمان عدم خنق الصفقة
+            if side == "LONG": sl = min(sl, entry - hard_min_risk)
+            else:              sl = max(sl, entry + hard_min_risk)
 
             risk_distance = abs(entry - sl)
             if risk_distance <= 0: return None 
 
-            min_risk = m5_atr * 0.8
-            max_risk = m5_atr * 3.0
+            # رفعنا الحد الأقصى للمسافة المسموحة إلى 7% ليستوعب ستوب فريم الساعة القوي
+            if (risk_distance / entry) > 0.07: return None
 
-            if risk_distance < min_risk:
-                risk_distance = min_risk
-                sl = entry - risk_distance if side == "LONG" else entry + risk_distance
-            elif risk_distance > max_risk:
-                risk_distance = max_risk
-                sl = entry - risk_distance if side == "LONG" else entry + risk_distance
-
-            if (risk_distance / entry) > 0.035: return None
-
+            # شرط المساحة المتاح للحركة 1.0R (لأن ستوب الساعة كبير ولا نريد رفض صفقات جيدة)
             if side == "LONG":
                 if h1['recent_res'] > entry:
                     max_move = h1['recent_res'] - entry
-                    if max_move < (risk_distance * 1.5): return None
+                    if max_move < (risk_distance * 1.0): return None
             else:
                 if h1['recent_sup'] < entry:
                     max_move = entry - h1['recent_sup']
-                    if max_move < (risk_distance * 1.5): return None
+                    if max_move < (risk_distance * 1.0): return None
 
+            # 👈 تحديد سرعة الأهداف: الهدف الأول يكون قريباً لتأمين الصفقة بسرعة، وباقي الأهداف تسبح مع 1H
             if h1['adx'] > 35:
-                step_factor = 0.4
+                step_factor = 0.3
             elif h1['adx'] > 25:
-                step_factor = 0.6
+                step_factor = 0.5
             else:
-                step_factor = 0.9
+                step_factor = 0.7
                 
             step_size = risk_distance * step_factor 
 
@@ -238,8 +256,7 @@ class StrategyEngine:
                 available_space = entry - h1['recent_sup']
                 step_size = available_space / 10.0
 
-            if step_size < (m5_atr * 0.3): return None
-            if (step_size * 10) < (risk_distance * 1.5): return None 
+            if step_size < (m5_atr * 0.5): return None
 
             tps = []
             pnls = [] 
@@ -347,7 +364,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nRadar Heartbeat Active: Live Scan Tracking 📡")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n1H Dynamic Structural SL & 60% Math Audit Passed 🎯🛡️")
 
     async def shutdown(self):
         Log.print("Initiating graceful shutdown...", Log.YELLOW)
@@ -429,6 +446,7 @@ class TradingSystem:
             
             if notional > (available_liquidity * 0.30): return
 
+            # 👈 المعادلة المعصومة لضمان عدم تجاوز الستوب 60% ROE عن طريق تقليل الرافعة إذا كان الستوب بعيداً
             target_sl_roe = Config.MAX_SL_ROE / 100.0
             raw_lev = target_sl_roe * (safe_entry / risk_distance)
             lev = int(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev)))
@@ -483,7 +501,7 @@ class TradingSystem:
 
     async def update_valid_coins_cache(self):
         current_ts = int(datetime.now(timezone.utc).timestamp())
-        if current_ts - self.last_cache_time > 3600 or not self.cached_valid_coins:
+        if current_ts - self.last_cache_time > 900 or not self.cached_valid_coins:
             try:
                 tickers = await fetch_with_retry(self.exchange.fetch_tickers)
                 if not tickers: return
@@ -514,7 +532,6 @@ class TradingSystem:
                 
                 btc_trend = await self.analyze_btc_trend()
                 
-                # 👈 رسالة بداية الفحص للـ Logs
                 Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | BTC: {btc_trend}", Log.BLUE)
                 
                 chunk_size = 10
@@ -525,7 +542,6 @@ class TradingSystem:
                     await asyncio.gather(*tasks)
                     await asyncio.sleep(1) 
 
-                # 👈 رسالة نهاية الفحص للـ Logs
                 Log.print("✅ [RADAR] Cycle Complete. Resting...", Log.BLUE)
                 await asyncio.sleep(5) 
             except Exception as e: 
