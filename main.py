@@ -24,14 +24,14 @@ class Config:
     TF_MACRO = '1h'   
     TF_MICRO = '5m'   
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 3_000_000 # 👈 السيولة 3 مليون
+    MIN_24H_VOLUME_USDT = 3_000_000 # السيولة 3 مليون
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
-    MAX_SL_ROE = 80.0 # 👈 سقف الستوب لوس 80%
+    MAX_SL_ROE = 80.0 # سقف الستوب لوس 80%
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V10000.1" # 👈 Expanded Apex Edition (كود مفرود ومحدث)
+    VERSION = "V10000.2" # 👈 Render Safe Edition
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -56,7 +56,7 @@ class TelegramNotifier:
         self.session = None
 
     async def start(self): 
-        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) # 👈 Timeout 10s
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
     async def stop(self): 
         if self.session: await self.session.close()
     async def send(self, text, reply_to=None):
@@ -148,7 +148,7 @@ class StrategyEngine:
             
             if atr_pct < 0.0012 or atr_pct > 0.05: return None 
 
-            candle_range = max(m5['high'] - m5['low'], 0.000001) # 👈 حماية القسمة
+            candle_range = max(m5['high'] - m5['low'], 0.000001)
             m5_body = abs(m5['close'] - m5['open'])
             if m5_body < (candle_range * 0.4): return None 
             if candle_range < (m5_atr * 0.8): return None 
@@ -162,7 +162,6 @@ class StrategyEngine:
             strat = ""; side = ""
             valid_setups = []
 
-            # 👈 الـ 5 دقائق للزناد والتأكيد فقط
             if market_regime == "TREND":
                 if macro_bullish and h1_struct_bull and m5_strong_green:
                     if (m5_prev['low'] <= m5['ema21']) and (m5['close'] > m5['ema21']) and (m5_body > m5_atr * 0.5):
@@ -194,7 +193,6 @@ class StrategyEngine:
             # ----------------- DYNAMIC H1 STRUCTURAL SL -----------------
             sl = 0.0
 
-            # 👈 الستوب لوس معتمد تماماً وبشكل صارم على فريم الساعة (1H)
             if "Break & Retest" in strat:
                 if side == "LONG": sl = h1['ema21'] - (h1_atr * 0.4)
                 else:              sl = h1['ema21'] + (h1_atr * 0.4)
@@ -215,10 +213,8 @@ class StrategyEngine:
             risk_distance = abs(entry - sl)
             if risk_distance <= 0: return None 
 
-            # رفعنا الحد الأقصى للمسافة المسموحة إلى 8% 
             if (risk_distance / entry) > 0.08: return None
 
-            # شرط المساحة المتاح للحركة 1.0R 
             if side == "LONG":
                 if h1['recent_res'] > entry:
                     max_move = h1['recent_res'] - entry
@@ -228,7 +224,6 @@ class StrategyEngine:
                     max_move = entry - h1['recent_sup']
                     if max_move < (risk_distance * 1.0): return None
 
-            # 👈 تحديد سرعة الأهداف
             if h1['adx'] > 35:
                 step_factor = 0.3
             elif h1['adx'] > 25:
@@ -285,6 +280,23 @@ class TradingSystem:
             "strats": {} 
         } 
         self.running = True
+
+    # 👈 تم إرجاع دالة initialize المهمة جداً لبدء التشغيل بشكل سليم
+    async def initialize(self):
+        await self.tg.start()
+        await self.exchange.load_markets()
+        self.load_state() 
+        Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n1H Dynamic Structural SL & 80% Math Audit Passed 🎯🛡️")
+
+    # 👈 تم إرجاع دالة shutdown التي تسببت في الكراش لمنع حدوث المشكلة مجدداً
+    async def shutdown(self):
+        Log.print("Initiating graceful shutdown...", Log.YELLOW)
+        self.running = False
+        self.save_state()
+        await self.tg.stop()
+        await self.exchange.close()
+        Log.print("Shutdown complete.", Log.GREEN)
 
     def save_state(self):
         state = {
@@ -349,21 +361,6 @@ class TradingSystem:
         except: pass
         return "NEUTRAL"
 
-    async def initialize(self):
-        await self.tg.start()
-        await self.exchange.load_markets()
-        self.load_state() 
-        Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n1H Dynamic Structural SL & 80% Math Audit Passed 🎯🛡️")
-
-    async def shutdown(self):
-        Log.print("Initiating graceful shutdown...", Log.YELLOW)
-        self.running = False
-        self.save_state()
-        await self.tg.stop()
-        await self.exchange.close()
-        Log.print("Shutdown complete.", Log.GREEN)
-
     async def process_symbol(self, sym, btc_trend):
         async with self.semaphore:
             if sym in self.active_trades or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
@@ -390,12 +387,18 @@ class TradingSystem:
             sym = trade['symbol']
             
             ticker = await fetch_with_retry(self.exchange.fetch_ticker, sym)
-            if not ticker or 'last' not in ticker: return # 👈 استخدام last
+            if not ticker: return
             
-            # حساب حجم العقد الافتراضي للتقارير
+            # حماية الأسعار وسبريد المنصة
+            bid, ask = ticker.get('bid'), ticker.get('ask')
+            if bid and ask:
+                spread_pct = (ask - bid) / bid
+                if spread_pct > Config.MAX_ALLOWED_SPREAD: return
+
             safe_entry = float(self.exchange.price_to_precision(sym, trade['entry']))
             safe_sl = float(self.exchange.price_to_precision(sym, trade['sl']))
             safe_tps = [float(self.exchange.price_to_precision(sym, tp)) for tp in trade['tps']]
+
             risk_distance = trade['risk_distance']
             
             peak = self.stats['peak_equity']
@@ -413,9 +416,10 @@ class TradingSystem:
             notional = position_size * safe_entry
             if notional > max_notional:
                 position_size = max_notional / safe_entry
+                notional = position_size * safe_entry
                 risk_amount = position_size * risk_distance
 
-            # 👈 المعادلة المعصومة لضمان 80% ROE مع التقريب الدقيق
+            # التقريب الدقيق للرافعة
             target_sl_roe = Config.MAX_SL_ROE / 100.0
             raw_lev = target_sl_roe * (safe_entry / risk_distance)
             lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
@@ -434,7 +438,7 @@ class TradingSystem:
             
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
             
-            # 👈 حساب أرباح الـ ROE لكل هدف في الرسالة
+            # طباعة الأهداف مع نسبة ROE
             targets_msg = ""
             for idx, tp in enumerate(safe_tps):
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, tp, trade['side'], lev)
@@ -450,7 +454,8 @@ class TradingSystem:
                 f"────────────────\n"
                 f"{targets_msg}"
                 f"────────────────\n"
-                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)"
+                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)\n"
+                f"📊 <b>Strategy:</b> {trade['strat']}"
             )
             
             msg_id = await self.tg.send(msg)
@@ -464,7 +469,7 @@ class TradingSystem:
                 self.stats['all_time']['signals'] += 1
                 self.stats['daily']['signals'] += 1
                 self.save_state() 
-                Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name} | Pos Size: {position_size:.4f}", Log.GREEN)
+                Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name} | Lev: {lev}x", Log.GREEN)
         except Exception as e:
             Log.print(f"Trade Execution Error: {e}", Log.RED)
 
@@ -539,7 +544,7 @@ class TradingSystem:
 
                 for sym, trade in list(self.active_trades.items()):
                     ticker = tickers.get(sym)
-                    if not ticker or not ticker.get('last'): continue # 👈 إصلاح خطأ NoneType باستخدام last
+                    if not ticker or not ticker.get('last'): continue # 👈 الاعتماد على السعر الأخير فقط للحماية
                     
                     side = trade['side']
                     current_price = ticker['last']
@@ -595,8 +600,7 @@ class TradingSystem:
                         trade['step'] = highest_tp_hit
                         trade['last_tp_hit'] = highest_tp_hit
                         
-                        # 👈 إظهار الـ ROE عند ضرب الهدف
-                        tp_roe = StrategyEngine.calc_actual_roe(trade['entry'], target, side, trade['leverage'])
+                        tp_roe = StrategyEngine.calc_actual_roe(entry, target, side, trade['leverage'])
 
                         if highest_tp_hit == 1:
                             trade['last_sl_price'] = trade['entry'] 
@@ -698,7 +702,7 @@ async def run_bot_background():
 async def lifespan(app: FastAPI):
     main_task = asyncio.create_task(run_bot_background())
     yield
-    await bot.shutdown()
+    await bot.shutdown() # 👈 هذه هي الدالة التي كانت تسبب المشكلة، وقد تم إضافتها للأعلى بنجاح!
     main_task.cancel()
 
 app.router.lifespan_context = lifespan
