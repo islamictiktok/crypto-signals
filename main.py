@@ -31,7 +31,7 @@ class Config:
     MAX_SL_ROE = 60.0 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V9300.0" # 👈 The Range Hunter (BTC Neutral Unlocked for Range Strats)
+    VERSION = "V9301.0" # 👈 Radar Heartbeat Added (Visible Scan Logs)
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -347,7 +347,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nBTC Matrix Upgraded: Range Hunting Active 🎯⚖️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nRadar Heartbeat Active: Live Scan Tracking 📡")
 
     async def shutdown(self):
         Log.print("Initiating graceful shutdown...", Log.YELLOW)
@@ -371,13 +371,9 @@ class TradingSystem:
                 res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, h1_data, m5_data)
                 
                 if res:
-                    # 👈 فلتر البيتكوين الذكي الجديد (The Smart Lock)
                     if btc_trend == "BULLISH" and res['side'] == "SHORT": return
                     if btc_trend == "BEARISH" and res['side'] == "LONG": return
-                    
-                    # 👈 إذا كان البيتكوين يتذبذب، نقبل صفقات الرينج فقط ونرفض اختراقات الترند
-                    if btc_trend == "NEUTRAL" and "Range" not in res['strat']:
-                        return
+                    if btc_trend == "NEUTRAL" and "Range" not in res['strat']: return
 
                     await self.execute_trade(res)
             except: pass
@@ -518,7 +514,8 @@ class TradingSystem:
                 
                 btc_trend = await self.analyze_btc_trend()
                 
-                # 👈 تم إزالة القفل الذي كان يوقف الفحص بالكامل. البوت سيستمر بالفحص حتى لو BTC محايد.
+                # 👈 رسالة بداية الفحص للـ Logs
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | BTC: {btc_trend}", Log.BLUE)
                 
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
@@ -528,6 +525,8 @@ class TradingSystem:
                     await asyncio.gather(*tasks)
                     await asyncio.sleep(1) 
 
+                # 👈 رسالة نهاية الفحص للـ Logs
+                Log.print("✅ [RADAR] Cycle Complete. Resting...", Log.BLUE)
                 await asyncio.sleep(5) 
             except Exception as e: 
                 await asyncio.sleep(5)
