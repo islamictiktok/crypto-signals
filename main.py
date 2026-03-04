@@ -34,7 +34,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V10500.0" # 👈 The Quant Matrix (20 Algorithmic Strategies)
+    VERSION = "V10500.1" # 👈 Render Syntax Fix
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -68,7 +68,7 @@ class TelegramNotifier:
             async with self.session.post(self.base_url, json=payload) as resp:
                 data = await resp.json()
                 return data.get('result', {}).get('message_id') if resp.status == 200 else None
-        except: return None
+        except Exception: return None
 
 # ==========================================
 # 3. محرك الـ 20 استراتيجية (The Quant Matrix)
@@ -236,7 +236,6 @@ class StrategyEngine:
             _, strat, side = valid_setups[0]
 
             # ----------------- QUANT ATR STOP LOSS -----------------
-            # 👈 نظام הستوب لوس الرياضي الجديد (2.5 ATR)
             sl = 0.0
             if side == "LONG":
                 sl = entry - (m5_atr * 2.5)
@@ -250,7 +249,7 @@ class StrategyEngine:
             if risk_pct > 6.0: return None 
 
             # ----------------- R:R TARGET MAPPING -----------------
-            step_size = risk_distance * 0.7 # الهدف الأول = 0.7R
+            step_size = risk_distance * 0.7 
             
             tps = []
             for i in range(1, 11):
@@ -282,18 +281,30 @@ class TradingSystem:
         self.running = True
 
     async def initialize(self):
-        await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
+        await self.tg.start()
+        await self.exchange.load_markets()
+        self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
         await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n20 Quant Strategies & Volatility Risk Matrix Active 🎯🛡️")
 
     async def shutdown(self):
-        self.running = False; self.save_state()
-        await self.tg.stop(); await self.exchange.close()
+        self.running = False
+        self.save_state()
+        await self.tg.stop()
+        await self.exchange.close()
 
     def save_state(self):
         try:
-            with open(Config.STATE_FILE, "w") as f: json.dump({"version": Config.VERSION, "active_trades": self.active_trades, "cooldown_list": self.cooldown_list, "stats": self.stats}, f)
-        except: pass
+            state_data = {
+                "version": Config.VERSION, 
+                "active_trades": self.active_trades, 
+                "cooldown_list": self.cooldown_list, 
+                "stats": self.stats
+            }
+            with open(Config.STATE_FILE, "w") as f: 
+                json.dump(state_data, f)
+        except Exception: 
+            pass
 
     def load_state(self):
         if os.path.exists(Config.STATE_FILE):
@@ -301,21 +312,29 @@ class TradingSystem:
                 with open(Config.STATE_FILE, "r") as f:
                     state = json.load(f)
                 if state.get("version") == Config.VERSION:
-                    self.active_trades = state.get("active_trades", {}); self.cooldown_list = state.get("cooldown_list", {}); self.stats = state.get("stats", self.stats)
-            except: pass
+                    self.active_trades = state.get("active_trades", {})
+                    self.cooldown_list = state.get("cooldown_list", {})
+                    self.stats = state.get("stats", self.stats)
+            except Exception: 
+                pass
 
     def _update_equity_and_drawdown(self, pnl):
         self.stats['virtual_equity'] += pnl
-        if self.stats['virtual_equity'] > self.stats['peak_equity']: self.stats['peak_equity'] = self.stats['virtual_equity']
+        if self.stats['virtual_equity'] > self.stats['peak_equity']: 
+            self.stats['peak_equity'] = self.stats['virtual_equity']
         if self.stats['peak_equity'] > 0:
             dd = ((self.stats['peak_equity'] - self.stats['virtual_equity']) / self.stats['peak_equity']) * 100
             self.stats['max_drawdown_pct'] = max(self.stats['max_drawdown_pct'], dd)
 
     def _log_trade_result(self, result_type, r_val, strat_name):
-        self.stats['all_time'][result_type] += 1; self.stats['daily'][result_type] += 1
-        if strat_name not in self.stats['strats']: self.stats['strats'][strat_name] = {"wins": 0, "losses": 0, "break_evens": 0, "total_r": 0.0}
+        self.stats['all_time'][result_type] += 1
+        self.stats['daily'][result_type] += 1
+        if strat_name not in self.stats['strats']: 
+            self.stats['strats'][strat_name] = {"wins": 0, "losses": 0, "break_evens": 0, "total_r": 0.0}
         self.stats['strats'][strat_name][result_type] += 1
-        self.stats['all_time']['total_r'] += r_val; self.stats['daily']['total_r'] += r_val; self.stats['strats'][strat_name]['total_r'] += r_val
+        self.stats['all_time']['total_r'] += r_val
+        self.stats['daily']['total_r'] += r_val
+        self.stats['strats'][strat_name]['total_r'] += r_val
 
     async def analyze_btc_trend(self):
         try:
@@ -332,21 +351,27 @@ class TradingSystem:
             if len(df) < 5: return "NEUTRAL"
             btc = df.iloc[-2]; btc_prev = df.iloc[-3]
             
-            if btc['st_dir'] == 1 and btc['close'] > btc['ema21'] and btc['adx'] > 20 and btc['adx'] > btc_prev['adx'] and btc['rsi'] < 75: return "BULLISH"
-            elif btc['st_dir'] == -1 and btc['close'] < btc['ema21'] and btc['adx'] > 20 and btc['adx'] > btc_prev['adx'] and btc['rsi'] > 25: return "BEARISH"
-        except: pass
+            if btc['st_dir'] == 1 and btc['close'] > btc['ema21'] and btc['adx'] > 20 and btc['adx'] > btc_prev['adx'] and btc['rsi'] < 75: 
+                return "BULLISH"
+            elif btc['st_dir'] == -1 and btc['close'] < btc['ema21'] and btc['adx'] > 20 and btc['adx'] > btc_prev['adx'] and btc['rsi'] > 25: 
+                return "BEARISH"
+        except Exception: 
+            pass
         return "NEUTRAL"
 
     async def process_symbol(self, sym, btc_trend):
         async with self.semaphore:
-            if sym in self.active_trades or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
+            if sym in self.active_trades or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: 
+                return
             try:
                 h1_data = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=150)
                 m5_data = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MICRO, limit=100)
                 if not h1_data or not m5_data: return
                 res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, h1_data, m5_data, btc_trend)
-                if res: await self.execute_trade(res)
-            except: pass
+                if res: 
+                    await self.execute_trade(res)
+            except Exception: 
+                pass
 
     async def execute_trade(self, trade):
         try:
@@ -366,13 +391,16 @@ class TradingSystem:
             
             position_size_coins = risk_amount / risk_distance
 
-            # الرافعة الديناميكية (Dynamic Leverage Model)
             raw_lev = 70.0 / risk_pct
             dynamic_lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
 
-            trade['entry'] = safe_entry; trade['sl'] = safe_sl; trade['tps'] = safe_tps
-            trade['original_sl'] = safe_sl; trade['position_size'] = position_size_coins
-            trade['risk_amount'] = risk_amount; trade['leverage'] = dynamic_lev
+            trade['entry'] = safe_entry
+            trade['sl'] = safe_sl
+            trade['tps'] = safe_tps
+            trade['original_sl'] = safe_sl
+            trade['position_size'] = position_size_coins
+            trade['risk_amount'] = risk_amount
+            trade['leverage'] = dynamic_lev
             
             exact_app_name = sym.split(':')[0].replace('/', '')
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
@@ -396,12 +424,17 @@ class TradingSystem:
             
             msg_id = await self.tg.send(msg)
             if msg_id:
-                trade['msg_id'] = msg_id; trade['step'] = 0; trade['last_tp_hit'] = 0; trade['last_sl_price'] = safe_sl
+                trade['msg_id'] = msg_id
+                trade['step'] = 0
+                trade['last_tp_hit'] = 0
+                trade['last_sl_price'] = safe_sl
                 self.active_trades[sym] = trade
-                self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
+                self.stats['all_time']['signals'] += 1
+                self.stats['daily']['signals'] += 1
                 self.save_state() 
                 Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name} | Lev: {dynamic_lev}x | Risk: ${risk_amount:.2f}", Log.GREEN)
-        except: pass
+        except Exception: 
+            pass
 
     async def update_valid_coins_cache(self):
         current_ts = int(datetime.now(timezone.utc).timestamp())
@@ -410,14 +443,17 @@ class TradingSystem:
                 tickers = await fetch_with_retry(self.exchange.fetch_tickers)
                 if not tickers: return
                 self.cached_valid_coins = [sym for sym, d in tickers.items() if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']) and float(d.get('quoteVolume') or 0) >= Config.MIN_24H_VOLUME_USDT]
-                if self.cached_valid_coins: self.last_cache_time = current_ts
+                if self.cached_valid_coins: 
+                    self.last_cache_time = current_ts
                 Log.print(f"🔄 Coins Cache Updated. Valid Pairs: {len(self.cached_valid_coins)}", Log.BLUE)
-            except: pass
+            except Exception: 
+                pass
 
     async def scan_market(self):
         while self.running:
             if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
-                await asyncio.sleep(5); continue
+                await asyncio.sleep(5)
+                continue
             await self.update_valid_coins_cache()
             try:
                 current_time = int(datetime.now(timezone.utc).timestamp())
@@ -429,15 +465,22 @@ class TradingSystem:
                     if not self.running: break
                     chunk = scan_list[i:i+chunk_size]
                     tasks = [self.process_symbol(sym, btc_trend) for sym in chunk]
-                    await asyncio.gather(*tasks); await asyncio.sleep(1) 
-                Log.print("✅ [RADAR] Cycle Complete. Resting...", Log.BLUE); await asyncio.sleep(5) 
-            except: await asyncio.sleep(5)
+                    await asyncio.gather(*tasks)
+                    await asyncio.sleep(1) 
+                Log.print("✅ [RADAR] Cycle Complete. Resting...", Log.BLUE)
+                await asyncio.sleep(5) 
+            except Exception: 
+                await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
         while self.running:
             if self.stats.get('max_drawdown_pct', 0.0) > 20.0:
-                await self.tg.send("⚠️ <b>SYSTEM HALTED</b>: Max Drawdown Exceeded 20%!"); self.running = False; break
-            if not self.active_trades: await asyncio.sleep(2); continue
+                await self.tg.send("⚠️ <b>SYSTEM HALTED</b>: Max Drawdown Exceeded 20%!")
+                self.running = False
+                break
+            if not self.active_trades: 
+                await asyncio.sleep(2)
+                continue
             
             try:
                 symbols_to_fetch = list(self.active_trades.keys())
@@ -449,66 +492,108 @@ class TradingSystem:
                     ticker = tickers.get(sym)
                     if not ticker or not ticker.get('last'): continue 
                     
-                    side = trade['side']; current_price = ticker['last']
-                    step = trade['step']; entry = trade['entry']
+                    side = trade['side']
+                    current_price = ticker['last']
+                    step = trade['step']
+                    entry = trade['entry']
                     current_sl = trade.get('last_sl_price', trade['sl'])
-                    pos_size = trade['position_size']; strat_name = trade['strat']
+                    pos_size = trade['position_size']
+                    strat_name = trade['strat']
                     
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
                         pnl = (current_sl - entry) * pos_size if side == "LONG" else (entry - current_sl) * pos_size
                         self._update_equity_and_drawdown(pnl)
                         r_mult = pnl / trade['risk_amount'] if trade['risk_amount'] > 0 else 0.0
 
-                        if step == 0: msg = f"🛑 <b>Trade Closed at SL</b> ({r_mult:+.2f} R)"; self._log_trade_result('losses', r_mult, strat_name)
-                        elif step == 1: msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (0.0 R)\n🎯 Last hit: TP{trade['last_tp_hit']}"; self._log_trade_result('break_evens', 0.0, strat_name)
-                        else: msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> ({r_mult:+.2f} R)\n🎯 Last hit: TP{trade['last_tp_hit']}"; self._log_trade_result('wins', r_mult, strat_name)
+                        if step == 0: 
+                            msg = f"🛑 <b>Trade Closed at SL</b> ({r_mult:+.2f} R)"
+                            self._log_trade_result('losses', r_mult, strat_name)
+                        elif step == 1: 
+                            msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b> (0.0 R)\n🎯 Last hit: TP{trade['last_tp_hit']}"
+                            self._log_trade_result('break_evens', 0.0, strat_name)
+                        else: 
+                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b> ({r_mult:+.2f} R)\n🎯 Last hit: TP{trade['last_tp_hit']}"
+                            self._log_trade_result('wins', r_mult, strat_name)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
                         Log.print(f"Trade Closed: {sym} | R: {r_mult:+.2f}R", Log.YELLOW) 
-                        await self.tg.send(msg, trade['msg_id']); del self.active_trades[sym]; self.save_state(); continue
+                        await self.tg.send(msg, trade['msg_id'])
+                        del self.active_trades[sym]
+                        self.save_state() 
+                        continue
 
                     target = trade['tps'][step] if step < 10 else None
                     if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
                         check_m1 = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, '1m', limit=2)
                         if check_m1 and len(check_m1) > 1 and ((side == "LONG" and check_m1[-2][4] > target) or (side == "SHORT" and check_m1[-2][4] < target)):
-                            trade['step'] += 1; trade['last_tp_hit'] = trade['step']
+                            trade['step'] += 1
+                            trade['last_tp_hit'] = trade['step']
                             r_rew = abs(target - trade['entry']) / trade['risk_distance']
 
-                            if trade['step'] == 1: trade['last_sl_price'] = trade['entry']; msg = f"✅ <b>TP1 HIT! (+{r_rew:.1f} R)</b>\n🛡️ Move SL to Entry: <code>{trade['entry']}</code>"
-                            else: new_sl = trade['tps'][trade['step']-2]; trade['last_sl_price'] = new_sl; msg = f"🔥 <b>TP{trade['step']} HIT! (+{r_rew:.1f} R)</b>\n📈 Move SL to TP{trade['step']-1}: <code>{new_sl}</code>"
+                            if trade['step'] == 1: 
+                                trade['last_sl_price'] = trade['entry']
+                                msg = f"✅ <b>TP1 HIT! (+{r_rew:.1f} R)</b>\n🛡️ Move SL to Entry: <code>{trade['entry']}</code>"
+                            else: 
+                                new_sl = trade['tps'][trade['step']-2]
+                                trade['last_sl_price'] = new_sl
+                                msg = f"🔥 <b>TP{trade['step']} HIT! (+{r_rew:.1f} R)</b>\n📈 Move SL to TP{trade['step']-1}: <code>{new_sl}</code>"
                                 
                             if trade['step'] == 10: 
                                 pnl = (current_price - entry) * pos_size if side == "LONG" else (entry - current_price) * pos_size
-                                self._update_equity_and_drawdown(pnl); r_mult = pnl / trade['risk_amount'] if trade['risk_amount'] > 0 else 0.0
+                                self._update_equity_and_drawdown(pnl)
+                                r_mult = pnl / trade['risk_amount'] if trade['risk_amount'] > 0 else 0.0
                                 msg = f"🏆 <b>ALL 10 TARGETS SMASHED! (+{r_mult:+.2f} R)</b> 🏦\nTrade Completed."
-                                self._log_trade_result('wins', r_mult, strat_name); self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()); del self.active_trades[sym]
+                                self._log_trade_result('wins', r_mult, strat_name)
+                                self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
+                                del self.active_trades[sym]
                                 
-                            Log.print(f"Hit TP{trade['step']}: {sym}", Log.GREEN); await self.tg.send(msg, trade['msg_id']); self.save_state() 
-            except: pass
+                            Log.print(f"Hit TP{trade['step']}: {sym}", Log.GREEN)
+                            await self.tg.send(msg, trade['msg_id'])
+                            self.save_state() 
+            except Exception: 
+                pass
             await asyncio.sleep(2) 
 
     async def daily_report(self):
         while self.running:
             await asyncio.sleep(86400)
             d_stats = self.stats['daily']
-            total_trades = d_stats['wins'] + d_stats['losses'] + d_stats['break_evens']; total_decisive = d_stats['wins'] + d_stats['losses']
-            wr = (d_stats['wins'] / total_decisive * 100) if total_decisive > 0 else 0; avg_r = (d_stats['total_r'] / total_trades) if total_trades > 0 else 0 
+            total_trades = d_stats['wins'] + d_stats['losses'] + d_stats['break_evens']
+            total_decisive = d_stats['wins'] + d_stats['losses']
+            wr = (d_stats['wins'] / total_decisive * 100) if total_decisive > 0 else 0
+            avg_r = (d_stats['total_r'] / total_trades) if total_trades > 0 else 0 
             
             strats_msg = "\n🔬 <b>Strategy Performance:</b>\n"
             if self.stats.get('strats'):
                 for s_name, s_data in self.stats['strats'].items():
-                    s_trades = s_data['wins'] + s_data['losses'] + s_data['break_evens']; s_decisive = s_data['wins'] + s_data['losses']
+                    s_trades = s_data['wins'] + s_data['losses'] + s_data['break_evens']
+                    s_decisive = s_data['wins'] + s_data['losses']
                     if s_trades > 0:
-                        s_wr = (s_data['wins'] / s_decisive * 100) if s_decisive > 0 else 0; s_avg_r = s_data['total_r'] / s_trades
+                        s_wr = (s_data['wins'] / s_decisive * 100) if s_decisive > 0 else 0
+                        s_avg_r = s_data['total_r'] / s_trades
                         strats_msg += f"▪️ {s_name}: {s_wr:.0f}% WR | {s_avg_r:.2f} R\n"
 
-            msg = f"📈 <b>INSTITUTIONAL REPORT (24H)</b> 📉\n────────────────\n🎯 <b>Daily Signals:</b> {d_stats['signals']}\n✅ <b>Wins:</b> {d_stats['wins']}\n❌ <b>Losses:</b> {d_stats['losses']}\n⚖️ <b>Break Evens:</b> {d_stats['break_evens']}\n📊 <b>Decisive Win Rate:</b> {wr:.1f}%\n────────────────\n📉 <b>Max Drawdown:</b> {self.stats['max_drawdown_pct']:.2f}%\n📐 <b>True Expectancy (Avg R):</b> {avg_r:.2f} R\n💵 <b>Simulated Equity:</b> ${self.stats['virtual_equity']:.2f}\n────────────────{strats_msg}"
-            await self.tg.send(msg); self.stats['daily'] = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_r": 0.0}; self.save_state()
+            msg = (
+                f"📈 <b>INSTITUTIONAL REPORT (24H)</b> 📉\n────────────────\n"
+                f"🎯 <b>Daily Signals:</b> {d_stats['signals']}\n✅ <b>Wins:</b> {d_stats['wins']}\n"
+                f"❌ <b>Losses:</b> {d_stats['losses']}\n⚖️ <b>Break Evens:</b> {d_stats['break_evens']}\n"
+                f"📊 <b>Decisive Win Rate:</b> {wr:.1f}%\n────────────────\n"
+                f"📉 <b>Max Drawdown:</b> {self.stats['max_drawdown_pct']:.2f}%\n"
+                f"📐 <b>True Expectancy (Avg R):</b> {avg_r:.2f} R\n"
+                f"💵 <b>Simulated Equity:</b> ${self.stats['virtual_equity']:.2f}\n"
+                f"────────────────{strats_msg}"
+            )
+            await self.tg.send(msg)
+            self.stats['daily'] = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_r": 0.0}
+            self.save_state()
 
     async def keep_alive(self):
         while self.running:
-            try: async with aiohttp.ClientSession() as s: await s.get(Config.RENDER_URL)
-            except: pass
+            try: 
+                async with aiohttp.ClientSession() as s: 
+                    await s.get(Config.RENDER_URL)
+            except Exception: 
+                pass
             await asyncio.sleep(300)
 
 bot = TradingSystem()
@@ -522,8 +607,13 @@ async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;t
 
 async def run_bot_background():
     try:
-        await bot.initialize(); asyncio.create_task(bot.scan_market()); asyncio.create_task(bot.monitor_open_trades()); asyncio.create_task(bot.daily_report()); asyncio.create_task(bot.keep_alive())
-    except Exception as e: Log.print(f"Critical Bot Startup Error: {e}", Log.RED)
+        await bot.initialize()
+        asyncio.create_task(bot.scan_market())
+        asyncio.create_task(bot.monitor_open_trades())
+        asyncio.create_task(bot.daily_report())
+        asyncio.create_task(bot.keep_alive())
+    except Exception as e: 
+        Log.print(f"Critical Bot Startup Error: {e}", Log.RED)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
