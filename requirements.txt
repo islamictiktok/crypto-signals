@@ -1,7 +1,6 @@
-fastapi
-uvicorn
-pandas
-pandas-ta
-ccxt
-aiohttp
-httpx
+fastapi==0.110.0
+uvicorn==0.29.0
+pandas==2.1.4
+pandas-ta==0.3.14b.0
+ccxt==4.2.88
+aiohttp==3.9.3
