@@ -23,8 +23,9 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    TF_MAIN = '5m'  
-    CANDLES_LIMIT = 300 # 👈 300 شمعة لحساب المتوسطات بدقة
+    # 👈 1️⃣ تم التعديل إلى فريم 3 دقائق
+    TF_MAIN = '3m'  
+    CANDLES_LIMIT = 300 
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 500_000 
@@ -35,9 +36,9 @@ class Config:
     MAX_LEVERAGE_CAP = 50       
     BASE_LEVERAGE = 20
     
-    COOLDOWN_SECONDS = 1800 # 👈 تبريد نصف ساعة بعد كل صفقة مغلقة لنفس العملة
+    COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V16200.0 - Ultimate Bollinger Sweep (Hybrid Filter & 50% Wick)"
+    VERSION = "V16300.0 - 3m Bollinger Sniper"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -93,7 +94,6 @@ class StrategyEngine:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df) < 200: return None 
             
-            # 👈 إعدادات البولينجر باند (21, 2)
             bb = ta.bbands(df['close'], length=21, std=2)
             if bb is not None:
                 df['bb_lower'] = bb.iloc[:, 0]  
@@ -101,7 +101,6 @@ class StrategyEngine:
                 df['bb_upper'] = bb.iloc[:, 2]  
             else: return None
 
-            # 👈 الفلتر الهجين الذكي (EMA 50 + ADX)
             df['ema50'] = ta.ema(df['close'], length=50)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
             adx_res = ta.adx(df['high'], df['low'], df['close'], length=14)
@@ -110,7 +109,7 @@ class StrategyEngine:
             df.dropna(inplace=True)
             if len(df) < 5: return None
 
-            curr = df.iloc[-2] # الشمعة المغلقة للتو
+            curr = df.iloc[-2] 
             
             entry = float(curr['close'])
             atr_val = float(curr['atr'])
@@ -125,18 +124,21 @@ class StrategyEngine:
             bb_lower = float(curr['bb_lower'])
             bb_upper = float(curr['bb_upper'])
 
-            # حسابات هندسة الشمعة
             candle_range = candle_high - candle_low
             if candle_range == 0: return None
+
+            # 👈 2️⃣ فلتر الشمعة الكبيرة
+            if candle_range > atr_val * 1.8:
+                return None
             
             body = abs(candle_close - candle_open)
             lower_wick = min(candle_open, candle_close) - candle_low
             upper_wick = candle_high - max(candle_open, candle_close)
 
-            # 👈 المنطق المؤسساتي (Hybrid Filter)
-            is_ranging = adx_val < 25 # السوق متذبذب: يسمح بالشراء والبيع من الأطراف
-            trend_up = candle_close > ema50 # السوق صاعد
-            trend_down = candle_close < ema50 # السوق هابط
+            # 👈 3️⃣ تعديل الـ ADX إلى 22
+            is_ranging = adx_val < 22 
+            trend_up = candle_close > ema50 
+            trend_down = candle_close < ema50 
             
             can_long = is_ranging or trend_up
             can_short = is_ranging or trend_down
@@ -148,7 +150,6 @@ class StrategyEngine:
             # ==========================================
             swept_lower = candle_low <= bb_lower
             closed_inside_lower = candle_close > bb_lower
-            # شرط الذيل: أكبر من الجسم + يمثل 50% أو أكثر من الشمعة
             long_lower_wick = (lower_wick > body) and (lower_wick >= candle_range * 0.50)
 
             if swept_lower and closed_inside_lower and long_lower_wick and can_long:
@@ -156,7 +157,6 @@ class StrategyEngine:
                 target_zone = bb_upper - (atr_val * 0.15)
                 path = target_zone - entry
                 
-                # التأكد أن مساحة الربح تستحق الدخول
                 if path > (atr_val * 0.8):
                     tps = [
                         entry + (path * 0.33),
@@ -171,7 +171,6 @@ class StrategyEngine:
             if not setup: 
                 swept_upper = candle_high >= bb_upper
                 closed_inside_upper = candle_close < bb_upper
-                # شرط الذيل: أكبر من الجسم + يمثل 50% أو أكثر من الشمعة
                 long_upper_wick = (upper_wick > body) and (upper_wick >= candle_range * 0.50)
 
                 if swept_upper and closed_inside_upper and long_upper_wick and can_short:
@@ -196,7 +195,6 @@ class StrategyEngine:
             risk_distance = abs(entry - sl)
             if risk_distance <= 0: return None
             
-            # 👈 فلتر أمان: يمنع الدخول إذا كان الستوب بعيداً جداً عن السعر الحالي (> 5%)
             if (risk_distance / entry) * 100 > 5.0: return None 
 
             del df
@@ -233,7 +231,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nBollinger Sweep Sniper Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n3m Bollinger Sweep Sniper Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -369,7 +367,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 5m Sniper Mode", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 3m Snipe Mode", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -402,7 +400,6 @@ class TradingSystem:
                     current_sl = trade.get('last_sl_price', trade['sl'])
                     pos_size = trade['position_size']; strat_name = trade['strat']
                     
-                    # الستوب لوس الفوري
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
                         exit_price = current_sl
                         pnl = (exit_price - entry) * pos_size if side == "LONG" else (entry - exit_price) * pos_size
@@ -424,7 +421,6 @@ class TradingSystem:
                         Log.print(f"Trade Closed: {sym} | ROE: {actual_roe:+.1f}%", Log.YELLOW) 
                         await self.tg.send(msg, trade['msg_id']); del self.active_trades[sym]; self.save_state(); continue
 
-                    # جني الأرباح الفوري (Instant Execution)
                     target = trade['tps'][step] if step < 3 else None 
                     if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
                         
