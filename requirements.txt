@@ -2,5 +2,5 @@ fastapi
 uvicorn
 pandas
 pandas-ta
-ccxt==4.2.88
+ccxt
 aiohttp
