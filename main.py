@@ -2,6 +2,7 @@ import asyncio
 import os
 import json
 import warnings
+import traceback
 from datetime import datetime, timezone
 import pandas as pd
 import pandas_ta as ta
@@ -26,7 +27,7 @@ class Config:
     CANDLES_LIMIT = 800 
     
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 5_000_000 
+    MIN_24H_VOLUME_USDT = 500_000 
     MAX_ALLOWED_SPREAD = 0.003 
     
     RISK_PER_TRADE_PCT = 2.0    
@@ -36,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V12500.0" # 👈 All-Weather Flow Edition (Added Pullbacks & Reversals)
+    VERSION = "V14000.0"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -49,8 +50,10 @@ async def fetch_with_retry(coro, *args, retries=3, delay=1.5, **kwargs):
     for i in range(retries):
         try:
             return await coro(*args, **kwargs)
-        except Exception:
-            if i == retries - 1: return None
+        except Exception as e:
+            if i == retries - 1: 
+                Log.print(f"⚠️ Fetch Network Error: {e}", Log.RED)
+                return None
             await asyncio.sleep(delay)
 
 class TelegramNotifier:
@@ -70,7 +73,9 @@ class TelegramNotifier:
             async with self.session.post(self.base_url, json=payload) as resp:
                 data = await resp.json()
                 return data.get('result', {}).get('message_id') if resp.status == 200 else None
-        except Exception: return None
+        except Exception as e: 
+            Log.print(f"⚠️ Telegram Send Error: {e}", Log.RED)
+            return None
 
 # ==========================================
 # 3. محرك الاستراتيجيات
@@ -125,7 +130,6 @@ class StrategyEngine:
             m5 = df.iloc[-2]; m5_prev = df.iloc[-3]; m5_prev2 = df.iloc[-4]
             entry = float(m5['close']); m5_atr = float(m5['atr']); m5_body = float(m5['body'])
             
-            # --- فلاتر تم تخفيفها لتمرير الصفقات ---
             if (m5_atr / entry) < 0.001: return None 
             distance_from_ema200 = abs(entry - float(m5['ema200'])) / entry
             if distance_from_ema200 < 0.0015: return None
@@ -134,82 +138,57 @@ class StrategyEngine:
             momentum = abs(m5['close'] - m5_prev['close'])
             if momentum < (m5_atr * 0.20): return None
             
-            # تم حذف فلتر ADX العام من هنا لأنه يقتل صفقات التذبذب والانعكاس
             has_adx = float(m5['adx']) > 15 
-            volume_spike = float(m5['vol']) > (float(m5['sma_vol']) * 1.5) # خُفّض إلى 1.5
+            volume_spike = float(m5['vol']) > (float(m5['sma_vol']) * 1.5) 
 
-            # إصلاح قاتل الصفقات: تقسيم الترند الماكرو والمايكرو
             trend_up_micro = m5['ema21'] > m5['ema50']
             trend_down_micro = m5['ema21'] < m5['ema50']
-            
             macro_bullish = m5['close'] > m5['ema200']
             macro_bearish = m5['close'] < m5['ema200']
 
             valid_setups = []
 
             # ==========================================
-            # 🟢 نماذج الشراء (LONG) 
+            # 🟢 نماذج الشراء (LONG)
             # ==========================================
             if macro_bullish:
                 prev_8_candles = df.iloc[-10:-2]; prev_5_candles = df.iloc[-7:-2]
                 
                 # 1. Squeeze Breakout
-                is_adaptive_squeeze = prev_8_candles['bb_width'].max() < (prev_8_candles['bb_width'].mean() * 0.85)
-                is_compressed = (prev_5_candles['range'] < (prev_5_candles['atr'] * 0.65)).all()
-                if is_adaptive_squeeze and is_compressed and m5['close'] > m5['bb_upper'] and volume_spike:
-                    strat_sl = m5['bb_lower'] - (m5_atr * 0.5)
-                    valid_setups.append((1, "Adaptive Squeeze Breakout", "LONG", strat_sl))
+                if prev_8_candles['bb_width'].max() < (prev_8_candles['bb_width'].mean() * 0.85) and (prev_5_candles['range'] < (prev_5_candles['atr'] * 0.65)).all() and m5['close'] > m5['bb_upper'] and volume_spike:
+                    valid_setups.append((1, "Adaptive Squeeze Breakout", "LONG", m5['bb_lower'] - (m5_atr * 0.5)))
 
                 # 2. Break & Retest
-                broke_recently = df.iloc[-5]['close'] > df.iloc[-5]['hh20']
-                touching_support = abs(m5['low'] - m5['hh20']) / m5['hh20'] < 0.003
-                if broke_recently and touching_support and m5['close'] > m5['open']:
-                    strat_sl = m5['hh20'] - (m5_atr * 0.5)
-                    valid_setups.append((2, "Break & Retest", "LONG", strat_sl))
+                if df.iloc[-5]['close'] > df.iloc[-5]['hh20'] and abs(m5['low'] - m5['hh20']) / m5['hh20'] < 0.003 and m5['close'] > m5['open']:
+                    valid_setups.append((2, "Break & Retest", "LONG", m5['hh20'] - (m5_atr * 0.5)))
 
-                # 3. Adam & Eve (W-Pattern)
-                touching_ll40 = abs(m5['low'] - m5['ll40']) / m5['ll40'] < 0.003
-                rsi_divergence_bull = m5['rsi'] > (m5['rsi_min_40'] + 5)
-                if touching_ll40 and rsi_divergence_bull and m5['close'] > m5['ema21'] and volume_spike:
-                    strat_sl = m5['ll40'] - (m5_atr * 0.5)
-                    valid_setups.append((3, "Adam & Eve (W-Pattern)", "LONG", strat_sl))
+                # 3. Adam & Eve
+                if abs(m5['low'] - m5['ll40']) / m5['ll40'] < 0.003 and m5['rsi'] > (m5['rsi_min_40'] + 5) and m5['close'] > m5['ema21'] and volume_spike:
+                    valid_setups.append((3, "Adam & Eve", "LONG", m5['ll40'] - (m5_atr * 0.5)))
 
                 # 4. Triangles
-                flat_resistance = m5['hh20'] == df.iloc[-10]['hh20']
-                rising_lows = m5_prev['low'] > df.iloc[-7]['low'] > df.iloc[-12]['low']
-                if (flat_resistance or rising_lows) and m5['close'] > m5['hh20'] and volume_spike:
-                    strat_sl = m5['ll20'] - (m5_atr * 0.5)
-                    valid_setups.append((4, "Triangle Breakout", "LONG", strat_sl))
+                if (m5['hh20'] == df.iloc[-10]['hh20'] or m5_prev['low'] > df.iloc[-7]['low'] > df.iloc[-12]['low']) and m5['close'] > m5['hh20'] and volume_spike:
+                    valid_setups.append((4, "Triangle Breakout", "LONG", m5['ll20'] - (m5_atr * 0.5)))
 
                 # 5. Momentum Ignition
-                momentum_breakout = m5['close'] > m5['hh20'] and m5['vol'] > (m5['sma_vol'] * 2.0) and m5['close'] > m5['ema21']
-                if momentum_breakout and has_adx:
-                    strat_sl = m5['ll20'] - (m5_atr * 0.5)
-                    valid_setups.append((5, "Momentum Ignition", "LONG", strat_sl))
+                if m5['close'] > m5['hh20'] and m5['vol'] > (m5['sma_vol'] * 2.0) and m5['close'] > m5['ema21'] and has_adx:
+                    valid_setups.append((5, "Momentum Ignition", "LONG", m5['ll20'] - (m5_atr * 0.5)))
                     
                 # 6. Momentum Expansion
-                volatility_expansion = float(m5['atr']) > (float(m5['atr_sma20']) * 1.3)
-                volume_surge = float(m5['vol']) > (float(m5['sma_vol']) * 1.7)
-                momentum_break = float(m5['close']) > float(m5['hh20'])
-                if volatility_expansion and volume_surge and momentum_break and has_adx:
-                    strat_sl = float(m5['ll20']) - (m5_atr * 0.6)
-                    valid_setups.append((6, "Momentum Expansion", "LONG", strat_sl))
+                if float(m5['atr']) > (float(m5['atr_sma20']) * 1.3) and float(m5['vol']) > (float(m5['sma_vol']) * 1.7) and float(m5['close']) > float(m5['hh20']) and has_adx:
+                    valid_setups.append((6, "Momentum Expansion", "LONG", float(m5['ll20']) - (m5_atr * 0.6)))
 
-                # 7. Golden Pullback (جديد)
+                # 7. Golden Pullback
                 if trend_up_micro and (m5_prev['low'] <= m5['ema50']) and (m5['close'] > m5['ema50']) and m5['close'] > m5['open']:
-                    strat_sl = min(m5['low'], m5_prev['low']) - (m5_atr * 0.3)
-                    valid_setups.append((7, "Golden Pullback", "LONG", strat_sl))
+                    valid_setups.append((7, "Golden Pullback", "LONG", min(m5['low'], m5_prev['low']) - (m5_atr * 0.3)))
 
-                # 8. Oversold Reversal (جديد)
+                # 8. Oversold Reversal
                 if m5_prev['rsi'] < 30 and m5['close'] > m5['open'] and volume_spike:
-                    strat_sl = min(m5['low'], m5_prev['low']) - (m5_atr * 0.3)
-                    valid_setups.append((8, "Oversold Reversal", "LONG", strat_sl))
+                    valid_setups.append((8, "Oversold Reversal", "LONG", min(m5['low'], m5_prev['low']) - (m5_atr * 0.3)))
 
-                # 9. Inside Bar Breakout (جديد)
-                is_inside = m5_prev['high'] <= m5_prev2['high'] and m5_prev['low'] >= m5_prev2['low']
-                if is_inside and m5['close'] > m5_prev['high'] and volume_spike:
-                    strat_sl = m5_prev['low'] - (m5_atr * 0.3)
-                    valid_setups.append((9, "Inside Bar Breakout", "LONG", strat_sl))
+                # 9. Inside Bar Breakout
+                if m5_prev['high'] <= m5_prev2['high'] and m5_prev['low'] >= m5_prev2['low'] and m5['close'] > m5_prev['high'] and volume_spike:
+                    valid_setups.append((9, "Inside Bar Breakout", "LONG", m5_prev['low'] - (m5_atr * 0.3)))
 
 
             # ==========================================
@@ -219,63 +198,40 @@ class StrategyEngine:
                 prev_8_candles = df.iloc[-10:-2]; prev_5_candles = df.iloc[-7:-2]
                 
                 # 1. Squeeze
-                is_adaptive_squeeze = prev_8_candles['bb_width'].max() < (prev_8_candles['bb_width'].mean() * 0.85)
-                is_compressed = (prev_5_candles['range'] < (prev_5_candles['atr'] * 0.65)).all()
-                if is_adaptive_squeeze and is_compressed and m5['close'] < m5['bb_lower'] and volume_spike:
-                    strat_sl = m5['bb_upper'] + (m5_atr * 0.5)
-                    valid_setups.append((1, "Adaptive Squeeze Breakdown", "SHORT", strat_sl))
+                if prev_8_candles['bb_width'].max() < (prev_8_candles['bb_width'].mean() * 0.85) and (prev_5_candles['range'] < (prev_5_candles['atr'] * 0.65)).all() and m5['close'] < m5['bb_lower'] and volume_spike:
+                    valid_setups.append((1, "Adaptive Squeeze Breakdown", "SHORT", m5['bb_upper'] + (m5_atr * 0.5)))
 
                 # 2. Break & Retest
-                broke_recently_down = df.iloc[-5]['close'] < df.iloc[-5]['ll20']
-                touching_resistance = abs(m5['high'] - m5['ll20']) / m5['ll20'] < 0.003
-                if broke_recently_down and touching_resistance and m5['close'] < m5['open']:
-                    strat_sl = m5['ll20'] + (m5_atr * 0.5)
-                    valid_setups.append((2, "Support Breakdown Retest", "SHORT", strat_sl))
+                if df.iloc[-5]['close'] < df.iloc[-5]['ll20'] and abs(m5['high'] - m5['ll20']) / m5['ll20'] < 0.003 and m5['close'] < m5['open']:
+                    valid_setups.append((2, "Support Breakdown Retest", "SHORT", m5['ll20'] + (m5_atr * 0.5)))
 
-                # 3. Adam & Eve (M-Pattern)
-                touching_hh40 = abs(m5['high'] - m5['hh40']) / m5['hh40'] < 0.003
-                rsi_divergence_bear = m5['rsi'] < (m5['rsi_max_40'] - 5)
-                if touching_hh40 and rsi_divergence_bear and m5['close'] < m5['ema21'] and volume_spike:
-                    strat_sl = m5['hh40'] + (m5_atr * 0.5)
-                    valid_setups.append((3, "Adam & Eve (M-Pattern)", "SHORT", strat_sl))
+                # 3. Adam & Eve
+                if abs(m5['high'] - m5['hh40']) / m5['hh40'] < 0.003 and m5['rsi'] < (m5['rsi_max_40'] - 5) and m5['close'] < m5['ema21'] and volume_spike:
+                    valid_setups.append((3, "Adam & Eve", "SHORT", m5['hh40'] + (m5_atr * 0.5)))
 
                 # 4. Triangles
-                flat_support = m5['ll20'] == df.iloc[-10]['ll20']
-                falling_highs = m5_prev['high'] < df.iloc[-7]['high'] < df.iloc[-12]['high']
-                if (flat_support or falling_highs) and m5['close'] < m5['ll20'] and volume_spike:
-                    strat_sl = m5['hh20'] + (m5_atr * 0.5)
-                    valid_setups.append((4, "Triangle Breakdown", "SHORT", strat_sl))
+                if (m5['ll20'] == df.iloc[-10]['ll20'] or m5_prev['high'] < df.iloc[-7]['high'] < df.iloc[-12]['high']) and m5['close'] < m5['ll20'] and volume_spike:
+                    valid_setups.append((4, "Triangle Breakdown", "SHORT", m5['hh20'] + (m5_atr * 0.5)))
 
                 # 5. Momentum Ignition
-                momentum_breakdown = m5['close'] < m5['ll20'] and m5['vol'] > (m5['sma_vol'] * 2.0) and m5['close'] < m5['ema21'] 
-                if momentum_breakdown and has_adx:
-                    strat_sl = m5['hh20'] + (m5_atr * 0.5)
-                    valid_setups.append((5, "Momentum Ignition", "SHORT", strat_sl))
+                if m5['close'] < m5['ll20'] and m5['vol'] > (m5['sma_vol'] * 2.0) and m5['close'] < m5['ema21'] and has_adx:
+                    valid_setups.append((5, "Momentum Ignition", "SHORT", m5['hh20'] + (m5_atr * 0.5)))
                     
                 # 6. Momentum Expansion 
-                volatility_expansion = float(m5['atr']) > (float(m5['atr_sma20']) * 1.3)
-                volume_surge = float(m5['vol']) > (float(m5['sma_vol']) * 1.7)
-                momentum_break_short = float(m5['close']) < float(m5['ll20'])
-                if volatility_expansion and volume_surge and momentum_break_short and has_adx:
-                    strat_sl = float(m5['hh20']) + (m5_atr * 0.6)
-                    valid_setups.append((6, "Momentum Expansion", "SHORT", strat_sl))
+                if float(m5['atr']) > (float(m5['atr_sma20']) * 1.3) and float(m5['vol']) > (float(m5['sma_vol']) * 1.7) and float(m5['close']) < float(m5['ll20']) and has_adx:
+                    valid_setups.append((6, "Momentum Expansion", "SHORT", float(m5['hh20']) + (m5_atr * 0.6)))
 
-                # 7. Golden Pullback (جديد)
+                # 7. Golden Pullback 
                 if trend_down_micro and (m5_prev['high'] >= m5['ema50']) and (m5['close'] < m5['ema50']) and m5['close'] < m5['open']:
-                    strat_sl = max(m5['high'], m5_prev['high']) + (m5_atr * 0.3)
-                    valid_setups.append((7, "Golden Pullback", "SHORT", strat_sl))
+                    valid_setups.append((7, "Golden Pullback", "SHORT", max(m5['high'], m5_prev['high']) + (m5_atr * 0.3)))
 
-                # 8. Overbought Reversal (جديد)
+                # 8. Overbought Reversal 
                 if m5_prev['rsi'] > 70 and m5['close'] < m5['open'] and volume_spike:
-                    strat_sl = max(m5['high'], m5_prev['high']) + (m5_atr * 0.3)
-                    valid_setups.append((8, "Overbought Reversal", "SHORT", strat_sl))
+                    valid_setups.append((8, "Overbought Reversal", "SHORT", max(m5['high'], m5_prev['high']) + (m5_atr * 0.3)))
 
-                # 9. Inside Bar Breakdown (جديد)
-                is_inside = m5_prev['high'] <= m5_prev2['high'] and m5_prev['low'] >= m5_prev2['low']
-                if is_inside and m5['close'] < m5_prev['low'] and volume_spike:
-                    strat_sl = m5_prev['high'] + (m5_atr * 0.3)
-                    valid_setups.append((9, "Inside Bar Breakdown", "SHORT", strat_sl))
-
+                # 9. Inside Bar Breakdown 
+                if m5_prev['high'] <= m5_prev2['high'] and m5_prev['low'] >= m5_prev2['low'] and m5['close'] < m5_prev['low'] and volume_spike:
+                    valid_setups.append((9, "Inside Bar Breakdown", "SHORT", m5_prev['high'] + (m5_atr * 0.3)))
 
             if not valid_setups: return None
             
@@ -292,7 +248,7 @@ class StrategyEngine:
             if risk_pct > 8.0: return None 
 
             # ==========================================
-            # 👈 هندسة الأهداف (تخفيف الفلتر لتمرير الصفقات)
+            # 👈 هندسة الأهداف 
             # ==========================================
             if side == "LONG":
                 near_liq = max(float(m5['hh20']), float(m5['hh40']))
@@ -307,7 +263,6 @@ class StrategyEngine:
                 if tp3 <= entry + (m5_atr * 1.5):
                     tp3 = entry + (m5_atr * 2.2)
 
-                # تخفيف الفلتر لضمان تمرير الصفقات ذات الستوب القريب
                 rr = abs(tp3 - entry) / risk_distance
                 if rr < 1.1: return None
 
@@ -331,7 +286,6 @@ class StrategyEngine:
                 if tp3 >= entry - (m5_atr * 1.5):
                     tp3 = entry - (m5_atr * 2.2)
 
-                # تخفيف الفلتر لضمان تمرير الصفقات
                 rr = abs(entry - tp3) / risk_distance
                 if rr < 1.1: return None
 
@@ -348,7 +302,8 @@ class StrategyEngine:
                 "strat": strat, "risk_distance": risk_distance, "atr": m5_atr
             }
 
-        except Exception:
+        except Exception as e:
+            Log.print(f"⚠️ Strategy Analysis Error on {symbol}: {e}", Log.RED)
             return None
 
 # ==========================================
@@ -369,7 +324,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFilters Relaxed & All-Weather Strategies Added 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nReady for the latest Python Runtime! 🎯")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -378,7 +333,8 @@ class TradingSystem:
     def save_state(self):
         try:
             with open(Config.STATE_FILE, "w") as f: json.dump({"version": Config.VERSION, "active_trades": self.active_trades, "cooldown_list": self.cooldown_list, "stats": self.stats}, f)
-        except Exception: pass
+        except Exception as e: 
+            Log.print(f"⚠️ Save State Error: {e}", Log.RED)
 
     def load_state(self):
         if os.path.exists(Config.STATE_FILE):
@@ -387,7 +343,8 @@ class TradingSystem:
                     state = json.load(f)
                 if state.get("version") == Config.VERSION:
                     self.active_trades = state.get("active_trades", {}); self.cooldown_list = state.get("cooldown_list", {}); self.stats = state.get("stats", self.stats)
-            except Exception: pass
+            except Exception as e: 
+                Log.print(f"⚠️ Load State Error: {e}", Log.RED)
 
     def _update_equity_and_drawdown(self, pnl):
         self.stats['virtual_equity'] += pnl
@@ -411,7 +368,8 @@ class TradingSystem:
                 
                 res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_data)
                 if res: await self.execute_trade(res)
-            except Exception: pass
+            except Exception as e: 
+                Log.print(f"⚠️ Symbol Process Error ({sym}): {e}", Log.RED)
 
     async def execute_trade(self, trade):
         try:
@@ -428,7 +386,9 @@ class TradingSystem:
                 last = float(ticker.get('last'))
                 spread = abs(ask - bid) / last
                 if spread > Config.MAX_ALLOWED_SPREAD: return
-            except Exception: return 
+            except Exception as e: 
+                Log.print(f"⚠️ Spread Check Error ({sym}): {e}", Log.YELLOW)
+                return 
             
             safe_entry = float(self.exchange.price_to_precision(sym, trade['entry']))
             safe_sl = float(self.exchange.price_to_precision(sym, trade['sl']))
@@ -477,7 +437,8 @@ class TradingSystem:
                 self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
                 self.save_state() 
                 Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name} | Lev: {dynamic_lev}x", Log.GREEN)
-        except Exception: pass
+        except Exception as e: 
+            Log.print(f"⚠️ Execute Trade Error ({trade.get('symbol', 'Unknown')}): {e}", Log.RED)
 
     async def update_valid_coins_cache(self):
         current_ts = int(datetime.now(timezone.utc).timestamp())
@@ -488,7 +449,8 @@ class TradingSystem:
                 self.cached_valid_coins = [sym for sym, d in tickers.items() if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']) and float(d.get('quoteVolume') or 0) >= Config.MIN_24H_VOLUME_USDT]
                 if self.cached_valid_coins: self.last_cache_time = current_ts
                 Log.print(f"🔄 Coins Cache Updated. Valid Pairs: {len(self.cached_valid_coins)}", Log.BLUE)
-            except Exception: pass
+            except Exception as e: 
+                Log.print(f"⚠️ Cache Update Error: {e}", Log.RED)
 
     async def scan_market(self):
         while self.running:
@@ -499,7 +461,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 9 Strats ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs...", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -507,7 +469,9 @@ class TradingSystem:
                     tasks = [self.process_symbol(sym) for sym in chunk]
                     await asyncio.gather(*tasks); await asyncio.sleep(1) 
                 Log.print("✅ [RADAR] Cycle Complete. Resting...", Log.BLUE); await asyncio.sleep(5) 
-            except Exception: await asyncio.sleep(5)
+            except Exception as e: 
+                Log.print(f"⚠️ Market Scan Loop Error: {e}", Log.RED)
+                await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
         while self.running:
@@ -579,41 +543,45 @@ class TradingSystem:
                             Log.print(f"Hit TP{trade['step']}: {sym}", Log.GREEN)
                             await self.tg.send(msg, trade['msg_id'])
                             self.save_state() 
-            except Exception: pass
+            except Exception as e: 
+                Log.print(f"⚠️ Monitor Loop Error: {e}", Log.RED)
             await asyncio.sleep(2) 
 
     async def daily_report(self):
         while self.running:
             await asyncio.sleep(86400)
-            d_stats = self.stats['daily']
-            total_trades = d_stats['wins'] + d_stats['losses'] + d_stats['break_evens']
-            total_decisive = d_stats['wins'] + d_stats['losses']
-            wr = (d_stats['wins'] / total_decisive * 100) if total_decisive > 0 else 0
-            avg_roe = (d_stats['total_roe'] / total_trades) if total_trades > 0 else 0 
-            
-            strats_msg = "\n🔬 <b>Strategy Performance:</b>\n"
-            if self.stats.get('strats'):
-                for s_name, s_data in self.stats['strats'].items():
-                    s_trades = s_data['wins'] + s_data['losses'] + s_data['break_evens']
-                    s_decisive = s_data['wins'] + s_data['losses']
-                    if s_trades > 0:
-                        s_wr = (s_data['wins'] / s_decisive * 100) if s_decisive > 0 else 0
-                        s_avg_roe = s_data['total_roe'] / s_trades
-                        strats_msg += f"▪️ Type {s_name[:2].upper()}: {s_wr:.0f}% WR | {s_avg_roe:+.1f}% ROE\n"
+            try:
+                d_stats = self.stats['daily']
+                total_trades = d_stats['wins'] + d_stats['losses'] + d_stats['break_evens']
+                total_decisive = d_stats['wins'] + d_stats['losses']
+                wr = (d_stats['wins'] / total_decisive * 100) if total_decisive > 0 else 0
+                avg_roe = (d_stats['total_roe'] / total_trades) if total_trades > 0 else 0 
+                
+                strats_msg = "\n🔬 <b>Strategy Performance:</b>\n"
+                if self.stats.get('strats'):
+                    for s_name, s_data in self.stats['strats'].items():
+                        s_trades = s_data['wins'] + s_data['losses'] + s_data['break_evens']
+                        s_decisive = s_data['wins'] + s_data['losses']
+                        if s_trades > 0:
+                            s_wr = (s_data['wins'] / s_decisive * 100) if s_decisive > 0 else 0
+                            s_avg_roe = s_data['total_roe'] / s_trades
+                            strats_msg += f"▪️ Type {s_name[:2].upper()}: {s_wr:.0f}% WR | {s_avg_roe:+.1f}% ROE\n"
 
-            msg = (
-                f"📈 <b>INSTITUTIONAL REPORT (24H)</b> 📉\n────────────────\n"
-                f"🎯 <b>Daily Signals:</b> {d_stats['signals']}\n✅ <b>Wins:</b> {d_stats['wins']}\n"
-                f"❌ <b>Losses:</b> {d_stats['losses']}\n⚖️ <b>Break Evens:</b> {d_stats['break_evens']}\n"
-                f"📊 <b>Decisive Win Rate:</b> {wr:.1f}%\n────────────────\n"
-                f"📉 <b>Max Drawdown:</b> {self.stats['max_drawdown_pct']:.2f}%\n"
-                f"📐 <b>Average Net Profit:</b> {avg_roe:+.1f}% ROE\n"
-                f"💵 <b>Simulated Equity:</b> ${self.stats['virtual_equity']:.2f}\n"
-                f"────────────────{strats_msg}"
-            )
-            await self.tg.send(msg)
-            self.stats['daily'] = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}
-            self.save_state()
+                msg = (
+                    f"📈 <b>INSTITUTIONAL REPORT (24H)</b> 📉\n────────────────\n"
+                    f"🎯 <b>Daily Signals:</b> {d_stats['signals']}\n✅ <b>Wins:</b> {d_stats['wins']}\n"
+                    f"❌ <b>Losses:</b> {d_stats['losses']}\n⚖️ <b>Break Evens:</b> {d_stats['break_evens']}\n"
+                    f"📊 <b>Decisive Win Rate:</b> {wr:.1f}%\n────────────────\n"
+                    f"📉 <b>Max Drawdown:</b> {self.stats['max_drawdown_pct']:.2f}%\n"
+                    f"📐 <b>Average Net Profit:</b> {avg_roe:+.1f}% ROE\n"
+                    f"💵 <b>Simulated Equity:</b> ${self.stats['virtual_equity']:.2f}\n"
+                    f"────────────────{strats_msg}"
+                )
+                await self.tg.send(msg)
+                self.stats['daily'] = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}
+                self.save_state()
+            except Exception as e:
+                Log.print(f"⚠️ Daily Report Error: {e}", Log.RED)
 
     async def keep_alive(self):
         while self.running:
@@ -623,7 +591,16 @@ class TradingSystem:
             await asyncio.sleep(300)
 
 bot = TradingSystem()
-app = FastAPI()
+
+# أحدث معايير FastAPI الحديثة متوافقة مع كل إصدارات بايثون الجديدة
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    main_task = asyncio.create_task(run_bot_background())
+    yield
+    await bot.shutdown()
+    main_task.cancel()
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
@@ -638,16 +615,9 @@ async def run_bot_background():
         asyncio.create_task(bot.monitor_open_trades())
         asyncio.create_task(bot.daily_report())
         asyncio.create_task(bot.keep_alive())
-    except Exception as e: Log.print(f"Critical Bot Startup Error: {e}", Log.RED)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    main_task = asyncio.create_task(run_bot_background())
-    yield
-    await bot.shutdown()
-    main_task.cancel()
-
-app.router.lifespan_context = lifespan
+    except Exception as e: 
+        Log.print(f"⚠️ Critical Bot Startup Error: {e}", Log.RED)
+        traceback.print_exc()
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
