@@ -36,7 +36,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V11600.0" # 👈 Stealth ROE Edition
+    VERSION = "V12200.0" # 👈 Volatility Expansion & Momentum Edition
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -73,7 +73,7 @@ class TelegramNotifier:
         except Exception: return None
 
 # ==========================================
-# 3. محرك الاستراتيجيات (PRO Strategy Engine)
+# 3. محرك الاستراتيجيات (The Ultimate Quant Engine)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -93,6 +93,7 @@ class StrategyEngine:
             df['ema200'] = ta.ema(df['close'], length=200)
             df['rsi'] = ta.rsi(df['close'], length=14)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            df['atr_sma20'] = ta.sma(df['atr'], length=20) # 👈 متوسط التقلب
             
             adx_res = ta.adx(df['high'], df['low'], df['close'], length=14)
             df['adx'] = adx_res.iloc[:, 0] if adx_res is not None and not adx_res.empty else 0
@@ -109,15 +110,8 @@ class StrategyEngine:
             df['ll40'] = df['low'].rolling(40).min().shift(1)
             df['hh40'] = df['high'].rolling(40).max().shift(1)
             
-            df['ls_high'] = df['high'].rolling(10).max().shift(21)
-            df['head_high'] = df['high'].rolling(10).max().shift(11)
-            df['rs_high'] = df['high'].rolling(10).max().shift(1)
-            df['neckline_support'] = df['low'].rolling(30).min().shift(1) 
-
-            df['ls_low'] = df['low'].rolling(10).min().shift(21)
-            df['head_low'] = df['low'].rolling(10).min().shift(11)
-            df['rs_low'] = df['low'].rolling(10).min().shift(1)
-            df['neckline_resist'] = df['high'].rolling(30).max().shift(1) 
+            df['macro_res'] = df['high'].rolling(200).max().shift(1)
+            df['macro_sup'] = df['low'].rolling(200).min().shift(1)
 
             df['rsi_min_40'] = df['rsi'].rolling(40).min().shift(1)
             df['rsi_max_40'] = df['rsi'].rolling(40).max().shift(1)
@@ -128,20 +122,21 @@ class StrategyEngine:
             df.dropna(inplace=True)
             if len(df) < 50: return None
 
-            m5 = df.iloc[-2]
-            m5_prev = df.iloc[-3]
-            entry = float(m5['close'])
-            m5_atr = float(m5['atr'])
-            m5_body = float(m5['body'])
+            m5 = df.iloc[-2]; m5_prev = df.iloc[-3]
+            entry = float(m5['close']); m5_atr = float(m5['atr']); m5_body = float(m5['body'])
             
-            if m5_body < (m5_atr * 0.5): return None 
+            # --- الفلاتر المؤسساتية ---
+            if (m5_atr / entry) < 0.0012: return None
+            distance_from_ema200 = abs(entry - float(m5['ema200'])) / entry
+            if distance_from_ema200 < 0.0015: return None
+            if m5_body < (m5_atr * 0.35): return None 
             
             momentum = abs(m5['close'] - m5_prev['close'])
-            if momentum < (m5_atr * 0.4): return None
+            if momentum < (m5_atr * 0.25): return None
+            if float(m5['adx']) < 15: return None
 
             trend_up = m5['ema21'] > m5['ema50'] > m5['ema200']
             trend_down = m5['ema21'] < m5['ema50'] < m5['ema200']
-            
             macro_bullish = m5['close'] > m5['ema200'] and trend_up
             macro_bearish = m5['close'] < m5['ema200'] and trend_down
             
@@ -149,81 +144,113 @@ class StrategyEngine:
 
             valid_setups = []
 
+            # ==========================================
+            # 🟢 نماذج الشراء (LONG) 
+            # ==========================================
             if macro_bullish:
-                prev_8_candles = df.iloc[-10:-2]
-                prev_5_candles = df.iloc[-7:-2]
+                prev_8_candles = df.iloc[-10:-2]; prev_5_candles = df.iloc[-7:-2]
+                
+                # 1. Squeeze
                 is_adaptive_squeeze = prev_8_candles['bb_width'].max() < (prev_8_candles['bb_width'].mean() * 0.85)
                 is_compressed = (prev_5_candles['range'] < (prev_5_candles['atr'] * 0.65)).all()
                 if is_adaptive_squeeze and is_compressed and m5['close'] > m5['bb_upper'] and volume_spike:
                     strat_sl = m5['bb_lower'] - (m5_atr * 0.5)
                     valid_setups.append((1, "Adaptive Squeeze Breakout", "LONG", strat_sl))
 
+                # 2. Break & Retest
                 broke_recently = df.iloc[-5]['close'] > df.iloc[-5]['hh20']
                 touching_support = abs(m5['low'] - m5['hh20']) / m5['hh20'] < 0.003
                 if broke_recently and touching_support and m5['close'] > m5['open']:
                     strat_sl = m5['hh20'] - (m5_atr * 0.5)
                     valid_setups.append((2, "Break & Retest", "LONG", strat_sl))
 
-                valid_ihs_structure = m5['head_low'] < m5['ls_low'] and m5['head_low'] < m5['rs_low']
-                breaking_neckline = m5_prev['close'] <= m5['neckline_resist'] and m5['close'] > m5['neckline_resist']
-                if valid_ihs_structure and breaking_neckline and volume_spike:
-                    strat_sl = m5['rs_low'] - (m5_atr * 0.5)
-                    valid_setups.append((3, "Inverse Head & Shoulders", "LONG", strat_sl))
-
+                # 3. Adam & Eve (W-Pattern)
                 touching_ll40 = abs(m5['low'] - m5['ll40']) / m5['ll40'] < 0.003
                 rsi_divergence_bull = m5['rsi'] > (m5['rsi_min_40'] + 5)
                 if touching_ll40 and rsi_divergence_bull and m5['close'] > m5['ema21'] and volume_spike:
                     strat_sl = m5['ll40'] - (m5_atr * 0.5)
-                    valid_setups.append((4, "Adam & Eve (W-Pattern)", "LONG", strat_sl))
+                    valid_setups.append((3, "Adam & Eve (W-Pattern)", "LONG", strat_sl))
 
+                # 4. Triangles
                 flat_resistance = m5['hh20'] == df.iloc[-10]['hh20']
                 rising_lows = m5_prev['low'] > df.iloc[-7]['low'] > df.iloc[-12]['low']
                 if (flat_resistance or rising_lows) and m5['close'] > m5['hh20'] and volume_spike:
                     strat_sl = m5['ll20'] - (m5_atr * 0.5)
-                    valid_setups.append((5, "Triangle Breakout", "LONG", strat_sl))
+                    valid_setups.append((4, "Triangle Breakout", "LONG", strat_sl))
 
-                extreme_oversold = df.iloc[-5]['rsi'] < 25 and df.iloc[-5]['adx'] > 35
-                if extreme_oversold and m5_prev['close'] <= m5['ema50'] and m5['close'] > m5['ema50']:
-                    strat_sl = m5['ema50'] - (m5_atr * 0.5)
-                    valid_setups.append((6, "Bump & Run Reversal", "LONG", strat_sl))
+                # 5. Momentum Ignition
+                momentum_breakout = (
+                    m5['close'] > m5['hh20'] and
+                    m5['vol'] > (m5['sma_vol'] * 2.0) and
+                    m5['close'] > m5['ema21'] and
+                    m5['adx'] > 22
+                )
+                if momentum_breakout:
+                    strat_sl = m5['ll20'] - (m5_atr * 0.5)
+                    valid_setups.append((5, "Momentum Ignition", "LONG", strat_sl))
+                    
+                # 6. Momentum Expansion (Volatility + Volume Surge) 🚀
+                volatility_expansion = float(m5['atr']) > (float(m5['atr_sma20']) * 1.3)
+                volume_surge = float(m5['vol']) > (float(m5['sma_vol']) * 1.7)
+                momentum_break = float(m5['close']) > float(m5['hh20'])
 
+                if volatility_expansion and volume_surge and momentum_break:
+                    strat_sl = float(m5['ll20']) - (m5_atr * 0.6)
+                    valid_setups.append((6, "Momentum Expansion", "LONG", strat_sl))
+
+            # ==========================================
+            # 🔴 نماذج البيع (SHORT)
+            # ==========================================
             elif macro_bearish:
-                prev_8_candles = df.iloc[-10:-2]
-                prev_5_candles = df.iloc[-7:-2]
+                prev_8_candles = df.iloc[-10:-2]; prev_5_candles = df.iloc[-7:-2]
+                
+                # 1. Squeeze
                 is_adaptive_squeeze = prev_8_candles['bb_width'].max() < (prev_8_candles['bb_width'].mean() * 0.85)
                 is_compressed = (prev_5_candles['range'] < (prev_5_candles['atr'] * 0.65)).all()
                 if is_adaptive_squeeze and is_compressed and m5['close'] < m5['bb_lower'] and volume_spike:
                     strat_sl = m5['bb_upper'] + (m5_atr * 0.5)
                     valid_setups.append((1, "Adaptive Squeeze Breakdown", "SHORT", strat_sl))
 
+                # 2. Break & Retest
                 broke_recently_down = df.iloc[-5]['close'] < df.iloc[-5]['ll20']
                 touching_resistance = abs(m5['high'] - m5['ll20']) / m5['ll20'] < 0.003
                 if broke_recently_down and touching_resistance and m5['close'] < m5['open']:
                     strat_sl = m5['ll20'] + (m5_atr * 0.5)
                     valid_setups.append((2, "Support Breakdown Retest", "SHORT", strat_sl))
 
-                valid_hs_structure = m5['head_high'] > m5['ls_high'] and m5['head_high'] > m5['rs_high']
-                breaking_neckline_down = m5_prev['close'] >= m5['neckline_support'] and m5['close'] < m5['neckline_support']
-                if valid_hs_structure and breaking_neckline_down and volume_spike:
-                    strat_sl = m5['rs_high'] + (m5_atr * 0.5)
-                    valid_setups.append((3, "Head & Shoulders Pattern", "SHORT", strat_sl))
-
+                # 3. Adam & Eve (M-Pattern)
                 touching_hh40 = abs(m5['high'] - m5['hh40']) / m5['hh40'] < 0.003
                 rsi_divergence_bear = m5['rsi'] < (m5['rsi_max_40'] - 5)
                 if touching_hh40 and rsi_divergence_bear and m5['close'] < m5['ema21'] and volume_spike:
                     strat_sl = m5['hh40'] + (m5_atr * 0.5)
-                    valid_setups.append((4, "Adam & Eve (M-Pattern)", "SHORT", strat_sl))
+                    valid_setups.append((3, "Adam & Eve (M-Pattern)", "SHORT", strat_sl))
 
+                # 4. Triangles
                 flat_support = m5['ll20'] == df.iloc[-10]['ll20']
                 falling_highs = m5_prev['high'] < df.iloc[-7]['high'] < df.iloc[-12]['high']
                 if (flat_support or falling_highs) and m5['close'] < m5['ll20'] and volume_spike:
                     strat_sl = m5['hh20'] + (m5_atr * 0.5)
-                    valid_setups.append((5, "Triangle Breakdown", "SHORT", strat_sl))
+                    valid_setups.append((4, "Triangle Breakdown", "SHORT", strat_sl))
 
-                extreme_overbought = df.iloc[-5]['rsi'] > 75 and df.iloc[-5]['adx'] > 35
-                if extreme_overbought and m5_prev['close'] >= m5['ema50'] and m5['close'] < m5['ema50']:
-                    strat_sl = m5['ema50'] + (m5_atr * 0.5)
-                    valid_setups.append((6, "Bump & Run Reversal", "SHORT", strat_sl))
+                # 5. Momentum Ignition
+                momentum_breakdown = (
+                    m5['close'] < m5['ll20'] and
+                    m5['vol'] > (m5['sma_vol'] * 2.0) and
+                    m5['close'] < m5['ema21'] and
+                    m5['adx'] > 22
+                )
+                if momentum_breakdown:
+                    strat_sl = m5['hh20'] + (m5_atr * 0.5)
+                    valid_setups.append((5, "Momentum Ignition", "SHORT", strat_sl))
+                    
+                # 6. Momentum Expansion (Volatility + Volume Surge) 🚀
+                volatility_expansion = float(m5['atr']) > (float(m5['atr_sma20']) * 1.3)
+                volume_surge = float(m5['vol']) > (float(m5['sma_vol']) * 1.7)
+                momentum_break_short = float(m5['close']) < float(m5['ll20'])
+
+                if volatility_expansion and volume_surge and momentum_break_short:
+                    strat_sl = float(m5['hh20']) + (m5_atr * 0.6)
+                    valid_setups.append((6, "Momentum Expansion", "SHORT", strat_sl))
 
             if not valid_setups: return None
             
@@ -239,11 +266,54 @@ class StrategyEngine:
             risk_pct = (risk_distance / entry) * 100
             if risk_pct > 8.0: return None 
 
-            tps = [
-                entry + (risk_distance * 1) if side == "LONG" else entry - (risk_distance * 1), 
-                entry + (risk_distance * 2) if side == "LONG" else entry - (risk_distance * 2), 
-                entry + (risk_distance * 3) if side == "LONG" else entry - (risk_distance * 3)  
-            ]
+            # ==========================================
+            # 👈 هندسة الأهداف (Smart Liquidity)
+            # ==========================================
+            if side == "LONG":
+                near_liq = max(float(m5['hh20']), float(m5['hh40']))
+                macro_liq = float(m5['macro_res'])
+                atr_target = entry + (m5_atr * 3.0)
+
+                liquidity_level = near_liq if near_liq > entry else macro_liq
+                if liquidity_level <= entry: liquidity_level = entry + (m5_atr * 3.0)
+
+                tp3 = min(liquidity_level - (m5_atr * 0.15), atr_target)
+
+                if tp3 <= entry + (m5_atr * 1.5):
+                    tp3 = entry + (m5_atr * 2.2)
+
+                rr = abs(tp3 - entry) / risk_distance
+                if rr < 1.5: return None
+
+                path = tp3 - entry
+                tps = [
+                    entry + (path * 0.30),
+                    entry + (path * 0.60),
+                    tp3
+                ]
+
+            else:
+                near_liq = min(float(m5['ll20']), float(m5['ll40']))
+                macro_liq = float(m5['macro_sup'])
+                atr_target = entry - (m5_atr * 3.0)
+
+                liquidity_level = near_liq if near_liq < entry else macro_liq
+                if liquidity_level >= entry: liquidity_level = entry - (m5_atr * 3.0)
+
+                tp3 = max(liquidity_level + (m5_atr * 0.15), atr_target)
+
+                if tp3 >= entry - (m5_atr * 1.5):
+                    tp3 = entry - (m5_atr * 2.2)
+
+                rr = abs(entry - tp3) / risk_distance
+                if rr < 1.5: return None
+
+                path = entry - tp3
+                tps = [
+                    entry - (path * 0.30),
+                    entry - (path * 0.60),
+                    tp3
+                ]
 
             del df
             return {
@@ -272,7 +342,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nStealth Mode & ROE Management Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nMomentum Expansion Engine (ATR + Vol Surge) Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -357,14 +427,11 @@ class TradingSystem:
             
             targets_msg = ""
             for idx, tp in enumerate(safe_tps):
-                # 👈 عرض الـ ROE في الأهداف
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, tp, trade['side'], dynamic_lev)
                 targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code> (+{tp_roe:.1f}% ROE)\n"
 
-            # 👈 عرض الـ ROE في الستوب
             pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
 
-            # 👈 تم مسح اسم الاستراتيجية من رسالة التليجرام تماماً
             msg = (
                 f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
                 f"────────────────\n"
@@ -382,7 +449,6 @@ class TradingSystem:
                 self.active_trades[sym] = trade
                 self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
                 self.save_state() 
-                # 👈 اسم الاستراتيجية يظهر لك في اللوغز (السيرفر) فقط
                 Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name} | Lev: {dynamic_lev}x", Log.GREEN)
         except Exception: pass
 
@@ -406,7 +472,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | PRO Filters ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Expansion Mode ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -506,7 +572,6 @@ class TradingSystem:
                     if s_trades > 0:
                         s_wr = (s_data['wins'] / s_decisive * 100) if s_decisive > 0 else 0
                         s_avg_roe = s_data['total_roe'] / s_trades
-                        # نعرض أول حرفين من اسم الاستراتيجية في التقرير فقط للتمويه والسرية إذا رأى أحد جوالك
                         strats_msg += f"▪️ Type {s_name[:2].upper()}: {s_wr:.0f}% WR | {s_avg_roe:+.1f}% ROE\n"
 
             msg = (
