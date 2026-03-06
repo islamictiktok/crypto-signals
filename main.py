@@ -37,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V19500.0 - Optimized TP & Clean ROE"
+    VERSION = "V21000.0 - Precision English Scalper"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -78,7 +78,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (Institutional Absorption)
+# 3. محرك الاستراتيجية
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -91,95 +91,94 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 50: return None 
+            if len(df) < 100: return None 
             
-            bb = ta.bbands(df['close'], length=21, std=2)
+            bb = ta.bbands(df['close'], length=20, std=2)
             if bb is not None:
                 df['bb_lower'] = bb.iloc[:, 0]  
                 df['bb_mid'] = bb.iloc[:, 1]    
-                df['bb_upper'] = bb.iloc[:, 2]  
+                df['bb_upper'] = bb.iloc[:, 2]
+                df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid']
             else: return None
 
+            df['ema50'] = ta.ema(df['close'], length=50)
+            df['rsi'] = ta.rsi(df['close'], length=14)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            df['sma_vol'] = ta.sma(df['vol'], length=20)
+            df['atr_sma'] = ta.sma(df['atr'], length=14) 
+            df['bb_width_sma'] = ta.sma(df['bb_width'], length=20) 
+
             df.dropna(inplace=True)
             if len(df) < 5: return None
 
-            curr = df.iloc[-2] 
+            curr = df.iloc[-2]  
+            prev = df.iloc[-3]  
             
             entry = float(curr['close'])
             atr_val = float(curr['atr'])
             
-            candle_high = float(curr['high'])
-            candle_low = float(curr['low'])
-            candle_open = float(curr['open'])
-            candle_close = float(curr['close'])
+            if float(curr['atr']) < (float(curr['atr_sma']) / 3): return None
+            if float(curr['bb_width']) < (float(curr['bb_width_sma']) * 0.8): return None
             
-            bb_lower = float(curr['bb_lower'])
-            bb_upper = float(curr['bb_upper'])
-            
-            candle_range = candle_high - candle_low
-            if candle_range == 0: return None
+            body = abs(curr['close'] - curr['open'])
+            if body < (atr_val * 0.3): return None
 
-            if candle_range > atr_val * 1.8: return None
-            
-            body = abs(candle_close - candle_open)
-            lower_wick = min(candle_open, candle_close) - candle_low
-            upper_wick = candle_high - max(candle_open, candle_close)
-            
-            # 👈 تخفيف الفوليوم لـ 1.2 لاقتناص فرص أكثر
-            volume_spike = float(curr['vol']) > (float(curr['sma_vol']) * 1.2)
+            distance_from_ema = abs(entry - float(curr['ema50']))
+            if distance_from_ema > (atr_val * 5): return None
 
             setup = None
 
             # ==========================================
-            # 🟢 سيناريو الشراء القوي (LONG)
+            # 🟢 شروط صفقة الشراء (BUY)
             # ==========================================
-            swept_lower = candle_low <= bb_lower
-            closed_inside_lower = candle_close > bb_lower
-            
-            # 👈 تخفيف الذيل لـ 45% مع الاحتفاظ بشرط اللون الأخضر
-            strong_rejection_long = (lower_wick >= candle_range * 0.45) and (candle_close > candle_open)
+            trend_up = entry > float(curr['ema50']) 
+            touched_lower = float(curr['low']) <= float(curr['bb_lower']) or float(prev['low']) <= float(prev['bb_lower']) 
+            rsi_oversold = float(curr['rsi']) <= 35 or float(prev['rsi']) <= 35 
+            bullish_confirmation = entry > float(curr['open']) and entry > float(curr['bb_lower']) 
 
-            if swept_lower and closed_inside_lower and strong_rejection_long and volume_spike:
-                strat_sl = candle_low - (atr_val * 0.1) 
-                # 👈 سحب الهدف للداخل بمسافة آمنة (0.5 بدلاً من 0.15) لضمان تحقيقه
-                target_zone = bb_upper - (atr_val * 0.50)
-                setup = {"side": "LONG", "sl": strat_sl, "target_zone": target_zone}
-
-            # ==========================================
-            # 🔴 سيناريو البيع القوي (SHORT)
-            # ==========================================
-            if not setup: 
-                swept_upper = candle_high >= bb_upper
-                closed_inside_upper = candle_close < bb_upper
+            if trend_up and touched_lower and rsi_oversold and bullish_confirmation:
+                sl = min(float(curr['low']), float(prev['low'])) - (atr_val * 0.2)
                 
-                # 👈 تخفيف الذيل لـ 45% مع الاحتفاظ بشرط اللون الأحمر
-                strong_rejection_short = (upper_wick >= candle_range * 0.45) and (candle_close < candle_open)
+                tp1 = float(curr['bb_mid'])
+                tp2 = float(curr['bb_upper'])
+                tp3 = tp2 + (atr_val * 0.8) 
+                
+                if (tp1 - entry) > (atr_val * 0.5):
+                    setup = {"side": "LONG", "sl": sl, "tps": [tp1, tp2, tp3]}
 
-                if swept_upper and closed_inside_upper and strong_rejection_short and volume_spike:
-                    strat_sl = candle_high + (atr_val * 0.1)
-                    # 👈 سحب الهدف للداخل
-                    target_zone = bb_lower + (atr_val * 0.50)
-                    setup = {"side": "SHORT", "sl": strat_sl, "target_zone": target_zone}
+            # ==========================================
+            # 🔴 شروط صفقة البيع (SELL)
+            # ==========================================
+            if not setup:
+                trend_down = entry < float(curr['ema50']) 
+                touched_upper = float(curr['high']) >= float(curr['bb_upper']) or float(prev['high']) >= float(prev['bb_upper']) 
+                rsi_overbought = float(curr['rsi']) >= 65 or float(prev['rsi']) >= 65 
+                bearish_confirmation = entry < float(curr['open']) and entry < float(curr['bb_upper']) 
+
+                if trend_down and touched_upper and rsi_overbought and bearish_confirmation:
+                    sl = max(float(curr['high']), float(prev['high'])) + (atr_val * 0.2)
+                    
+                    tp1 = float(curr['bb_mid'])
+                    tp2 = float(curr['bb_lower'])
+                    tp3 = tp2 - (atr_val * 0.8) 
+                    
+                    if (entry - tp1) > (atr_val * 0.5):
+                        setup = {"side": "SHORT", "sl": sl, "tps": [tp1, tp2, tp3]}
 
             if not setup: return None
 
             side = setup["side"]
             sl = setup["sl"]
-            target_zone = setup["target_zone"]
-            
-            risk_distance = abs(entry - sl)
-            if risk_distance <= 0 or (risk_distance / entry) * 100 > 5.0: return None
+            tps = setup["tps"]
 
+            risk_distance = abs(entry - sl)
+            if risk_distance <= 0: return None
+            
+            if (risk_distance / entry) * 100 > 4.0: return None 
+            
             if side == "LONG":
-                path = target_zone - entry
-                if path < (atr_val * 0.5) or (path / risk_distance) < 0.8: return None
-                tps = [entry + (path * 0.33), entry + (path * 0.66), target_zone]
+                if (tps[0] - entry) / risk_distance < 0.6: return None
             else:
-                path = entry - target_zone
-                if path < (atr_val * 0.5) or (path / risk_distance) < 0.8: return None
-                tps = [entry - (path * 0.33), entry - (path * 0.66), target_zone]
+                if (entry - tps[0]) / risk_distance < 0.6: return None
 
             del df
             return {
@@ -188,7 +187,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "Optimal BB Sweep", 
+                "strat": "EMA50/BB Scalp", 
                 "risk_distance": risk_distance,
                 "atr": atr_val
             }
@@ -215,7 +214,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nSmart ROE Tracking & Safer TP3 Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nPrecision Math & English Actions Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -356,7 +355,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Optimal Sweep ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | EMA50/BB Mode ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -388,43 +387,53 @@ class TradingSystem:
                     pos_size = trade['position_size']; strat_name = trade['strat']
                     margin = trade.get('margin', 1.0)
                     
-                    # 👈 نظام الستوب لوس والرسائل الدقيقة
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
                         exit_price = current_sl
                         
                         pos_33 = pos_size * 0.33
                         pos_34 = pos_size * 0.34
                         
-                        # الحساب الرياضي لحفظ سجل المحفظة (الـ PNL الحقيقي التراكمي)
                         if step == 0: 
                             pnl = (exit_price - entry) * pos_size if side == "LONG" else (entry - exit_price) * pos_size
-                            display_roe = StrategyEngine.calc_actual_roe(entry, exit_price, side, trade['leverage'])
+                            display_roe = (pnl / margin) * 100
                             msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:+.1f}% ROE)"
                             self._log_trade_result('losses', display_roe, strat_name)
                             
                         elif step == 1: 
-                            pnl = (trade['tps'][0] - entry) * pos_33 if side == "LONG" else (entry - trade['tps'][0]) * pos_33
-                            display_roe = 0.0 # الدخول = 0.0%
-                            msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b>\n💰 Total ROE: {display_roe:.1f}%\n🎯 Last hit: TP{trade['last_tp_hit']}"
+                            # Profit from TP1 + zero profit from the rest
+                            pnl_tp1 = (trade['tps'][0] - entry) * pos_33 if side == "LONG" else (entry - trade['tps'][0]) * pos_33
+                            pnl_rem = (exit_price - entry) * (pos_size - pos_33) if side == "LONG" else (entry - exit_price) * (pos_size - pos_33)
+                            pnl = pnl_tp1 + pnl_rem
+                            display_roe = (pnl / margin) * 100 
+                            
+                            msg = (
+                                f"🛡️ <b>Stopped out at Entry (Break Even)</b>\n"
+                                f"💰 <b>Secured Profit:</b> +{display_roe:.1f}% Total ROE\n"
+                                f"🎯 Last hit: TP1"
+                            )
                             self._log_trade_result('break_evens', display_roe, strat_name)
                             
-                        else: # step == 2
+                        else: 
+                            # Profit from TP1 + Profit from TP2 + Profit/Loss on remaining stopped at TP1
                             pnl_1 = (trade['tps'][0] - entry) * pos_33 if side == "LONG" else (entry - trade['tps'][0]) * pos_33
                             pnl_2 = (trade['tps'][1] - entry) * pos_33 if side == "LONG" else (entry - trade['tps'][1]) * pos_33
                             pnl_trail = (exit_price - entry) * pos_34 if side == "LONG" else (entry - exit_price) * pos_34
                             pnl = pnl_1 + pnl_2 + pnl_trail
                             
-                            # عرض نسبة الهدف الأول لأن الستوب كان هناك
-                            display_roe = StrategyEngine.calc_actual_roe(entry, trade['tps'][0], side, trade['leverage'])
-                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b>\n💰 Total ROE: +{display_roe:.1f}%\n🎯 Last hit: TP{trade['last_tp_hit']}"
+                            display_roe = (pnl / margin) * 100
+                            
+                            msg = (
+                                f"🛡️ <b>Stopped out in Profit (Trailing SL)</b>\n"
+                                f"💰 <b>Total Bagged:</b> +{display_roe:.1f}% Total ROE\n"
+                                f"🎯 Last hit: TP2"
+                            )
                             self._log_trade_result('wins', display_roe, strat_name)
 
                         self._update_equity_and_drawdown(pnl)
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
-                        Log.print(f"Trade Closed: {sym} | MSG ROE: {display_roe:+.1f}%", Log.YELLOW) 
+                        Log.print(f"Trade Closed: {sym} | Total ROE: {display_roe:+.1f}%", Log.YELLOW) 
                         await self.tg.send(msg, trade['msg_id']); del self.active_trades[sym]; self.save_state(); continue
 
-                    # جني الأرباح الفوري 
                     target = trade['tps'][step] if step < 3 else None 
                     if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
                         
@@ -435,10 +444,18 @@ class TradingSystem:
 
                         if trade['step'] == 1: 
                             trade['last_sl_price'] = trade['entry']
-                            msg = f"✅ <b>TP1 HIT! (+{tp_roe:.1f}% ROE)</b>\n🛡️ Move SL to Entry: <code>{trade['entry']}</code>"
+                            msg = (
+                                f"✅ <b>TP1 HIT! (+{tp_roe:.1f}% ROE)</b>\n"
+                                f"✂️ <b>Action:</b> Close 33% of position.\n"
+                                f"🛡️ <b>Update:</b> Move SL to Entry: <code>{trade['entry']}</code>"
+                            )
                         elif trade['step'] == 2: 
                             trade['last_sl_price'] = trade['tps'][0] 
-                            msg = f"🔥 <b>TP2 HIT! (+{tp_roe:.1f}% ROE)</b>\n📈 Move SL to TP1: <code>{trade['tps'][0]}</code>"
+                            msg = (
+                                f"🔥 <b>TP2 HIT! (+{tp_roe:.1f}% ROE)</b>\n"
+                                f"✂️ <b>Action:</b> Close another 33% of position.\n"
+                                f"📈 <b>Update:</b> Move SL to TP1: <code>{trade['tps'][0]}</code>"
+                            )
                             
                         if trade['step'] == 3: 
                             pos_33 = pos_size * 0.33; pos_34 = pos_size * 0.34
@@ -448,9 +465,14 @@ class TradingSystem:
                             pnl = pnl_1 + pnl_2 + pnl_3
                             
                             self._update_equity_and_drawdown(pnl)
+                            blended_roe = (pnl / margin) * 100
                             
-                            msg = f"🏆 <b>ALL 3 TARGETS SMASHED! (+{tp_roe:.1f}% ROE)</b> 🏦\nTrade Completed."
-                            self._log_trade_result('wins', tp_roe, strat_name)
+                            msg = (
+                                f"🏆 <b>ALL 3 TARGETS SMASHED!</b> 🏦\n"
+                                f"💰 <b>Total Bagged:</b> +{blended_roe:.1f}% ROE\n"
+                                f"✂️ <b>Action:</b> Close the remaining position. Trade Completed!"
+                            )
+                            self._log_trade_result('wins', blended_roe, strat_name)
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
                             
