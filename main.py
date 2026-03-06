@@ -23,10 +23,8 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    # 👈 الحيلة: نطلب فريم 1 دقيقة من المنصة لكي لا تعطينا خطأ
-    TF_MAIN = '1m'  
-    # 👈 نطلب 1000 شمعة (لأن 1000 شمعة 1m = 333 شمعة 3m)
-    CANDLES_LIMIT = 1000 
+    TF_MAIN = '5m'  # 👈 فريم الرصد الرئيسي 5 دقائق
+    CANDLES_LIMIT = 150 
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 500_000 
@@ -39,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V16400.0 - 3m Resampled Sniper"
+    VERSION = "V17000.0 - Multi-TF BB Sweep Sniper"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -80,7 +78,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (Bollinger Sweep + Hybrid Filter)
+# 3. محرك الاستراتيجية (5m Sweep Identifier)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -93,29 +91,9 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 150: return None 
+            if len(df) < 50: return None 
             
-            # ==========================================
-            # 🔮 الحيلة السحرية: تحويل فريم الدقيقة إلى 3 دقائق (Resampling)
-            # ==========================================
-            df['time'] = pd.to_datetime(df['time'], unit='ms')
-            df.set_index('time', inplace=True)
-            
-            # دمج كل 3 شموع دقيقة في شمعة واحدة مدتها 3 دقائق
-            df = df.resample('3min').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'vol': 'sum'
-            }).dropna()
-            
-            df.reset_index(inplace=True)
-            # ==========================================
-
-            if len(df) < 100: return None # التأكد من توفر شموع كافية بعد الدمج
-            
-            # حساب المؤشرات على فريم الـ 3 دقائق الجديد
+            # البولينجر باند (21, 2)
             bb = ta.bbands(df['close'], length=21, std=2)
             if bb is not None:
                 df['bb_lower'] = bb.iloc[:, 0]  
@@ -123,20 +101,15 @@ class StrategyEngine:
                 df['bb_upper'] = bb.iloc[:, 2]  
             else: return None
 
-            df['ema50'] = ta.ema(df['close'], length=50)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            adx_res = ta.adx(df['high'], df['low'], df['close'], length=14)
-            df['adx'] = adx_res.iloc[:, 0] if adx_res is not None and not adx_res.empty else 0
-            
             df.dropna(inplace=True)
             if len(df) < 5: return None
 
+            # استخراج بيانات شمعة الـ 5 دقائق المنتهية للتو
             curr = df.iloc[-2] 
             
             entry = float(curr['close'])
             atr_val = float(curr['atr'])
-            ema50 = float(curr['ema50'])
-            adx_val = float(curr['adx'])
             
             candle_high = float(curr['high'])
             candle_low = float(curr['low'])
@@ -145,25 +118,20 @@ class StrategyEngine:
             
             bb_lower = float(curr['bb_lower'])
             bb_upper = float(curr['bb_upper'])
+            
+            # تحديد وقت انتهاء هذه الشمعة (لضمان أن تأكيد الـ 1 دقيقة يأتي بعدها)
+            m5_time_ms = int(curr['time'])
+            m5_end_time_ms = m5_time_ms + (5 * 60 * 1000)
 
             candle_range = candle_high - candle_low
             if candle_range == 0: return None
 
-            # 👈 فلتر الشمعة الكبيرة جداً
-            if candle_range > atr_val * 1.8:
-                return None
+            # فلتر الشمعة الإخبارية الكبيرة جداً
+            if candle_range > atr_val * 1.8: return None
             
             body = abs(candle_close - candle_open)
             lower_wick = min(candle_open, candle_close) - candle_low
             upper_wick = candle_high - max(candle_open, candle_close)
-
-            # 👈 فلتر التذبذب المعدل إلى 22
-            is_ranging = adx_val < 22 
-            trend_up = candle_close > ema50 
-            trend_down = candle_close < ema50 
-            
-            can_long = is_ranging or trend_up
-            can_short = is_ranging or trend_down
 
             setup = None
 
@@ -174,18 +142,10 @@ class StrategyEngine:
             closed_inside_lower = candle_close > bb_lower
             long_lower_wick = (lower_wick > body) and (lower_wick >= candle_range * 0.50)
 
-            if swept_lower and closed_inside_lower and long_lower_wick and can_long:
+            if swept_lower and closed_inside_lower and long_lower_wick:
                 strat_sl = candle_low - (atr_val * 0.2)
                 target_zone = bb_upper - (atr_val * 0.15)
-                path = target_zone - entry
-                
-                if path > (atr_val * 0.8):
-                    tps = [
-                        entry + (path * 0.33),
-                        entry + (path * 0.66),
-                        target_zone
-                    ]
-                    setup = {"side": "LONG", "sl": strat_sl, "tps": tps}
+                setup = {"side": "LONG", "sl": strat_sl, "target_zone": target_zone, "trigger_price": candle_close}
 
             # ==========================================
             # 🔴 سيناريو البيع (SHORT)
@@ -195,39 +155,22 @@ class StrategyEngine:
                 closed_inside_upper = candle_close < bb_upper
                 long_upper_wick = (upper_wick > body) and (upper_wick >= candle_range * 0.50)
 
-                if swept_upper and closed_inside_upper and long_upper_wick and can_short:
+                if swept_upper and closed_inside_upper and long_upper_wick:
                     strat_sl = candle_high + (atr_val * 0.2)
                     target_zone = bb_lower + (atr_val * 0.15)
-                    path = entry - target_zone
-                    
-                    if path > (atr_val * 0.8):
-                        tps = [
-                            entry - (path * 0.33),
-                            entry - (path * 0.66),
-                            target_zone
-                        ]
-                        setup = {"side": "SHORT", "sl": strat_sl, "tps": tps}
+                    setup = {"side": "SHORT", "sl": strat_sl, "target_zone": target_zone, "trigger_price": candle_close}
 
             if not setup: return None
-
-            side = setup["side"]
-            sl = setup["sl"]
-            tps = setup["tps"]
-
-            risk_distance = abs(entry - sl)
-            if risk_distance <= 0: return None
-            
-            if (risk_distance / entry) * 100 > 5.0: return None 
 
             del df
             return {
                 "symbol": symbol, 
-                "side": side, 
-                "entry": entry, 
-                "sl": sl, 
-                "tps": tps,
-                "strat": "3m BB Sweep Sniper", 
-                "risk_distance": risk_distance, 
+                "side": setup["side"], 
+                "trigger_price": setup["trigger_price"], 
+                "sl": setup["sl"], 
+                "target_zone": setup["target_zone"],
+                "m5_end_time": m5_end_time_ms,
+                "strat": "BB Sweep (1m Confirm)", 
                 "atr": atr_val
             }
 
@@ -236,7 +179,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت (Execution & Management)
+# 4. مدير البوت (Execution & Multi-TF Confirmation)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -253,7 +196,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nExclusive 3m Resampled Sniper Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n5m Sweep + 1m Confirmation Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -262,8 +205,7 @@ class TradingSystem:
     def save_state(self):
         try:
             with open(Config.STATE_FILE, "w") as f: json.dump({"version": Config.VERSION, "active_trades": self.active_trades, "cooldown_list": self.cooldown_list, "stats": self.stats}, f)
-        except Exception as e: 
-            Log.print(f"⚠️ Save State Error: {e}", Log.RED)
+        except Exception: pass
 
     def load_state(self):
         if os.path.exists(Config.STATE_FILE):
@@ -272,8 +214,7 @@ class TradingSystem:
                     state = json.load(f)
                 if state.get("version") == Config.VERSION:
                     self.active_trades = state.get("active_trades", {}); self.cooldown_list = state.get("cooldown_list", {}); self.stats = state.get("stats", self.stats)
-            except Exception as e: 
-                Log.print(f"⚠️ Load State Error: {e}", Log.RED)
+            except Exception: pass
 
     def _update_equity_and_drawdown(self, pnl):
         self.stats['virtual_equity'] += pnl
@@ -292,11 +233,69 @@ class TradingSystem:
         async with self.semaphore:
             if sym in self.active_trades or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
             try:
+                # 1. رصد إشارة الـ 5 دقائق
                 ohlcv_data = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MAIN, limit=Config.CANDLES_LIMIT)
                 if not ohlcv_data: return
                 
                 res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_data)
-                if res: await self.execute_trade(res)
+                
+                # 2. إذا وجدنا الإشارة، نذهب فوراً لفريم الدقيقة للتأكيد
+                if res: 
+                    m1_data = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, '1m', limit=10)
+                    if not m1_data: return
+                    
+                    m1_df = pd.DataFrame(m1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+                    if len(m1_df) < 2: return
+                    
+                    m1_curr = m1_df.iloc[-2] # آخر شمعة دقيقة مغلقة
+                    m1_time = int(m1_curr['time'])
+                    
+                    # نضمن أن هذه الشمعة بدأت بعد إغلاق شمعة الـ 5 دقائق
+                    if m1_time < res['m5_end_time']:
+                        return # ننتظر الدقيقة القادمة
+                        
+                    m1_close = float(m1_curr['close'])
+                    trigger = res['trigger_price']
+                    side = res['side']
+                    
+                    confirmed = False
+                    
+                    # 👈 التأكيد بكسر الإغلاق
+                    if side == "LONG" and m1_close > trigger:
+                        confirmed = True
+                    elif side == "SHORT" and m1_close < trigger:
+                        confirmed = True
+                        
+                    if confirmed:
+                        actual_entry = m1_close
+                        atr_val = res['atr']
+                        sl = res['sl']
+                        target_zone = res['target_zone']
+                        
+                        risk_distance = abs(actual_entry - sl)
+                        if risk_distance <= 0 or (risk_distance / actual_entry) * 100 > 5.0: return 
+                        
+                        if side == "LONG":
+                            path = target_zone - actual_entry
+                            if path < (atr_val * 0.5): return # هدف قريب جداً
+                            tps = [actual_entry + (path * 0.33), actual_entry + (path * 0.66), target_zone]
+                        else:
+                            path = actual_entry - target_zone
+                            if path < (atr_val * 0.5): return
+                            tps = [actual_entry - (path * 0.33), actual_entry - (path * 0.66), target_zone]
+
+                        final_trade = {
+                            "symbol": sym,
+                            "side": side,
+                            "entry": actual_entry,
+                            "sl": sl,
+                            "tps": tps,
+                            "strat": res['strat'],
+                            "risk_distance": risk_distance,
+                            "atr": atr_val
+                        }
+                        await self.execute_trade(final_trade)
+
             except Exception as e: 
                 Log.print(f"⚠️ Symbol Process Error ({sym}): {e}", Log.RED)
 
@@ -315,8 +314,7 @@ class TradingSystem:
                 last = float(ticker.get('last'))
                 spread = abs(ask - bid) / last
                 if spread > Config.MAX_ALLOWED_SPREAD: return
-            except Exception as e: 
-                return 
+            except Exception: return 
             
             safe_entry = float(self.exchange.price_to_precision(sym, trade['entry']))
             safe_sl = float(self.exchange.price_to_precision(sym, trade['sl']))
@@ -377,8 +375,7 @@ class TradingSystem:
                 self.cached_valid_coins = [sym for sym, d in tickers.items() if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']) and float(d.get('quoteVolume') or 0) >= Config.MIN_24H_VOLUME_USDT]
                 if self.cached_valid_coins: self.last_cache_time = current_ts
                 Log.print(f"🔄 Coins Cache Updated. Valid Pairs: {len(self.cached_valid_coins)}", Log.BLUE)
-            except Exception as e: 
-                Log.print(f"⚠️ Cache Update Error: {e}", Log.RED)
+            except Exception: pass
 
     async def scan_market(self):
         while self.running:
@@ -389,7 +386,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 3m Resampled Mode ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 5m/1m Combo ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -397,9 +394,7 @@ class TradingSystem:
                     tasks = [self.process_symbol(sym) for sym in chunk]
                     await asyncio.gather(*tasks); await asyncio.sleep(1) 
                 Log.print("✅ [RADAR] Cycle Complete. Resting...", Log.BLUE); await asyncio.sleep(5) 
-            except Exception as e: 
-                Log.print(f"⚠️ Market Scan Loop Error: {e}", Log.RED)
-                await asyncio.sleep(5)
+            except Exception: await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
         while self.running:
@@ -470,8 +465,7 @@ class TradingSystem:
                         Log.print(f"Hit TP{trade['step']}: {sym}", Log.GREEN)
                         await self.tg.send(msg, trade['msg_id'])
                         self.save_state() 
-            except Exception as e: 
-                Log.print(f"⚠️ Monitor Loop Error: {e}", Log.RED)
+            except Exception: pass
             await asyncio.sleep(2) 
 
     async def daily_report(self):
@@ -507,8 +501,7 @@ class TradingSystem:
                 await self.tg.send(msg)
                 self.stats['daily'] = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}
                 self.save_state()
-            except Exception as e:
-                Log.print(f"⚠️ Daily Report Error: {e}", Log.RED)
+            except Exception: pass
 
     async def keep_alive(self):
         while self.running:
