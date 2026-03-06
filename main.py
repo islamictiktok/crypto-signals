@@ -23,9 +23,10 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    # 👈 1️⃣ تم التعديل إلى فريم 3 دقائق
-    TF_MAIN = '3m'  
-    CANDLES_LIMIT = 300 
+    # 👈 الحيلة: نطلب فريم 1 دقيقة من المنصة لكي لا تعطينا خطأ
+    TF_MAIN = '1m'  
+    # 👈 نطلب 1000 شمعة (لأن 1000 شمعة 1m = 333 شمعة 3m)
+    CANDLES_LIMIT = 1000 
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 500_000 
@@ -38,7 +39,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V16300.0 - 3m Bollinger Sniper"
+    VERSION = "V16400.0 - 3m Resampled Sniper"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -92,8 +93,29 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 200: return None 
+            if len(df) < 150: return None 
             
+            # ==========================================
+            # 🔮 الحيلة السحرية: تحويل فريم الدقيقة إلى 3 دقائق (Resampling)
+            # ==========================================
+            df['time'] = pd.to_datetime(df['time'], unit='ms')
+            df.set_index('time', inplace=True)
+            
+            # دمج كل 3 شموع دقيقة في شمعة واحدة مدتها 3 دقائق
+            df = df.resample('3min').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'vol': 'sum'
+            }).dropna()
+            
+            df.reset_index(inplace=True)
+            # ==========================================
+
+            if len(df) < 100: return None # التأكد من توفر شموع كافية بعد الدمج
+            
+            # حساب المؤشرات على فريم الـ 3 دقائق الجديد
             bb = ta.bbands(df['close'], length=21, std=2)
             if bb is not None:
                 df['bb_lower'] = bb.iloc[:, 0]  
@@ -127,7 +149,7 @@ class StrategyEngine:
             candle_range = candle_high - candle_low
             if candle_range == 0: return None
 
-            # 👈 2️⃣ فلتر الشمعة الكبيرة
+            # 👈 فلتر الشمعة الكبيرة جداً
             if candle_range > atr_val * 1.8:
                 return None
             
@@ -135,7 +157,7 @@ class StrategyEngine:
             lower_wick = min(candle_open, candle_close) - candle_low
             upper_wick = candle_high - max(candle_open, candle_close)
 
-            # 👈 3️⃣ تعديل الـ ADX إلى 22
+            # 👈 فلتر التذبذب المعدل إلى 22
             is_ranging = adx_val < 22 
             trend_up = candle_close > ema50 
             trend_down = candle_close < ema50 
@@ -204,7 +226,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "Bollinger Sweep Sniper", 
+                "strat": "3m BB Sweep Sniper", 
                 "risk_distance": risk_distance, 
                 "atr": atr_val
             }
@@ -231,7 +253,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n3m Bollinger Sweep Sniper Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nExclusive 3m Resampled Sniper Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -367,7 +389,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 3m Snipe Mode", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 3m Resampled Mode ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
