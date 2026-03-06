@@ -37,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V14000.0"
+    VERSION = "V15000.0" # 👈 The Apex Quant (Instant TP & Turtle Soup)
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -78,7 +78,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجيات
+# 3. محرك الاستراتيجيات (13-Pattern Apex Engine)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -112,11 +112,21 @@ class StrategyEngine:
 
             df['hh20'] = df['high'].rolling(20).max().shift(1)
             df['ll20'] = df['low'].rolling(20).min().shift(1)
-            df['ll40'] = df['low'].rolling(40).min().shift(1)
             df['hh40'] = df['high'].rolling(40).max().shift(1)
+            df['ll40'] = df['low'].rolling(40).min().shift(1)
             
             df['macro_res'] = df['high'].rolling(200).max().shift(1)
             df['macro_sup'] = df['low'].rolling(200).min().shift(1)
+
+            df['ls_high'] = df['high'].rolling(10).max().shift(21)
+            df['head_high'] = df['high'].rolling(10).max().shift(11)
+            df['rs_high'] = df['high'].rolling(10).max().shift(1)
+            df['neckline_support'] = df['low'].rolling(30).min().shift(1) 
+
+            df['ls_low'] = df['low'].rolling(10).min().shift(21)
+            df['head_low'] = df['low'].rolling(10).min().shift(11)
+            df['rs_low'] = df['low'].rolling(10).min().shift(1)
+            df['neckline_resist'] = df['high'].rolling(30).max().shift(1) 
 
             df['rsi_min_40'] = df['rsi'].rolling(40).min().shift(1)
             df['rsi_max_40'] = df['rsi'].rolling(40).max().shift(1)
@@ -127,118 +137,164 @@ class StrategyEngine:
             df.dropna(inplace=True)
             if len(df) < 50: return None
 
-            m5 = df.iloc[-2]; m5_prev = df.iloc[-3]; m5_prev2 = df.iloc[-4]
-            entry = float(m5['close']); m5_atr = float(m5['atr']); m5_body = float(m5['body'])
+            # تسمية برمجية احترافية
+            curr = df.iloc[-2]; prev1 = df.iloc[-3]; prev2 = df.iloc[-4]
+            entry = float(curr['close']); atr_val = float(curr['atr']); body_val = float(curr['body'])
             
-            if (m5_atr / entry) < 0.001: return None 
-            distance_from_ema200 = abs(entry - float(m5['ema200'])) / entry
+            if (atr_val / entry) < 0.001: return None 
+            distance_from_ema200 = abs(entry - float(curr['ema200'])) / entry
             if distance_from_ema200 < 0.0015: return None
-            if m5_body < (m5_atr * 0.25): return None 
+            if body_val < (atr_val * 0.25): return None 
             
-            momentum = abs(m5['close'] - m5_prev['close'])
-            if momentum < (m5_atr * 0.20): return None
+            momentum = abs(curr['close'] - prev1['close'])
+            if momentum < (atr_val * 0.20): return None
             
-            has_adx = float(m5['adx']) > 15 
-            volume_spike = float(m5['vol']) > (float(m5['sma_vol']) * 1.5) 
+            has_adx = float(curr['adx']) > 15 
+            volume_spike = float(curr['vol']) > (float(curr['sma_vol']) * 1.5) 
+            
+            # فلتر إرهاق الفوليوم (يحمي من الدخول في القمم/القيعان الوهمية للترند)
+            is_volume_exhaustion = float(curr['vol']) > (float(curr['sma_vol']) * 4.0)
 
-            trend_up_micro = m5['ema21'] > m5['ema50']
-            trend_down_micro = m5['ema21'] < m5['ema50']
-            macro_bullish = m5['close'] > m5['ema200']
-            macro_bearish = m5['close'] < m5['ema200']
+            trend_up_micro = curr['ema21'] > curr['ema50']
+            trend_down_micro = curr['ema21'] < curr['ema50']
+            macro_bullish = curr['close'] > curr['ema200']
+            macro_bearish = curr['close'] < curr['ema200']
 
             valid_setups = []
 
             # ==========================================
-            # 🟢 نماذج الشراء (LONG)
+            # 🟢 ترسانة الشراء (LONG) 
             # ==========================================
             if macro_bullish:
                 prev_8_candles = df.iloc[-10:-2]; prev_5_candles = df.iloc[-7:-2]
                 
-                # 1. Squeeze Breakout
-                if prev_8_candles['bb_width'].max() < (prev_8_candles['bb_width'].mean() * 0.85) and (prev_5_candles['range'] < (prev_5_candles['atr'] * 0.65)).all() and m5['close'] > m5['bb_upper'] and volume_spike:
-                    valid_setups.append((1, "Adaptive Squeeze Breakout", "LONG", m5['bb_lower'] - (m5_atr * 0.5)))
+                # الاستراتيجيات التي لا تحب إرهاق الفوليوم (Trend Continuation)
+                if not is_volume_exhaustion:
+                    # 1. Squeeze Breakout
+                    if prev_8_candles['bb_width'].max() < (prev_8_candles['bb_width'].mean() * 0.85) and (prev_5_candles['range'] < (prev_5_candles['atr'] * 0.65)).all() and curr['close'] > curr['bb_upper'] and volume_spike:
+                        valid_setups.append((1, "Adaptive Squeeze Breakout", "LONG", curr['bb_lower'] - (atr_val * 0.5)))
 
-                # 2. Break & Retest
-                if df.iloc[-5]['close'] > df.iloc[-5]['hh20'] and abs(m5['low'] - m5['hh20']) / m5['hh20'] < 0.003 and m5['close'] > m5['open']:
-                    valid_setups.append((2, "Break & Retest", "LONG", m5['hh20'] - (m5_atr * 0.5)))
+                    # 2. Break & Retest
+                    if df.iloc[-5]['close'] > df.iloc[-5]['hh20'] and abs(curr['low'] - curr['hh20']) / curr['hh20'] < 0.003 and curr['close'] > curr['open']:
+                        valid_setups.append((2, "Break & Retest", "LONG", curr['hh20'] - (atr_val * 0.5)))
 
-                # 3. Adam & Eve
-                if abs(m5['low'] - m5['ll40']) / m5['ll40'] < 0.003 and m5['rsi'] > (m5['rsi_min_40'] + 5) and m5['close'] > m5['ema21'] and volume_spike:
-                    valid_setups.append((3, "Adam & Eve", "LONG", m5['ll40'] - (m5_atr * 0.5)))
+                    # 3. Adam & Eve
+                    if abs(curr['low'] - curr['ll40']) / curr['ll40'] < 0.003 and curr['rsi'] > (curr['rsi_min_40'] + 5) and curr['close'] > curr['ema21'] and volume_spike:
+                        valid_setups.append((3, "Adam & Eve", "LONG", curr['ll40'] - (atr_val * 0.5)))
 
-                # 4. Triangles
-                if (m5['hh20'] == df.iloc[-10]['hh20'] or m5_prev['low'] > df.iloc[-7]['low'] > df.iloc[-12]['low']) and m5['close'] > m5['hh20'] and volume_spike:
-                    valid_setups.append((4, "Triangle Breakout", "LONG", m5['ll20'] - (m5_atr * 0.5)))
+                    # 4. Triangles
+                    if (curr['hh20'] == df.iloc[-10]['hh20'] or prev1['low'] > df.iloc[-7]['low'] > df.iloc[-12]['low']) and curr['close'] > curr['hh20'] and volume_spike:
+                        valid_setups.append((4, "Triangle Breakout", "LONG", curr['ll20'] - (atr_val * 0.5)))
 
-                # 5. Momentum Ignition
-                if m5['close'] > m5['hh20'] and m5['vol'] > (m5['sma_vol'] * 2.0) and m5['close'] > m5['ema21'] and has_adx:
-                    valid_setups.append((5, "Momentum Ignition", "LONG", m5['ll20'] - (m5_atr * 0.5)))
-                    
-                # 6. Momentum Expansion
-                if float(m5['atr']) > (float(m5['atr_sma20']) * 1.3) and float(m5['vol']) > (float(m5['sma_vol']) * 1.7) and float(m5['close']) > float(m5['hh20']) and has_adx:
-                    valid_setups.append((6, "Momentum Expansion", "LONG", float(m5['ll20']) - (m5_atr * 0.6)))
+                    # 5. Momentum Ignition
+                    if curr['close'] > curr['hh20'] and curr['vol'] > (curr['sma_vol'] * 2.0) and curr['close'] > curr['ema21'] and has_adx:
+                        valid_setups.append((5, "Momentum Ignition", "LONG", curr['ll20'] - (atr_val * 0.5)))
+                        
+                    # 6. Momentum Expansion
+                    if float(curr['atr']) > (float(curr['atr_sma20']) * 1.3) and float(curr['vol']) > (float(curr['sma_vol']) * 1.7) and float(curr['close']) > float(curr['hh20']) and has_adx:
+                        valid_setups.append((6, "Momentum Expansion", "LONG", float(curr['ll20']) - (atr_val * 0.6)))
 
-                # 7. Golden Pullback
-                if trend_up_micro and (m5_prev['low'] <= m5['ema50']) and (m5['close'] > m5['ema50']) and m5['close'] > m5['open']:
-                    valid_setups.append((7, "Golden Pullback", "LONG", min(m5['low'], m5_prev['low']) - (m5_atr * 0.3)))
+                    # 7. Inverse Head & Shoulders
+                    if curr['head_low'] < curr['ls_low'] and curr['head_low'] < curr['rs_low']:
+                        if prev1['close'] <= curr['neckline_resist'] and curr['close'] > curr['neckline_resist'] and volume_spike:
+                            valid_setups.append((7, "Inverse Head & Shoulders", "LONG", curr['rs_low'] - (atr_val * 0.5)))
 
-                # 8. Oversold Reversal
-                if m5_prev['rsi'] < 30 and m5['close'] > m5['open'] and volume_spike:
-                    valid_setups.append((8, "Oversold Reversal", "LONG", min(m5['low'], m5_prev['low']) - (m5_atr * 0.3)))
+                    # 8. Bump & Run Reversal 
+                    if df.iloc[-5]['rsi'] < 25 and df.iloc[-5]['adx'] > 35:
+                        if prev1['close'] <= curr['ema50'] and curr['close'] > curr['ema50']:
+                            valid_setups.append((8, "Bump & Run Reversal", "LONG", curr['ema50'] - (atr_val * 0.5)))
 
-                # 9. Inside Bar Breakout
-                if m5_prev['high'] <= m5_prev2['high'] and m5_prev['low'] >= m5_prev2['low'] and m5['close'] > m5_prev['high'] and volume_spike:
-                    valid_setups.append((9, "Inside Bar Breakout", "LONG", m5_prev['low'] - (m5_atr * 0.3)))
+                # الاستراتيجيات التي لا تتأثر بالفوليوم العالي (Reversals & Pullbacks)
+                # 9. Golden Pullback
+                if trend_up_micro and (prev1['low'] <= curr['ema50']) and (curr['close'] > curr['ema50']) and curr['close'] > curr['open']:
+                    valid_setups.append((9, "Golden Pullback", "LONG", min(curr['low'], prev1['low']) - (atr_val * 0.3)))
+
+                # 10. Oversold Reversal
+                if prev1['rsi'] < 30 and curr['close'] > curr['open'] and volume_spike:
+                    valid_setups.append((10, "Oversold Reversal", "LONG", min(curr['low'], prev1['low']) - (atr_val * 0.3)))
+
+                # 11. Inside Bar Breakout
+                if prev1['high'] <= prev2['high'] and prev1['low'] >= prev2['low'] and curr['close'] > prev1['high'] and volume_spike:
+                    valid_setups.append((11, "Inside Bar Breakout", "LONG", prev1['low'] - (atr_val * 0.3)))
+
+                # 12. Turtle Soup Long (صيد السيولة الهابطة) 🐢
+                sweep_low = curr['low'] < curr['ll20'] and curr['close'] > curr['ll20'] and curr['close'] > curr['open']
+                if sweep_low and volume_spike:
+                    valid_setups.append((12, "Turtle Soup Liquidity Sweep", "LONG", curr['low'] - (atr_val * 0.2)))
+
+                # 13. EMA21 Dynamic Bounce
+                if trend_up_micro and prev1['low'] <= curr['ema21'] and curr['close'] > curr['ema21'] and curr['close'] > curr['open'] and curr['rsi'] > 50:
+                    valid_setups.append((13, "EMA21 Trend Bounce", "LONG", curr['low'] - (atr_val * 0.3)))
 
 
             # ==========================================
-            # 🔴 نماذج البيع (SHORT)
+            # 🔴 ترسانة البيع (SHORT)
             # ==========================================
             elif macro_bearish:
                 prev_8_candles = df.iloc[-10:-2]; prev_5_candles = df.iloc[-7:-2]
                 
-                # 1. Squeeze
-                if prev_8_candles['bb_width'].max() < (prev_8_candles['bb_width'].mean() * 0.85) and (prev_5_candles['range'] < (prev_5_candles['atr'] * 0.65)).all() and m5['close'] < m5['bb_lower'] and volume_spike:
-                    valid_setups.append((1, "Adaptive Squeeze Breakdown", "SHORT", m5['bb_upper'] + (m5_atr * 0.5)))
+                if not is_volume_exhaustion:
+                    # 1. Squeeze
+                    if prev_8_candles['bb_width'].max() < (prev_8_candles['bb_width'].mean() * 0.85) and (prev_5_candles['range'] < (prev_5_candles['atr'] * 0.65)).all() and curr['close'] < curr['bb_lower'] and volume_spike:
+                        valid_setups.append((1, "Adaptive Squeeze Breakdown", "SHORT", curr['bb_upper'] + (atr_val * 0.5)))
 
-                # 2. Break & Retest
-                if df.iloc[-5]['close'] < df.iloc[-5]['ll20'] and abs(m5['high'] - m5['ll20']) / m5['ll20'] < 0.003 and m5['close'] < m5['open']:
-                    valid_setups.append((2, "Support Breakdown Retest", "SHORT", m5['ll20'] + (m5_atr * 0.5)))
+                    # 2. Break & Retest
+                    if df.iloc[-5]['close'] < df.iloc[-5]['ll20'] and abs(curr['high'] - curr['ll20']) / curr['ll20'] < 0.003 and curr['close'] < curr['open']:
+                        valid_setups.append((2, "Support Breakdown Retest", "SHORT", curr['ll20'] + (atr_val * 0.5)))
 
-                # 3. Adam & Eve
-                if abs(m5['high'] - m5['hh40']) / m5['hh40'] < 0.003 and m5['rsi'] < (m5['rsi_max_40'] - 5) and m5['close'] < m5['ema21'] and volume_spike:
-                    valid_setups.append((3, "Adam & Eve", "SHORT", m5['hh40'] + (m5_atr * 0.5)))
+                    # 3. Adam & Eve
+                    if abs(curr['high'] - curr['hh40']) / curr['hh40'] < 0.003 and curr['rsi'] < (curr['rsi_max_40'] - 5) and curr['close'] < curr['ema21'] and volume_spike:
+                        valid_setups.append((3, "Adam & Eve", "SHORT", curr['hh40'] + (atr_val * 0.5)))
 
-                # 4. Triangles
-                if (m5['ll20'] == df.iloc[-10]['ll20'] or m5_prev['high'] < df.iloc[-7]['high'] < df.iloc[-12]['high']) and m5['close'] < m5['ll20'] and volume_spike:
-                    valid_setups.append((4, "Triangle Breakdown", "SHORT", m5['hh20'] + (m5_atr * 0.5)))
+                    # 4. Triangles
+                    if (curr['ll20'] == df.iloc[-10]['ll20'] or prev1['high'] < df.iloc[-7]['high'] < df.iloc[-12]['high']) and curr['close'] < curr['ll20'] and volume_spike:
+                        valid_setups.append((4, "Triangle Breakdown", "SHORT", curr['hh20'] + (atr_val * 0.5)))
 
-                # 5. Momentum Ignition
-                if m5['close'] < m5['ll20'] and m5['vol'] > (m5['sma_vol'] * 2.0) and m5['close'] < m5['ema21'] and has_adx:
-                    valid_setups.append((5, "Momentum Ignition", "SHORT", m5['hh20'] + (m5_atr * 0.5)))
-                    
-                # 6. Momentum Expansion 
-                if float(m5['atr']) > (float(m5['atr_sma20']) * 1.3) and float(m5['vol']) > (float(m5['sma_vol']) * 1.7) and float(m5['close']) < float(m5['ll20']) and has_adx:
-                    valid_setups.append((6, "Momentum Expansion", "SHORT", float(m5['hh20']) + (m5_atr * 0.6)))
+                    # 5. Momentum Ignition
+                    if curr['close'] < curr['ll20'] and curr['vol'] > (curr['sma_vol'] * 2.0) and curr['close'] < curr['ema21'] and has_adx:
+                        valid_setups.append((5, "Momentum Ignition", "SHORT", curr['hh20'] + (atr_val * 0.5)))
+                        
+                    # 6. Momentum Expansion 
+                    if float(curr['atr']) > (float(curr['atr_sma20']) * 1.3) and float(curr['vol']) > (float(curr['sma_vol']) * 1.7) and float(curr['close']) < float(curr['ll20']) and has_adx:
+                        valid_setups.append((6, "Momentum Expansion", "SHORT", float(curr['hh20']) + (atr_val * 0.6)))
 
-                # 7. Golden Pullback 
-                if trend_down_micro and (m5_prev['high'] >= m5['ema50']) and (m5['close'] < m5['ema50']) and m5['close'] < m5['open']:
-                    valid_setups.append((7, "Golden Pullback", "SHORT", max(m5['high'], m5_prev['high']) + (m5_atr * 0.3)))
+                    # 7. Head & Shoulders
+                    if curr['head_high'] > curr['ls_high'] and curr['head_high'] > curr['rs_high']:
+                        if prev1['close'] >= curr['neckline_support'] and curr['close'] < curr['neckline_support'] and volume_spike:
+                            valid_setups.append((7, "Head & Shoulders Pattern", "SHORT", curr['rs_high'] + (atr_val * 0.5)))
 
-                # 8. Overbought Reversal 
-                if m5_prev['rsi'] > 70 and m5['close'] < m5['open'] and volume_spike:
-                    valid_setups.append((8, "Overbought Reversal", "SHORT", max(m5['high'], m5_prev['high']) + (m5_atr * 0.3)))
+                    # 8. Bump & Run Reversal
+                    if df.iloc[-5]['rsi'] > 75 and df.iloc[-5]['adx'] > 35:
+                        if prev1['close'] >= curr['ema50'] and curr['close'] < curr['ema50']:
+                            valid_setups.append((8, "Bump & Run Reversal", "SHORT", curr['ema50'] + (atr_val * 0.5)))
 
-                # 9. Inside Bar Breakdown 
-                if m5_prev['high'] <= m5_prev2['high'] and m5_prev['low'] >= m5_prev2['low'] and m5['close'] < m5_prev['low'] and volume_spike:
-                    valid_setups.append((9, "Inside Bar Breakdown", "SHORT", m5_prev['high'] + (m5_atr * 0.3)))
+                # 9. Golden Pullback 
+                if trend_down_micro and (prev1['high'] >= curr['ema50']) and (curr['close'] < curr['ema50']) and curr['close'] < curr['open']:
+                    valid_setups.append((9, "Golden Pullback", "SHORT", max(curr['high'], prev1['high']) + (atr_val * 0.3)))
+
+                # 10. Overbought Reversal 
+                if prev1['rsi'] > 70 and curr['close'] < curr['open'] and volume_spike:
+                    valid_setups.append((10, "Overbought Reversal", "SHORT", max(curr['high'], prev1['high']) + (atr_val * 0.3)))
+
+                # 11. Inside Bar Breakdown 
+                if prev1['high'] <= prev2['high'] and prev1['low'] >= prev2['low'] and curr['close'] < prev1['low'] and volume_spike:
+                    valid_setups.append((11, "Inside Bar Breakdown", "SHORT", prev1['high'] + (atr_val * 0.3)))
+
+                # 12. Turtle Soup Short (صيد السيولة الصاعدة) 🐢
+                sweep_high = curr['high'] > curr['hh20'] and curr['close'] < curr['hh20'] and curr['close'] < curr['open']
+                if sweep_high and volume_spike:
+                    valid_setups.append((12, "Turtle Soup Liquidity Sweep", "SHORT", curr['high'] + (atr_val * 0.2)))
+
+                # 13. EMA21 Dynamic Bounce
+                if trend_down_micro and prev1['high'] >= curr['ema21'] and curr['close'] < curr['ema21'] and curr['close'] < curr['open'] and curr['rsi'] < 50:
+                    valid_setups.append((13, "EMA21 Trend Bounce", "SHORT", curr['high'] + (atr_val * 0.3)))
 
             if not valid_setups: return None
             
             valid_setups.sort(key=lambda x: x[0]) 
             _, strat, side, sl = valid_setups[0]
 
-            volatility_pct = (m5_atr / entry) * 100
+            volatility_pct = (atr_val / entry) * 100
             if volatility_pct > 5.0: return None 
 
             risk_distance = abs(entry - sl)
@@ -251,17 +307,17 @@ class StrategyEngine:
             # 👈 هندسة الأهداف 
             # ==========================================
             if side == "LONG":
-                near_liq = max(float(m5['hh20']), float(m5['hh40']))
-                macro_liq = float(m5['macro_res'])
-                atr_target = entry + (m5_atr * 3.0)
+                near_liq = max(float(curr['hh20']), float(curr['hh40']))
+                macro_liq = float(curr['macro_res'])
+                atr_target = entry + (atr_val * 3.0)
 
                 liquidity_level = near_liq if near_liq > entry else macro_liq
-                if liquidity_level <= entry: liquidity_level = entry + (m5_atr * 3.0)
+                if liquidity_level <= entry: liquidity_level = entry + (atr_val * 3.0)
 
-                tp3 = min(liquidity_level - (m5_atr * 0.15), atr_target)
+                tp3 = min(liquidity_level - (atr_val * 0.15), atr_target)
 
-                if tp3 <= entry + (m5_atr * 1.5):
-                    tp3 = entry + (m5_atr * 2.2)
+                if tp3 <= entry + (atr_val * 1.5):
+                    tp3 = entry + (atr_val * 2.2)
 
                 rr = abs(tp3 - entry) / risk_distance
                 if rr < 1.1: return None
@@ -274,17 +330,17 @@ class StrategyEngine:
                 ]
 
             else:
-                near_liq = min(float(m5['ll20']), float(m5['ll40']))
-                macro_liq = float(m5['macro_sup'])
-                atr_target = entry - (m5_atr * 3.0)
+                near_liq = min(float(curr['ll20']), float(curr['ll40']))
+                macro_liq = float(curr['macro_sup'])
+                atr_target = entry - (atr_val * 3.0)
 
                 liquidity_level = near_liq if near_liq < entry else macro_liq
-                if liquidity_level >= entry: liquidity_level = entry - (m5_atr * 3.0)
+                if liquidity_level >= entry: liquidity_level = entry - (atr_val * 3.0)
 
-                tp3 = max(liquidity_level + (m5_atr * 0.15), atr_target)
+                tp3 = max(liquidity_level + (atr_val * 0.15), atr_target)
 
-                if tp3 >= entry - (m5_atr * 1.5):
-                    tp3 = entry - (m5_atr * 2.2)
+                if tp3 >= entry - (atr_val * 1.5):
+                    tp3 = entry - (atr_val * 2.2)
 
                 rr = abs(entry - tp3) / risk_distance
                 if rr < 1.1: return None
@@ -299,7 +355,7 @@ class StrategyEngine:
             del df
             return {
                 "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps,
-                "strat": strat, "risk_distance": risk_distance, "atr": m5_atr
+                "strat": strat, "risk_distance": risk_distance, "atr": atr_val
             }
 
         except Exception as e:
@@ -324,7 +380,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nReady for the latest Python Runtime! 🎯")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n13-Strategy Apex Engine (Instant TP & Turtle Soup) Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -387,7 +443,6 @@ class TradingSystem:
                 spread = abs(ask - bid) / last
                 if spread > Config.MAX_ALLOWED_SPREAD: return
             except Exception as e: 
-                Log.print(f"⚠️ Spread Check Error ({sym}): {e}", Log.YELLOW)
                 return 
             
             safe_entry = float(self.exchange.price_to_precision(sym, trade['entry']))
@@ -461,7 +516,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs...", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Apex Engine ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -494,6 +549,7 @@ class TradingSystem:
                     current_sl = trade.get('last_sl_price', trade['sl'])
                     pos_size = trade['position_size']; strat_name = trade['strat']
                     
+                    # الفحص اللحظي للستوب
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
                         exit_price = current_sl
                         pnl = (exit_price - entry) * pos_size if side == "LONG" else (entry - exit_price) * pos_size
@@ -515,34 +571,34 @@ class TradingSystem:
                         Log.print(f"Trade Closed: {sym} | ROE: {actual_roe:+.1f}%", Log.YELLOW) 
                         await self.tg.send(msg, trade['msg_id']); del self.active_trades[sym]; self.save_state(); continue
 
+                    # الفحص الفوري للهدف اللحظي (بدون تأخير الشموع) ⚡️
                     target = trade['tps'][step] if step < 3 else None 
                     if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
-                        check_m1 = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, '1m', limit=2)
-                        if check_m1 and len(check_m1) > 1 and ((side == "LONG" and check_m1[-2][4] > target) or (side == "SHORT" and check_m1[-2][4] < target)):
-                            trade['step'] += 1
-                            trade['last_tp_hit'] = trade['step']
-                            
-                            tp_roe = StrategyEngine.calc_actual_roe(entry, target, side, trade['leverage'])
+                        
+                        trade['step'] += 1
+                        trade['last_tp_hit'] = trade['step']
+                        
+                        tp_roe = StrategyEngine.calc_actual_roe(entry, target, side, trade['leverage'])
 
-                            if trade['step'] == 1: 
-                                trade['last_sl_price'] = trade['entry']
-                                msg = f"✅ <b>TP1 HIT! (+{tp_roe:.1f}% ROE)</b>\n🛡️ Move SL to Entry: <code>{trade['entry']}</code>"
-                            elif trade['step'] == 2: 
-                                trade['last_sl_price'] = trade['tps'][0] 
-                                msg = f"🔥 <b>TP2 HIT! (+{tp_roe:.1f}% ROE)</b>\n📈 Move SL to TP1: <code>{trade['tps'][0]}</code>"
-                                
-                            if trade['step'] == 3: 
-                                pnl = (current_price - entry) * pos_size if side == "LONG" else (entry - current_price) * pos_size
-                                self._update_equity_and_drawdown(pnl)
-                                final_roe = StrategyEngine.calc_actual_roe(entry, current_price, side, trade['leverage'])
-                                msg = f"🏆 <b>ALL 3 TARGETS SMASHED! (+{final_roe:.1f}% ROE)</b> 🏦\nTrade Completed."
-                                self._log_trade_result('wins', final_roe, strat_name)
-                                self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
-                                del self.active_trades[sym]
-                                
-                            Log.print(f"Hit TP{trade['step']}: {sym}", Log.GREEN)
-                            await self.tg.send(msg, trade['msg_id'])
-                            self.save_state() 
+                        if trade['step'] == 1: 
+                            trade['last_sl_price'] = trade['entry']
+                            msg = f"✅ <b>TP1 HIT! (+{tp_roe:.1f}% ROE)</b>\n🛡️ Move SL to Entry: <code>{trade['entry']}</code>"
+                        elif trade['step'] == 2: 
+                            trade['last_sl_price'] = trade['tps'][0] 
+                            msg = f"🔥 <b>TP2 HIT! (+{tp_roe:.1f}% ROE)</b>\n📈 Move SL to TP1: <code>{trade['tps'][0]}</code>"
+                            
+                        if trade['step'] == 3: 
+                            pnl = (current_price - entry) * pos_size if side == "LONG" else (entry - current_price) * pos_size
+                            self._update_equity_and_drawdown(pnl)
+                            final_roe = StrategyEngine.calc_actual_roe(entry, current_price, side, trade['leverage'])
+                            msg = f"🏆 <b>ALL 3 TARGETS SMASHED! (+{final_roe:.1f}% ROE)</b> 🏦\nTrade Completed."
+                            self._log_trade_result('wins', final_roe, strat_name)
+                            self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
+                            del self.active_trades[sym]
+                            
+                        Log.print(f"Hit TP{trade['step']}: {sym}", Log.GREEN)
+                        await self.tg.send(msg, trade['msg_id'])
+                        self.save_state() 
             except Exception as e: 
                 Log.print(f"⚠️ Monitor Loop Error: {e}", Log.RED)
             await asyncio.sleep(2) 
@@ -592,7 +648,6 @@ class TradingSystem:
 
 bot = TradingSystem()
 
-# أحدث معايير FastAPI الحديثة متوافقة مع كل إصدارات بايثون الجديدة
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     main_task = asyncio.create_task(run_bot_background())
