@@ -23,8 +23,8 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    TF_MAIN = '5m'  # 👈 تم التغيير لفريم 5 دقائق حسب طلبك
-    CANDLES_LIMIT = 200 
+    TF_MAIN = '5m'  
+    CANDLES_LIMIT = 300 # 👈 300 شمعة لحساب المتوسطات بدقة
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 500_000 
@@ -35,9 +35,9 @@ class Config:
     MAX_LEVERAGE_CAP = 50       
     BASE_LEVERAGE = 20
     
-    COOLDOWN_SECONDS = 1800 # تبريد نصف ساعة لأن الفريم 5 دقائق
+    COOLDOWN_SECONDS = 1800 # 👈 تبريد نصف ساعة بعد كل صفقة مغلقة لنفس العملة
     STATE_FILE = "bot_state.json"
-    VERSION = "V16000.0 - Bollinger Sniper"
+    VERSION = "V16200.0 - Ultimate Bollinger Sweep (Hybrid Filter & 50% Wick)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -78,7 +78,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية الوحيدة (Bollinger Sweep Sniper)
+# 3. محرك الاستراتيجية (Bollinger Sweep + Hybrid Filter)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -91,25 +91,31 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 50: return None 
+            if len(df) < 200: return None 
             
-            # 👈 إعدادات البولينجر باند حسب الصورة (21, 2)
+            # 👈 إعدادات البولينجر باند (21, 2)
             bb = ta.bbands(df['close'], length=21, std=2)
             if bb is not None:
-                df['bb_lower'] = bb.iloc[:, 0]  # BBL_21_2.0
-                df['bb_mid'] = bb.iloc[:, 1]    # BBM_21_2.0
-                df['bb_upper'] = bb.iloc[:, 2]  # BBU_21_2.0
+                df['bb_lower'] = bb.iloc[:, 0]  
+                df['bb_mid'] = bb.iloc[:, 1]    
+                df['bb_upper'] = bb.iloc[:, 2]  
             else: return None
 
+            # 👈 الفلتر الهجين الذكي (EMA 50 + ADX)
+            df['ema50'] = ta.ema(df['close'], length=50)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            adx_res = ta.adx(df['high'], df['low'], df['close'], length=14)
+            df['adx'] = adx_res.iloc[:, 0] if adx_res is not None and not adx_res.empty else 0
+            
             df.dropna(inplace=True)
             if len(df) < 5: return None
 
-            # استخراج بيانات الشمعة التي أغلقت للتو
-            curr = df.iloc[-2]
+            curr = df.iloc[-2] # الشمعة المغلقة للتو
             
             entry = float(curr['close'])
             atr_val = float(curr['atr'])
+            ema50 = float(curr['ema50'])
+            adx_val = float(curr['adx'])
             
             candle_high = float(curr['high'])
             candle_low = float(curr['low'])
@@ -119,7 +125,7 @@ class StrategyEngine:
             bb_lower = float(curr['bb_lower'])
             bb_upper = float(curr['bb_upper'])
 
-            # حسابات جسم الشمعة والذيول (هندسة سحب السيولة)
+            # حسابات هندسة الشمعة
             candle_range = candle_high - candle_low
             if candle_range == 0: return None
             
@@ -127,29 +133,31 @@ class StrategyEngine:
             lower_wick = min(candle_open, candle_close) - candle_low
             upper_wick = candle_high - max(candle_open, candle_close)
 
+            # 👈 المنطق المؤسساتي (Hybrid Filter)
+            is_ranging = adx_val < 25 # السوق متذبذب: يسمح بالشراء والبيع من الأطراف
+            trend_up = candle_close > ema50 # السوق صاعد
+            trend_down = candle_close < ema50 # السوق هابط
+            
+            can_long = is_ranging or trend_up
+            can_short = is_ranging or trend_down
+
             setup = None
 
             # ==========================================
             # 🟢 سيناريو الشراء (LONG)
             # ==========================================
-            # 1. السعر نزل تحت أو لمس الخط السفلي
             swept_lower = candle_low <= bb_lower
-            # 2. الإغلاق حدث فوق الخط السفلي (داخل النطاق)
             closed_inside_lower = candle_close > bb_lower
-            # 3. ذيل سحب سيولة قوي (الذيل السفلي أكبر من الجسم، ويمثل أكثر من 40% من حجم الشمعة)
-            long_lower_wick = (lower_wick > body) and (lower_wick >= candle_range * 0.40)
+            # شرط الذيل: أكبر من الجسم + يمثل 50% أو أكثر من الشمعة
+            long_lower_wick = (lower_wick > body) and (lower_wick >= candle_range * 0.50)
 
-            if swept_lower and closed_inside_lower and long_lower_wick:
-                # الستوب تحت الذيل بقليل
+            if swept_lower and closed_inside_lower and long_lower_wick and can_long:
                 strat_sl = candle_low - (atr_val * 0.2)
-                # الهدف: قبل الخط العلوي للبولينجر بمسافة بسيطة جداً
                 target_zone = bb_upper - (atr_val * 0.15)
-                
                 path = target_zone - entry
                 
-                # التأكد أن الهدف يستحق الدخول (تجنب النطاقات الميتة جداً)
+                # التأكد أن مساحة الربح تستحق الدخول
                 if path > (atr_val * 0.8):
-                    # تقسيم الهدف إلى 3 مراحل (33%، 66%، 100%)
                     tps = [
                         entry + (path * 0.33),
                         entry + (path * 0.66),
@@ -157,24 +165,18 @@ class StrategyEngine:
                     ]
                     setup = {"side": "LONG", "sl": strat_sl, "tps": tps}
 
-
             # ==========================================
             # 🔴 سيناريو البيع (SHORT)
             # ==========================================
-            if not setup: # إذا لم يجد شراء، يبحث عن بيع
-                # 1. السعر صعد فوق أو لمس الخط العلوي
+            if not setup: 
                 swept_upper = candle_high >= bb_upper
-                # 2. الإغلاق حدث تحت الخط العلوي (داخل النطاق)
                 closed_inside_upper = candle_close < bb_upper
-                # 3. ذيل سحب سيولة قوي من الأعلى
-                long_upper_wick = (upper_wick > body) and (upper_wick >= candle_range * 0.40)
+                # شرط الذيل: أكبر من الجسم + يمثل 50% أو أكثر من الشمعة
+                long_upper_wick = (upper_wick > body) and (upper_wick >= candle_range * 0.50)
 
-                if swept_upper and closed_inside_upper and long_upper_wick:
-                    # الستوب فوق الذيل بقليل
+                if swept_upper and closed_inside_upper and long_upper_wick and can_short:
                     strat_sl = candle_high + (atr_val * 0.2)
-                    # الهدف: قبل الخط السفلي للبولينجر بمسافة بسيطة جداً
                     target_zone = bb_lower + (atr_val * 0.15)
-                    
                     path = entry - target_zone
                     
                     if path > (atr_val * 0.8):
@@ -185,7 +187,6 @@ class StrategyEngine:
                         ]
                         setup = {"side": "SHORT", "sl": strat_sl, "tps": tps}
 
-            # إذا لم تتحقق الشروط
             if not setup: return None
 
             side = setup["side"]
@@ -195,7 +196,7 @@ class StrategyEngine:
             risk_distance = abs(entry - sl)
             if risk_distance <= 0: return None
             
-            # فلتر أمان أخير: لا تدخل إذا كان الستوب بعيداً جداً عن الدخول (أكبر من 5%)
+            # 👈 فلتر أمان: يمنع الدخول إذا كان الستوب بعيداً جداً عن السعر الحالي (> 5%)
             if (risk_distance / entry) * 100 > 5.0: return None 
 
             del df
@@ -205,7 +206,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "Bollinger Wick Sweep", 
+                "strat": "Bollinger Sweep Sniper", 
                 "risk_distance": risk_distance, 
                 "atr": atr_val
             }
@@ -232,7 +233,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nExclusive 5m Bollinger Sweep Sniper Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nBollinger Sweep Sniper Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -368,7 +369,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 5m BB Sniper ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 5m Sniper Mode", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -423,7 +424,7 @@ class TradingSystem:
                         Log.print(f"Trade Closed: {sym} | ROE: {actual_roe:+.1f}%", Log.YELLOW) 
                         await self.tg.send(msg, trade['msg_id']); del self.active_trades[sym]; self.save_state(); continue
 
-                    # جني الأرباح الفوري (Instant TP Execution)
+                    # جني الأرباح الفوري (Instant Execution)
                     target = trade['tps'][step] if step < 3 else None 
                     if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
                         
