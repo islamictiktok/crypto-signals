@@ -36,7 +36,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V12200.0" # 👈 Volatility Expansion & Momentum Edition
+    VERSION = "V12500.0" # 👈 All-Weather Flow Edition (Added Pullbacks & Reversals)
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -73,7 +73,7 @@ class TelegramNotifier:
         except Exception: return None
 
 # ==========================================
-# 3. محرك الاستراتيجيات (The Ultimate Quant Engine)
+# 3. محرك الاستراتيجيات
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -93,7 +93,7 @@ class StrategyEngine:
             df['ema200'] = ta.ema(df['close'], length=200)
             df['rsi'] = ta.rsi(df['close'], length=14)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            df['atr_sma20'] = ta.sma(df['atr'], length=20) # 👈 متوسط التقلب
+            df['atr_sma20'] = ta.sma(df['atr'], length=20)
             
             adx_res = ta.adx(df['high'], df['low'], df['close'], length=14)
             df['adx'] = adx_res.iloc[:, 0] if adx_res is not None and not adx_res.empty else 0
@@ -122,25 +122,28 @@ class StrategyEngine:
             df.dropna(inplace=True)
             if len(df) < 50: return None
 
-            m5 = df.iloc[-2]; m5_prev = df.iloc[-3]
+            m5 = df.iloc[-2]; m5_prev = df.iloc[-3]; m5_prev2 = df.iloc[-4]
             entry = float(m5['close']); m5_atr = float(m5['atr']); m5_body = float(m5['body'])
             
-            # --- الفلاتر المؤسساتية ---
-            if (m5_atr / entry) < 0.0012: return None
+            # --- فلاتر تم تخفيفها لتمرير الصفقات ---
+            if (m5_atr / entry) < 0.001: return None 
             distance_from_ema200 = abs(entry - float(m5['ema200'])) / entry
             if distance_from_ema200 < 0.0015: return None
-            if m5_body < (m5_atr * 0.35): return None 
+            if m5_body < (m5_atr * 0.25): return None 
             
             momentum = abs(m5['close'] - m5_prev['close'])
-            if momentum < (m5_atr * 0.25): return None
-            if float(m5['adx']) < 15: return None
-
-            trend_up = m5['ema21'] > m5['ema50'] > m5['ema200']
-            trend_down = m5['ema21'] < m5['ema50'] < m5['ema200']
-            macro_bullish = m5['close'] > m5['ema200'] and trend_up
-            macro_bearish = m5['close'] < m5['ema200'] and trend_down
+            if momentum < (m5_atr * 0.20): return None
             
-            volume_spike = m5['vol'] > (m5['sma_vol'] * 1.8)
+            # تم حذف فلتر ADX العام من هنا لأنه يقتل صفقات التذبذب والانعكاس
+            has_adx = float(m5['adx']) > 15 
+            volume_spike = float(m5['vol']) > (float(m5['sma_vol']) * 1.5) # خُفّض إلى 1.5
+
+            # إصلاح قاتل الصفقات: تقسيم الترند الماكرو والمايكرو
+            trend_up_micro = m5['ema21'] > m5['ema50']
+            trend_down_micro = m5['ema21'] < m5['ema50']
+            
+            macro_bullish = m5['close'] > m5['ema200']
+            macro_bearish = m5['close'] < m5['ema200']
 
             valid_setups = []
 
@@ -150,7 +153,7 @@ class StrategyEngine:
             if macro_bullish:
                 prev_8_candles = df.iloc[-10:-2]; prev_5_candles = df.iloc[-7:-2]
                 
-                # 1. Squeeze
+                # 1. Squeeze Breakout
                 is_adaptive_squeeze = prev_8_candles['bb_width'].max() < (prev_8_candles['bb_width'].mean() * 0.85)
                 is_compressed = (prev_5_candles['range'] < (prev_5_candles['atr'] * 0.65)).all()
                 if is_adaptive_squeeze and is_compressed and m5['close'] > m5['bb_upper'] and volume_spike:
@@ -179,24 +182,35 @@ class StrategyEngine:
                     valid_setups.append((4, "Triangle Breakout", "LONG", strat_sl))
 
                 # 5. Momentum Ignition
-                momentum_breakout = (
-                    m5['close'] > m5['hh20'] and
-                    m5['vol'] > (m5['sma_vol'] * 2.0) and
-                    m5['close'] > m5['ema21'] and
-                    m5['adx'] > 22
-                )
-                if momentum_breakout:
+                momentum_breakout = m5['close'] > m5['hh20'] and m5['vol'] > (m5['sma_vol'] * 2.0) and m5['close'] > m5['ema21']
+                if momentum_breakout and has_adx:
                     strat_sl = m5['ll20'] - (m5_atr * 0.5)
                     valid_setups.append((5, "Momentum Ignition", "LONG", strat_sl))
                     
-                # 6. Momentum Expansion (Volatility + Volume Surge) 🚀
+                # 6. Momentum Expansion
                 volatility_expansion = float(m5['atr']) > (float(m5['atr_sma20']) * 1.3)
                 volume_surge = float(m5['vol']) > (float(m5['sma_vol']) * 1.7)
                 momentum_break = float(m5['close']) > float(m5['hh20'])
-
-                if volatility_expansion and volume_surge and momentum_break:
+                if volatility_expansion and volume_surge and momentum_break and has_adx:
                     strat_sl = float(m5['ll20']) - (m5_atr * 0.6)
                     valid_setups.append((6, "Momentum Expansion", "LONG", strat_sl))
+
+                # 7. Golden Pullback (جديد)
+                if trend_up_micro and (m5_prev['low'] <= m5['ema50']) and (m5['close'] > m5['ema50']) and m5['close'] > m5['open']:
+                    strat_sl = min(m5['low'], m5_prev['low']) - (m5_atr * 0.3)
+                    valid_setups.append((7, "Golden Pullback", "LONG", strat_sl))
+
+                # 8. Oversold Reversal (جديد)
+                if m5_prev['rsi'] < 30 and m5['close'] > m5['open'] and volume_spike:
+                    strat_sl = min(m5['low'], m5_prev['low']) - (m5_atr * 0.3)
+                    valid_setups.append((8, "Oversold Reversal", "LONG", strat_sl))
+
+                # 9. Inside Bar Breakout (جديد)
+                is_inside = m5_prev['high'] <= m5_prev2['high'] and m5_prev['low'] >= m5_prev2['low']
+                if is_inside and m5['close'] > m5_prev['high'] and volume_spike:
+                    strat_sl = m5_prev['low'] - (m5_atr * 0.3)
+                    valid_setups.append((9, "Inside Bar Breakout", "LONG", strat_sl))
+
 
             # ==========================================
             # 🔴 نماذج البيع (SHORT)
@@ -233,24 +247,35 @@ class StrategyEngine:
                     valid_setups.append((4, "Triangle Breakdown", "SHORT", strat_sl))
 
                 # 5. Momentum Ignition
-                momentum_breakdown = (
-                    m5['close'] < m5['ll20'] and
-                    m5['vol'] > (m5['sma_vol'] * 2.0) and
-                    m5['close'] < m5['ema21'] and
-                    m5['adx'] > 22
-                )
-                if momentum_breakdown:
+                momentum_breakdown = m5['close'] < m5['ll20'] and m5['vol'] > (m5['sma_vol'] * 2.0) and m5['close'] < m5['ema21'] 
+                if momentum_breakdown and has_adx:
                     strat_sl = m5['hh20'] + (m5_atr * 0.5)
                     valid_setups.append((5, "Momentum Ignition", "SHORT", strat_sl))
                     
-                # 6. Momentum Expansion (Volatility + Volume Surge) 🚀
+                # 6. Momentum Expansion 
                 volatility_expansion = float(m5['atr']) > (float(m5['atr_sma20']) * 1.3)
                 volume_surge = float(m5['vol']) > (float(m5['sma_vol']) * 1.7)
                 momentum_break_short = float(m5['close']) < float(m5['ll20'])
-
-                if volatility_expansion and volume_surge and momentum_break_short:
+                if volatility_expansion and volume_surge and momentum_break_short and has_adx:
                     strat_sl = float(m5['hh20']) + (m5_atr * 0.6)
                     valid_setups.append((6, "Momentum Expansion", "SHORT", strat_sl))
+
+                # 7. Golden Pullback (جديد)
+                if trend_down_micro and (m5_prev['high'] >= m5['ema50']) and (m5['close'] < m5['ema50']) and m5['close'] < m5['open']:
+                    strat_sl = max(m5['high'], m5_prev['high']) + (m5_atr * 0.3)
+                    valid_setups.append((7, "Golden Pullback", "SHORT", strat_sl))
+
+                # 8. Overbought Reversal (جديد)
+                if m5_prev['rsi'] > 70 and m5['close'] < m5['open'] and volume_spike:
+                    strat_sl = max(m5['high'], m5_prev['high']) + (m5_atr * 0.3)
+                    valid_setups.append((8, "Overbought Reversal", "SHORT", strat_sl))
+
+                # 9. Inside Bar Breakdown (جديد)
+                is_inside = m5_prev['high'] <= m5_prev2['high'] and m5_prev['low'] >= m5_prev2['low']
+                if is_inside and m5['close'] < m5_prev['low'] and volume_spike:
+                    strat_sl = m5_prev['high'] + (m5_atr * 0.3)
+                    valid_setups.append((9, "Inside Bar Breakdown", "SHORT", strat_sl))
+
 
             if not valid_setups: return None
             
@@ -267,7 +292,7 @@ class StrategyEngine:
             if risk_pct > 8.0: return None 
 
             # ==========================================
-            # 👈 هندسة الأهداف (Smart Liquidity)
+            # 👈 هندسة الأهداف (تخفيف الفلتر لتمرير الصفقات)
             # ==========================================
             if side == "LONG":
                 near_liq = max(float(m5['hh20']), float(m5['hh40']))
@@ -282,8 +307,9 @@ class StrategyEngine:
                 if tp3 <= entry + (m5_atr * 1.5):
                     tp3 = entry + (m5_atr * 2.2)
 
+                # تخفيف الفلتر لضمان تمرير الصفقات ذات الستوب القريب
                 rr = abs(tp3 - entry) / risk_distance
-                if rr < 1.5: return None
+                if rr < 1.1: return None
 
                 path = tp3 - entry
                 tps = [
@@ -305,8 +331,9 @@ class StrategyEngine:
                 if tp3 >= entry - (m5_atr * 1.5):
                     tp3 = entry - (m5_atr * 2.2)
 
+                # تخفيف الفلتر لضمان تمرير الصفقات
                 rr = abs(entry - tp3) / risk_distance
-                if rr < 1.5: return None
+                if rr < 1.1: return None
 
                 path = entry - tp3
                 tps = [
@@ -342,7 +369,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nMomentum Expansion Engine (ATR + Vol Surge) Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFilters Relaxed & All-Weather Strategies Added 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -472,7 +499,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Expansion Mode ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 9 Strats ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
