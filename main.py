@@ -23,7 +23,7 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    TF_MAIN = '5m'  # 👈 فريم الرصد الرئيسي 5 دقائق
+    TF_MAIN = '5m'  # فريم الرصد الرئيسي 5 دقائق
     CANDLES_LIMIT = 150 
     
     MAX_TRADES_AT_ONCE = 3  
@@ -37,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V17000.0 - Multi-TF BB Sweep Sniper"
+    VERSION = "V17100.0 - Multi-TF BB Sweep (Bug Fixes)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -119,7 +119,7 @@ class StrategyEngine:
             bb_lower = float(curr['bb_lower'])
             bb_upper = float(curr['bb_upper'])
             
-            # تحديد وقت انتهاء هذه الشمعة (لضمان أن تأكيد الـ 1 دقيقة يأتي بعدها)
+            # تحديد وقت انتهاء هذه الشمعة
             m5_time_ms = int(curr['time'])
             m5_end_time_ms = m5_time_ms + (5 * 60 * 1000)
 
@@ -250,9 +250,9 @@ class TradingSystem:
                     m1_curr = m1_df.iloc[-2] # آخر شمعة دقيقة مغلقة
                     m1_time = int(m1_curr['time'])
                     
-                    # نضمن أن هذه الشمعة بدأت بعد إغلاق شمعة الـ 5 دقائق
-                    if m1_time < res['m5_end_time']:
-                        return # ننتظر الدقيقة القادمة
+                    # 👈 تم إصلاح منطق التوقيت هنا
+                    if m1_time < (res['m5_end_time'] - 60000): # السماح للشمعة التي تغلق مع الـ 5 دقائق
+                        return 
                         
                     m1_close = float(m1_curr['close'])
                     trigger = res['trigger_price']
@@ -260,7 +260,7 @@ class TradingSystem:
                     
                     confirmed = False
                     
-                    # 👈 التأكيد بكسر الإغلاق
+                    # التأكيد بكسر الإغلاق
                     if side == "LONG" and m1_close > trigger:
                         confirmed = True
                     elif side == "SHORT" and m1_close < trigger:
@@ -275,13 +275,14 @@ class TradingSystem:
                         risk_distance = abs(actual_entry - sl)
                         if risk_distance <= 0 or (risk_distance / actual_entry) * 100 > 5.0: return 
                         
+                        # 👈 تم إصلاح نسبة العائد للمخاطرة (RR) إلى 0.5 لعدم تفويت الصفقات
                         if side == "LONG":
                             path = target_zone - actual_entry
-                            if path < (atr_val * 0.5): return # هدف قريب جداً
+                            if path < (atr_val * 0.5) or (path / risk_distance) < 0.5: return 
                             tps = [actual_entry + (path * 0.33), actual_entry + (path * 0.66), target_zone]
                         else:
                             path = actual_entry - target_zone
-                            if path < (atr_val * 0.5): return
+                            if path < (atr_val * 0.5) or (path / risk_distance) < 0.5: return
                             tps = [actual_entry - (path * 0.33), actual_entry - (path * 0.66), target_zone]
 
                         final_trade = {
