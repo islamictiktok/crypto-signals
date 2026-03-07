@@ -24,7 +24,7 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
     TF_MAIN = '5m'  
-    CANDLES_LIMIT = 150 
+    CANDLES_LIMIT = 200 # تم الرفع لتغطية حسابات الـ LinReg (100) بدقة
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 500_000 
@@ -37,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V21000.0 - Precision English Scalper"
+    VERSION = "V22000.0 - LinReg & BB Channel Sniper"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -78,7 +78,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية
+# 3. محرك الاستراتيجية (LinReg + Bollinger Bands)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -91,77 +91,97 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 100: return None 
+            if len(df) < 150: return None 
             
+            # 1. Bollinger Bands (20, 2)
             bb = ta.bbands(df['close'], length=20, std=2)
             if bb is not None:
                 df['bb_lower'] = bb.iloc[:, 0]  
                 df['bb_mid'] = bb.iloc[:, 1]    
                 df['bb_upper'] = bb.iloc[:, 2]
-                df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid']
             else: return None
 
-            df['ema50'] = ta.ema(df['close'], length=50)
-            df['rsi'] = ta.rsi(df['close'], length=14)
+            # 2. Linear Regression Channel (100, 2)
+            df['linreg_mid'] = ta.linreg(df['close'], length=100)
+            df['linreg_std'] = df['close'].rolling(100).std()
+            df['linreg_upper'] = df['linreg_mid'] + (2 * df['linreg_std'])
+            df['linreg_lower'] = df['linreg_mid'] - (2 * df['linreg_std'])
+
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            df['atr_sma'] = ta.sma(df['atr'], length=14) 
-            df['bb_width_sma'] = ta.sma(df['bb_width'], length=20) 
 
             df.dropna(inplace=True)
             if len(df) < 5: return None
 
-            curr = df.iloc[-2]  
-            prev = df.iloc[-3]  
+            curr = df.iloc[-2]  # الشمعة التي أغلقت للتو
             
             entry = float(curr['close'])
             atr_val = float(curr['atr'])
             
-            if float(curr['atr']) < (float(curr['atr_sma']) / 3): return None
-            if float(curr['bb_width']) < (float(curr['bb_width_sma']) * 0.8): return None
+            candle_high = float(curr['high'])
+            candle_low = float(curr['low'])
+            candle_open = float(curr['open'])
+            candle_close = float(curr['close'])
             
-            body = abs(curr['close'] - curr['open'])
-            if body < (atr_val * 0.3): return None
+            bb_lower = float(curr['bb_lower'])
+            bb_mid = float(curr['bb_mid'])
+            bb_upper = float(curr['bb_upper'])
+            
+            lr_lower = float(curr['linreg_lower'])
+            lr_upper = float(curr['linreg_upper'])
 
-            distance_from_ema = abs(entry - float(curr['ema50']))
-            if distance_from_ema > (atr_val * 5): return None
+            body = abs(candle_close - candle_open)
+            lower_wick = min(candle_open, candle_close) - candle_low
+            upper_wick = candle_high - max(candle_open, candle_close)
 
             setup = None
 
             # ==========================================
-            # 🟢 شروط صفقة الشراء (BUY)
+            # 🟢 شروط صفقة الشراء (LONG)
             # ==========================================
-            trend_up = entry > float(curr['ema50']) 
-            touched_lower = float(curr['low']) <= float(curr['bb_lower']) or float(prev['low']) <= float(prev['bb_lower']) 
-            rsi_oversold = float(curr['rsi']) <= 35 or float(prev['rsi']) <= 35 
-            bullish_confirmation = entry > float(curr['open']) and entry > float(curr['bb_lower']) 
+            # 1. السعر يخترق خط البولنجر السفلي و خط LinReg السفلي
+            pierced_both_lower = (candle_low < bb_lower) and (candle_low < lr_lower)
+            # 2. الإغلاق فوق البولنجر السفلي
+            closed_above_bb_lower = (candle_close > bb_lower)
+            # 3. الذيل يمثل 25% من جسم الشمعة على الأقل
+            wick_condition_long = (lower_wick >= body * 0.25)
 
-            if trend_up and touched_lower and rsi_oversold and bullish_confirmation:
-                sl = min(float(curr['low']), float(prev['low'])) - (atr_val * 0.2)
+            if pierced_both_lower and closed_above_bb_lower and wick_condition_long:
+                sl = candle_low - (atr_val * 0.2)
                 
-                tp1 = float(curr['bb_mid'])
-                tp2 = float(curr['bb_upper'])
-                tp3 = tp2 + (atr_val * 0.8) 
+                # الأهداف المطلوبة للشراء
+                tp1 = bb_mid
+                tp2 = bb_upper - (atr_val * 0.1) # بالقرب من العلوي
+                tp3 = lr_upper
                 
-                if (tp1 - entry) > (atr_val * 0.5):
+                # ترتيب الأهداف منطقياً لتجنب تقاطع الخطوط (في حال كان LinReg منخفضاً)
+                tp3 = max(tp3, tp2 + (atr_val * 0.5))
+
+                if (tp1 > entry) and (tp2 > tp1):
                     setup = {"side": "LONG", "sl": sl, "tps": [tp1, tp2, tp3]}
 
             # ==========================================
-            # 🔴 شروط صفقة البيع (SELL)
+            # 🔴 شروط صفقة البيع (SHORT)
             # ==========================================
             if not setup:
-                trend_down = entry < float(curr['ema50']) 
-                touched_upper = float(curr['high']) >= float(curr['bb_upper']) or float(prev['high']) >= float(prev['bb_upper']) 
-                rsi_overbought = float(curr['rsi']) >= 65 or float(prev['rsi']) >= 65 
-                bearish_confirmation = entry < float(curr['open']) and entry < float(curr['bb_upper']) 
+                # 1. السعر يخترق خط البولنجر العلوي و خط LinReg العلوي
+                pierced_both_upper = (candle_high > bb_upper) and (candle_high > lr_upper)
+                # 2. الإغلاق تحت البولنجر العلوي
+                closed_below_bb_upper = (candle_close < bb_upper)
+                # 3. الذيل يمثل 25% من جسم الشمعة على الأقل
+                wick_condition_short = (upper_wick >= body * 0.25)
 
-                if trend_down and touched_upper and rsi_overbought and bearish_confirmation:
-                    sl = max(float(curr['high']), float(prev['high'])) + (atr_val * 0.2)
+                if pierced_both_upper and closed_below_bb_upper and wick_condition_short:
+                    sl = candle_high + (atr_val * 0.2)
                     
-                    tp1 = float(curr['bb_mid'])
-                    tp2 = float(curr['bb_lower'])
-                    tp3 = tp2 - (atr_val * 0.8) 
+                    # الأهداف المطلوبة للبيع
+                    tp1 = bb_mid
+                    tp2 = bb_lower + (atr_val * 0.1) # بالقرب من السفلي
+                    tp3 = lr_lower
                     
-                    if (entry - tp1) > (atr_val * 0.5):
+                    # ترتيب الأهداف منطقياً لتجنب تقاطع الخطوط
+                    tp3 = min(tp3, tp2 - (atr_val * 0.5))
+                    
+                    if (tp1 < entry) and (tp2 < tp1):
                         setup = {"side": "SHORT", "sl": sl, "tps": [tp1, tp2, tp3]}
 
             if not setup: return None
@@ -173,13 +193,9 @@ class StrategyEngine:
             risk_distance = abs(entry - sl)
             if risk_distance <= 0: return None
             
-            if (risk_distance / entry) * 100 > 4.0: return None 
+            # حماية الستوب لوس البعيد
+            if (risk_distance / entry) * 100 > 5.0: return None 
             
-            if side == "LONG":
-                if (tps[0] - entry) / risk_distance < 0.6: return None
-            else:
-                if (entry - tps[0]) / risk_distance < 0.6: return None
-
             del df
             return {
                 "symbol": symbol, 
@@ -187,7 +203,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "EMA50/BB Scalp", 
+                "strat": "LinReg & BB Sniper", 
                 "risk_distance": risk_distance,
                 "atr": atr_val
             }
@@ -214,7 +230,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nPrecision Math & English Actions Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nLinReg & Bollinger Double-Sweep Strategy Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -355,7 +371,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | EMA50/BB Mode ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | LinReg/BB Mode ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -400,7 +416,6 @@ class TradingSystem:
                             self._log_trade_result('losses', display_roe, strat_name)
                             
                         elif step == 1: 
-                            # Profit from TP1 + zero profit from the rest
                             pnl_tp1 = (trade['tps'][0] - entry) * pos_33 if side == "LONG" else (entry - trade['tps'][0]) * pos_33
                             pnl_rem = (exit_price - entry) * (pos_size - pos_33) if side == "LONG" else (entry - exit_price) * (pos_size - pos_33)
                             pnl = pnl_tp1 + pnl_rem
@@ -414,7 +429,6 @@ class TradingSystem:
                             self._log_trade_result('break_evens', display_roe, strat_name)
                             
                         else: 
-                            # Profit from TP1 + Profit from TP2 + Profit/Loss on remaining stopped at TP1
                             pnl_1 = (trade['tps'][0] - entry) * pos_33 if side == "LONG" else (entry - trade['tps'][0]) * pos_33
                             pnl_2 = (trade['tps'][1] - entry) * pos_33 if side == "LONG" else (entry - trade['tps'][1]) * pos_33
                             pnl_trail = (exit_price - entry) * pos_34 if side == "LONG" else (entry - exit_price) * pos_34
