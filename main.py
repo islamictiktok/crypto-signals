@@ -24,7 +24,6 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
     TF_MAIN = '5m'  
-    # 👈 تم رفع الشموع إلى 250 لتغطية حسابات الـ 144 شمعة بدقة
     CANDLES_LIMIT = 250 
     
     MAX_TRADES_AT_ONCE = 3  
@@ -38,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V22600.0 - Fibonacci LinReg & BB Sniper"
+    VERSION = "V23100.0 - Optimized Volatility Filter"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -79,7 +78,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (Fibonacci LinReg + BB)
+# 3. محرك الاستراتيجية (Fibonacci LinReg + BB SMA)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -94,15 +93,15 @@ class StrategyEngine:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df) < 200: return None 
             
-            # 1. Bollinger Bands (21, 2) - إعدادات فيبوناتشي
-            bb = ta.bbands(df['close'], length=21, std=2)
+            # 1. Bollinger Bands (21, 2) SMA Mode
+            bb = ta.bbands(df['close'], length=21, std=2, mamode="sma")
             if bb is not None:
                 df['bb_lower'] = bb.iloc[:, 0]  
                 df['bb_mid'] = bb.iloc[:, 1]    
                 df['bb_upper'] = bb.iloc[:, 2]
             else: return None
 
-            # 2. Linear Regression Channel (144, 2) - دورة 12 ساعة
+            # 2. Linear Regression Channel (144, 2)
             df['linreg_mid'] = ta.linreg(df['close'], length=144)
             df['linreg_std'] = df['close'].rolling(144).std()
             df['linreg_upper'] = df['linreg_mid'] + (2 * df['linreg_std'])
@@ -139,8 +138,8 @@ class StrategyEngine:
             candle_range = candle_high - candle_low
             if candle_range == 0: return None
 
-            # فلتر الشمعة الكبيرة (رفض الشموع الانفجارية التي تتجاوز 1.5 ATR)
-            if candle_range > atr_val * 1.5: 
+            # 👈 تم تخفيف فلتر الشمعة الانفجارية إلى 2.5 للسماح بذيول السحب القوية
+            if candle_range > atr_val * 2.5: 
                 return None
 
             # ==========================================
@@ -148,12 +147,10 @@ class StrategyEngine:
             # ==========================================
             pierced_both_lower = (candle_low < bb_lower) and (candle_low < lr_lower)
             closed_above_bb_lower = (candle_close > bb_lower)
-            
-            # هيمنة الذيل السفلي: أكبر من 25% من الجسم وأطول من الذيل العلوي
-            wick_condition_long = (lower_wick >= body * 0.25) and (lower_wick > upper_wick)
+            wick_condition_long = (lower_wick >= body * 0.25) # الذيل يمثل 25% من الجسم
 
             if pierced_both_lower and closed_above_bb_lower and wick_condition_long:
-                sl = candle_low - (atr_val * 0.5)
+                sl = candle_low - (atr_val * 0.5) 
                 
                 tp1 = bb_mid
                 tp2 = bb_upper - (atr_val * 0.1) 
@@ -169,12 +166,10 @@ class StrategyEngine:
             if not setup:
                 pierced_both_upper = (candle_high > bb_upper) and (candle_high > lr_upper)
                 closed_below_bb_upper = (candle_close < bb_upper)
-                
-                # هيمنة الذيل العلوي: أكبر من 25% من الجسم وأطول من الذيل السفلي
-                wick_condition_short = (upper_wick >= body * 0.25) and (upper_wick > lower_wick)
+                wick_condition_short = (upper_wick >= body * 0.25) # الذيل يمثل 25% من الجسم
 
                 if pierced_both_upper and closed_below_bb_upper and wick_condition_short:
-                    sl = candle_high + (atr_val * 0.5)
+                    sl = candle_high + (atr_val * 0.5) 
                     
                     tp1 = bb_mid
                     tp2 = bb_lower + (atr_val * 0.1) 
@@ -192,6 +187,8 @@ class StrategyEngine:
 
             risk_distance = abs(entry - sl)
             if risk_distance <= 0: return None
+            
+            # حماية من المخاطرة العالية: يرفض الصفقة إذا كان الستوب بعيد جداً بالنسبة للسعر
             if (risk_distance / entry) * 100 > 5.0: return None 
             
             del df
@@ -228,7 +225,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFibonacci LinReg(144) & BB(21) Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nOptimized Volatility Filter (2.5x ATR) Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -369,7 +366,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Fib LinReg Mode ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Optimized Vol Filter ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
