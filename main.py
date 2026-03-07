@@ -24,10 +24,10 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
     TF_MAIN = '5m'  
-    CANDLES_LIMIT = 200 
+    # 👈 تم رفع الشموع إلى 250 لتغطية حسابات الـ 144 شمعة بدقة
+    CANDLES_LIMIT = 250 
     
     MAX_TRADES_AT_ONCE = 3  
-    # 👈 تم تعديل فلتر السيولة إلى 300 ألف دولار
     MIN_24H_VOLUME_USDT = 300_000 
     MAX_ALLOWED_SPREAD = 0.003 
     
@@ -38,7 +38,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V22300.0 - 300K Vol & Rapid Scalper"
+    VERSION = "V22600.0 - Fibonacci LinReg & BB Sniper"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -79,7 +79,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (LinReg + Bollinger Bands)
+# 3. محرك الاستراتيجية (Fibonacci LinReg + BB)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -92,19 +92,19 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 150: return None 
+            if len(df) < 200: return None 
             
-            # 1. Bollinger Bands (20, 2)
-            bb = ta.bbands(df['close'], length=20, std=2)
+            # 1. Bollinger Bands (21, 2) - إعدادات فيبوناتشي
+            bb = ta.bbands(df['close'], length=21, std=2)
             if bb is not None:
                 df['bb_lower'] = bb.iloc[:, 0]  
                 df['bb_mid'] = bb.iloc[:, 1]    
                 df['bb_upper'] = bb.iloc[:, 2]
             else: return None
 
-            # 2. Linear Regression Channel (100, 2)
-            df['linreg_mid'] = ta.linreg(df['close'], length=100)
-            df['linreg_std'] = df['close'].rolling(100).std()
+            # 2. Linear Regression Channel (144, 2) - دورة 12 ساعة
+            df['linreg_mid'] = ta.linreg(df['close'], length=144)
+            df['linreg_std'] = df['close'].rolling(144).std()
             df['linreg_upper'] = df['linreg_mid'] + (2 * df['linreg_std'])
             df['linreg_lower'] = df['linreg_mid'] - (2 * df['linreg_std'])
 
@@ -135,16 +135,24 @@ class StrategyEngine:
             upper_wick = candle_high - max(candle_open, candle_close)
 
             setup = None
+            
+            candle_range = candle_high - candle_low
+            if candle_range == 0: return None
+
+            # فلتر الشمعة الكبيرة (رفض الشموع الانفجارية التي تتجاوز 1.5 ATR)
+            if candle_range > atr_val * 1.5: 
+                return None
 
             # ==========================================
             # 🟢 شروط صفقة الشراء (LONG)
             # ==========================================
-            is_green = candle_close > candle_open 
             pierced_both_lower = (candle_low < bb_lower) and (candle_low < lr_lower)
             closed_above_bb_lower = (candle_close > bb_lower)
-            wick_condition_long = (lower_wick >= body * 0.25)
+            
+            # هيمنة الذيل السفلي: أكبر من 25% من الجسم وأطول من الذيل العلوي
+            wick_condition_long = (lower_wick >= body * 0.25) and (lower_wick > upper_wick)
 
-            if pierced_both_lower and closed_above_bb_lower and wick_condition_long and is_green:
+            if pierced_both_lower and closed_above_bb_lower and wick_condition_long:
                 sl = candle_low - (atr_val * 0.5)
                 
                 tp1 = bb_mid
@@ -159,12 +167,13 @@ class StrategyEngine:
             # 🔴 شروط صفقة البيع (SHORT)
             # ==========================================
             if not setup:
-                is_red = candle_close < candle_open 
                 pierced_both_upper = (candle_high > bb_upper) and (candle_high > lr_upper)
                 closed_below_bb_upper = (candle_close < bb_upper)
-                wick_condition_short = (upper_wick >= body * 0.25)
+                
+                # هيمنة الذيل العلوي: أكبر من 25% من الجسم وأطول من الذيل السفلي
+                wick_condition_short = (upper_wick >= body * 0.25) and (upper_wick > lower_wick)
 
-                if pierced_both_upper and closed_below_bb_upper and wick_condition_short and is_red:
+                if pierced_both_upper and closed_below_bb_upper and wick_condition_short:
                     sl = candle_high + (atr_val * 0.5)
                     
                     tp1 = bb_mid
@@ -185,8 +194,6 @@ class StrategyEngine:
             if risk_distance <= 0: return None
             if (risk_distance / entry) * 100 > 5.0: return None 
             
-            # 👈 تم إزالة فلتر الـ 5% للهدف الأول بناءً على طلبك، لتقبل الخوارزمية كل الفرص المتاحة فنياً
-            
             del df
             return {
                 "symbol": symbol, 
@@ -194,7 +201,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "LinReg & BB Sniper", 
+                "strat": "Fib LinReg/BB Sweep", 
                 "risk_distance": risk_distance,
                 "atr": atr_val
             }
@@ -221,7 +228,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n300K Volume Filter & Unrestricted Targets Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFibonacci LinReg(144) & BB(21) Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -362,7 +369,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 300K Vol Mode ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Fib LinReg Mode ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
