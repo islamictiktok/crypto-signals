@@ -24,7 +24,7 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
     TF_MAIN = '5m'  
-    CANDLES_LIMIT = 250 
+    CANDLES_LIMIT = 150 # كافي جداً لحساب LinReg 50 و BB 20
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 300_000 
@@ -37,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V23100.0 - Optimized Volatility Filter"
+    VERSION = "V24000.0 - LinReg 50 & BB 20 Reversion"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -78,7 +78,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (Fibonacci LinReg + BB SMA)
+# 3. محرك الاستراتيجية الجديد (LinReg 50 + BB 20)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -91,19 +91,19 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 200: return None 
+            if len(df) < 100: return None 
             
-            # 1. Bollinger Bands (21, 2) SMA Mode
-            bb = ta.bbands(df['close'], length=21, std=2, mamode="sma")
+            # 1. Bollinger Bands (20, 2) SMA Mode
+            bb = ta.bbands(df['close'], length=20, std=2, mamode="sma")
             if bb is not None:
                 df['bb_lower'] = bb.iloc[:, 0]  
                 df['bb_mid'] = bb.iloc[:, 1]    
                 df['bb_upper'] = bb.iloc[:, 2]
             else: return None
 
-            # 2. Linear Regression Channel (144, 2)
-            df['linreg_mid'] = ta.linreg(df['close'], length=144)
-            df['linreg_std'] = df['close'].rolling(144).std()
+            # 2. Linear Regression Channel (50, 2)
+            df['linreg_mid'] = ta.linreg(df['close'], length=50)
+            df['linreg_std'] = df['close'].rolling(50).std()
             df['linreg_upper'] = df['linreg_mid'] + (2 * df['linreg_std'])
             df['linreg_lower'] = df['linreg_mid'] - (2 * df['linreg_std'])
 
@@ -127,6 +127,7 @@ class StrategyEngine:
             bb_upper = float(curr['bb_upper'])
             
             lr_lower = float(curr['linreg_lower'])
+            lr_mid = float(curr['linreg_mid'])
             lr_upper = float(curr['linreg_upper'])
 
             body = abs(candle_close - candle_open)
@@ -138,45 +139,57 @@ class StrategyEngine:
             candle_range = candle_high - candle_low
             if candle_range == 0: return None
 
-            # 👈 تم تخفيف فلتر الشمعة الانفجارية إلى 2.5 للسماح بذيول السحب القوية
+            # فلتر الشمعة الانفجارية (أكبر من 2.5 ATR يتم رفضها)
             if candle_range > atr_val * 2.5: 
                 return None
 
             # ==========================================
             # 🟢 شروط صفقة الشراء (LONG)
             # ==========================================
-            pierced_both_lower = (candle_low < bb_lower) and (candle_low < lr_lower)
-            closed_above_bb_lower = (candle_close > bb_lower)
-            wick_condition_long = (lower_wick >= body * 0.25) # الذيل يمثل 25% من الجسم
+            # شرط الذيل المشترك: يمثل 15% من الجسم
+            wick_condition_long = (lower_wick >= body * 0.15)
+            
+            # الحالة الأولى: اختراق البولنجر السفلي + اختراق القناة السفلية + إغلاق فوق القناة السفلية
+            long_case_1 = (candle_low < bb_lower) and (candle_low < lr_lower) and (candle_close > lr_lower)
+            
+            # الحالة الثانية: تفتح تحت البولنجر السفلي + تخترق القناة السفلية + تغلق فوق القناة السفلية
+            long_case_2 = (candle_open < bb_lower) and (candle_low < lr_lower) and (candle_close > lr_lower)
 
-            if pierced_both_lower and closed_above_bb_lower and wick_condition_long:
-                sl = candle_low - (atr_val * 0.5) 
+            if (long_case_1 or long_case_2) and wick_condition_long:
+                sl = candle_low - (atr_val * 0.5) # مسافة أمان للستوب
                 
-                tp1 = bb_mid
-                tp2 = bb_upper - (atr_val * 0.1) 
-                tp3 = lr_upper
-                tp3 = max(tp3, tp2 + (atr_val * 0.5))
-
-                if (tp1 > entry) and (tp2 > tp1):
+                # الأهداف الهندسية المطلوبة
+                tp1 = lr_lower + ((lr_mid - lr_lower) / 2.0) # المنتصف بين القناة السفلية والوسطى
+                tp2 = lr_mid                                 # خط القناة الأوسط
+                tp3 = lr_upper - (atr_val * 0.5)             # قبل خط القناة العلوي بمسافة آمنة
+                
+                # التأكد أن الهدف الأول أعلى من سعر الدخول (في حال أغلقت الشمعة عالياً جداً)
+                if tp1 > entry:
                     setup = {"side": "LONG", "sl": sl, "tps": [tp1, tp2, tp3]}
 
             # ==========================================
             # 🔴 شروط صفقة البيع (SHORT)
             # ==========================================
             if not setup:
-                pierced_both_upper = (candle_high > bb_upper) and (candle_high > lr_upper)
-                closed_below_bb_upper = (candle_close < bb_upper)
-                wick_condition_short = (upper_wick >= body * 0.25) # الذيل يمثل 25% من الجسم
+                # شرط الذيل المشترك: يمثل 15% من الجسم
+                wick_condition_short = (upper_wick >= body * 0.15)
 
-                if pierced_both_upper and closed_below_bb_upper and wick_condition_short:
+                # الحالة الأولى: اختراق البولنجر العلوي + اختراق القناة العلوية + إغلاق تحت القناة العلوية
+                short_case_1 = (candle_high > bb_upper) and (candle_high > lr_upper) and (candle_close < lr_upper)
+                
+                # الحالة الثانية: تفتح فوق البولنجر العلوي + تخترق القناة العلوية + تغلق تحت القناة العلوية
+                short_case_2 = (candle_open > bb_upper) and (candle_high > lr_upper) and (candle_close < lr_upper)
+
+                if (short_case_1 or short_case_2) and wick_condition_short:
                     sl = candle_high + (atr_val * 0.5) 
                     
-                    tp1 = bb_mid
-                    tp2 = bb_lower + (atr_val * 0.1) 
-                    tp3 = lr_lower
-                    tp3 = min(tp3, tp2 - (atr_val * 0.5))
+                    # الأهداف الهندسية المطلوبة
+                    tp1 = lr_upper - ((lr_upper - lr_mid) / 2.0) # المنتصف بين القناة العلوية والوسطى
+                    tp2 = lr_mid                                 # خط القناة الأوسط
+                    tp3 = lr_lower + (atr_val * 0.5)             # قبل خط القناة السفلي بمسافة آمنة
                     
-                    if (tp1 < entry) and (tp2 < tp1):
+                    # التأكد أن الهدف الأول أقل من سعر الدخول
+                    if tp1 < entry:
                         setup = {"side": "SHORT", "sl": sl, "tps": [tp1, tp2, tp3]}
 
             if not setup: return None
@@ -188,7 +201,7 @@ class StrategyEngine:
             risk_distance = abs(entry - sl)
             if risk_distance <= 0: return None
             
-            # حماية من المخاطرة العالية: يرفض الصفقة إذا كان الستوب بعيد جداً بالنسبة للسعر
+            # حماية المخاطرة القصوى
             if (risk_distance / entry) * 100 > 5.0: return None 
             
             del df
@@ -198,7 +211,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "Fib LinReg/BB Sweep", 
+                "strat": "LinReg(50)/BB(20) Reversion", 
                 "risk_distance": risk_distance,
                 "atr": atr_val
             }
@@ -225,7 +238,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nOptimized Volatility Filter (2.5x ATR) Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nLinReg 50 & BB 20 Dual-Case Strategy Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -366,7 +379,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Optimized Vol Filter ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | New Hybrid Engine ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
