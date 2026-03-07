@@ -24,10 +24,11 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
     TF_MAIN = '5m'  
-    CANDLES_LIMIT = 200 # تم الرفع لتغطية حسابات الـ LinReg (100) بدقة
+    CANDLES_LIMIT = 200 
     
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 500_000 
+    # 👈 تم رفع فلتر السيولة إلى مليون ونصف دولار
+    MIN_24H_VOLUME_USDT = 1_500_000 
     MAX_ALLOWED_SPREAD = 0.003 
     
     RISK_PER_TRADE_PCT = 2.0    
@@ -37,7 +38,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V22000.0 - LinReg & BB Channel Sniper"
+    VERSION = "V22200.0 - 1.5M Volume Filter"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -112,7 +113,7 @@ class StrategyEngine:
             df.dropna(inplace=True)
             if len(df) < 5: return None
 
-            curr = df.iloc[-2]  # الشمعة التي أغلقت للتو
+            curr = df.iloc[-2]  
             
             entry = float(curr['close'])
             atr_val = float(curr['atr'])
@@ -138,22 +139,18 @@ class StrategyEngine:
             # ==========================================
             # 🟢 شروط صفقة الشراء (LONG)
             # ==========================================
-            # 1. السعر يخترق خط البولنجر السفلي و خط LinReg السفلي
+            is_green = candle_close > candle_open # شرط الشمعة الخضراء
             pierced_both_lower = (candle_low < bb_lower) and (candle_low < lr_lower)
-            # 2. الإغلاق فوق البولنجر السفلي
             closed_above_bb_lower = (candle_close > bb_lower)
-            # 3. الذيل يمثل 25% من جسم الشمعة على الأقل
             wick_condition_long = (lower_wick >= body * 0.25)
 
-            if pierced_both_lower and closed_above_bb_lower and wick_condition_long:
-                sl = candle_low - (atr_val * 0.2)
+            if pierced_both_lower and closed_above_bb_lower and wick_condition_long and is_green:
+                # مسافة أمان للستوب لوس
+                sl = candle_low - (atr_val * 0.5)
                 
-                # الأهداف المطلوبة للشراء
                 tp1 = bb_mid
-                tp2 = bb_upper - (atr_val * 0.1) # بالقرب من العلوي
+                tp2 = bb_upper - (atr_val * 0.1) 
                 tp3 = lr_upper
-                
-                # ترتيب الأهداف منطقياً لتجنب تقاطع الخطوط (في حال كان LinReg منخفضاً)
                 tp3 = max(tp3, tp2 + (atr_val * 0.5))
 
                 if (tp1 > entry) and (tp2 > tp1):
@@ -163,22 +160,18 @@ class StrategyEngine:
             # 🔴 شروط صفقة البيع (SHORT)
             # ==========================================
             if not setup:
-                # 1. السعر يخترق خط البولنجر العلوي و خط LinReg العلوي
+                is_red = candle_close < candle_open # شرط الشمعة الحمراء
                 pierced_both_upper = (candle_high > bb_upper) and (candle_high > lr_upper)
-                # 2. الإغلاق تحت البولنجر العلوي
                 closed_below_bb_upper = (candle_close < bb_upper)
-                # 3. الذيل يمثل 25% من جسم الشمعة على الأقل
                 wick_condition_short = (upper_wick >= body * 0.25)
 
-                if pierced_both_upper and closed_below_bb_upper and wick_condition_short:
-                    sl = candle_high + (atr_val * 0.2)
+                if pierced_both_upper and closed_below_bb_upper and wick_condition_short and is_red:
+                    # مسافة أمان للستوب لوس
+                    sl = candle_high + (atr_val * 0.5)
                     
-                    # الأهداف المطلوبة للبيع
                     tp1 = bb_mid
-                    tp2 = bb_lower + (atr_val * 0.1) # بالقرب من السفلي
+                    tp2 = bb_lower + (atr_val * 0.1) 
                     tp3 = lr_lower
-                    
-                    # ترتيب الأهداف منطقياً لتجنب تقاطع الخطوط
                     tp3 = min(tp3, tp2 - (atr_val * 0.5))
                     
                     if (tp1 < entry) and (tp2 < tp1):
@@ -192,9 +185,19 @@ class StrategyEngine:
 
             risk_distance = abs(entry - sl)
             if risk_distance <= 0: return None
-            
-            # حماية الستوب لوس البعيد
             if (risk_distance / entry) * 100 > 5.0: return None 
+            
+            # ==========================================
+            # فلتر الهدف الأدنى (أكبر من 5% ROE للهدف الأول)
+            # ==========================================
+            coin_volatility_pct = (atr_val / entry) * 100
+            raw_lev = Config.BASE_LEVERAGE * (1.0 / coin_volatility_pct) if coin_volatility_pct > 0 else Config.MIN_LEVERAGE
+            expected_lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
+            
+            tp1_roe = StrategyEngine.calc_actual_roe(entry, tps[0], side, expected_lev)
+            
+            if tp1_roe < 5.0:
+                return None
             
             del df
             return {
@@ -230,7 +233,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nLinReg & Bollinger Double-Sweep Strategy Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nStrict 1.5M Vol Filter Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -371,7 +374,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | LinReg/BB Mode ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 1.5M Vol Filter ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
