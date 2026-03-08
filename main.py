@@ -24,7 +24,8 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
     TF_MAIN = '5m'  
-    CANDLES_LIMIT = 100 
+    # 👈 تم رفع عدد الشموع إلى 250 ليتمكن البوت من حساب متوسط 200 (SMA 200) بشكل صحيح
+    CANDLES_LIMIT = 250 
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 300_000 
@@ -37,7 +38,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V26000.0 - BB & RSI PinBar Sniper"
+    VERSION = "V27000.0 - Donchian Trend Breakout"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -78,7 +79,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (BB 20 + RSI 14 PinBar)
+# 3. محرك الاستراتيجية (Donchian + SMA 200 + Volume)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -91,93 +92,80 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 50: return None 
+            if len(df) < 220: return None # نحتاج شموع كافية لحساب SMA 200
             
-            # 1. Bollinger Bands (20, 2)
-            bb = ta.bbands(df['close'], length=20, std=2, mamode="sma")
-            if bb is not None:
-                df['bb_lower'] = bb.iloc[:, 0]  
-                df['bb_mid'] = bb.iloc[:, 1]    
-                df['bb_upper'] = bb.iloc[:, 2]
-            else: return None
+            # 1. Trend Filter: SMA 200
+            df['sma_200'] = ta.sma(df['close'], length=200)
 
-            # 2. RSI (14)
-            df['rsi'] = ta.rsi(df['close'], length=14)
+            # 2. Donchian Channel (20)
+            # نأخذ قمة وقاع آخر 20 شمعة سابقة لمعرفة خط الاختراق الصحيح
+            df['dc_upper'] = df['high'].rolling(20).max().shift(1)
+            df['dc_lower'] = df['low'].rolling(20).min().shift(1)
 
-            # 3. ATR (14) لمسافة الأمان
+            # 3. Volume Filter: SMA 30 للفوليوم
+            df['vol_sma_30'] = ta.sma(df['vol'], length=30)
+
+            # 4. Volatility: ATR 14
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
 
             df.dropna(inplace=True)
             if len(df) < 5: return None
 
-            curr = df.iloc[-2]  # الشمعة التي أغلقت للتو
+            curr = df.iloc[-2]  # شمعة الاختراق التي أغلقت للتو
             
             entry = float(curr['close'])
+            sma_200 = float(curr['sma_200'])
+            dc_upper = float(curr['dc_upper'])
+            dc_lower = float(curr['dc_lower'])
+            vol = float(curr['vol'])
+            vol_sma_30 = float(curr['vol_sma_30'])
             atr_val = float(curr['atr'])
-            rsi_val = float(curr['rsi'])
-            
-            candle_high = float(curr['high'])
-            candle_low = float(curr['low'])
-            candle_open = float(curr['open'])
-            candle_close = float(curr['close'])
-            
-            bb_lower = float(curr['bb_lower'])
-            bb_mid = float(curr['bb_mid'])
-            bb_upper = float(curr['bb_upper'])
-
-            body = abs(candle_close - candle_open)
-            lower_wick = min(candle_open, candle_close) - candle_low
-            upper_wick = candle_high - max(candle_open, candle_close)
 
             setup = None
-            
-            candle_range = candle_high - candle_low
-            if candle_range == 0: return None
-
-            # حماية من الشموع الانفجارية المجنونة
-            if candle_range > atr_val * 2.5: 
-                return None
 
             # ==========================================
             # 🟢 شروط صفقة الشراء (LONG)
             # ==========================================
-            # تفتح أسفل أو عند الخط السفلي وتغلق فوقه
-            long_condition_price = (candle_open <= bb_lower) and (candle_close > bb_lower)
-            # RSI تشبع بيعي
-            long_condition_rsi = (rsi_val < 30)
-            # الذيل يمثل 25% من الجسم
-            long_condition_wick = (lower_wick >= body * 0.25)
+            is_above_sma = entry > sma_200
+            is_dc_breakout_up = entry > dc_upper
+            is_high_volume = vol > vol_sma_30
 
-            if long_condition_price and long_condition_rsi and long_condition_wick:
-                sl = candle_low - (atr_val * 0.5) 
+            if is_above_sma and is_dc_breakout_up and is_high_volume:
+                # الستوب لوس: 2.5 أضعاف الـ ATR
+                sl_distance = atr_val * 2.5
+                sl = entry - sl_distance
                 
-                tp1 = bb_mid
-                tp2 = bb_mid + ((bb_upper - bb_mid) / 2.0) # نصف المسافة بين الأوسط والعلوي
-                tp3 = bb_upper
+                # نسبة المخاطرة للعائد 1:2
+                total_reward_distance = sl_distance * 2.0 
                 
-                if tp1 > entry:
-                    setup = {"side": "LONG", "sl": sl, "tps": [tp1, tp2, tp3]}
+                # تقسيم الهدف الكلي على 3 أهداف
+                tp1 = entry + (total_reward_distance / 3.0)
+                tp2 = entry + (total_reward_distance * 2.0 / 3.0)
+                tp3 = entry + total_reward_distance
+
+                setup = {"side": "LONG", "sl": sl, "tps": [tp1, tp2, tp3]}
 
             # ==========================================
             # 🔴 شروط صفقة البيع (SHORT)
             # ==========================================
             if not setup:
-                # تفتح أعلى أو عند الخط العلوي وتغلق تحته
-                short_condition_price = (candle_open >= bb_upper) and (candle_close < bb_upper)
-                # RSI تشبع شرائي
-                short_condition_rsi = (rsi_val > 70)
-                # الذيل يمثل 25% من الجسم
-                short_condition_wick = (upper_wick >= body * 0.25)
+                is_below_sma = entry < sma_200
+                is_dc_breakout_down = entry < dc_lower
 
-                if short_condition_price and short_condition_rsi and short_condition_wick:
-                    sl = candle_high + (atr_val * 0.5) 
+                if is_below_sma and is_dc_breakout_down and is_high_volume:
+                    # الستوب لوس: 2.5 أضعاف الـ ATR
+                    sl_distance = atr_val * 2.5
+                    sl = entry + sl_distance
                     
-                    tp1 = bb_mid
-                    tp2 = bb_mid - ((bb_mid - bb_lower) / 2.0) # نصف المسافة بين الأوسط والسفلي
-                    tp3 = bb_lower
+                    # نسبة المخاطرة للعائد 1:2
+                    total_reward_distance = sl_distance * 2.0 
                     
-                    if tp1 < entry:
-                        setup = {"side": "SHORT", "sl": sl, "tps": [tp1, tp2, tp3]}
+                    # تقسيم الهدف الكلي على 3 أهداف
+                    tp1 = entry - (total_reward_distance / 3.0)
+                    tp2 = entry - (total_reward_distance * 2.0 / 3.0)
+                    tp3 = entry - total_reward_distance
+                    
+                    setup = {"side": "SHORT", "sl": sl, "tps": [tp1, tp2, tp3]}
 
             if not setup: return None
 
@@ -188,8 +176,8 @@ class StrategyEngine:
             risk_distance = abs(entry - sl)
             if risk_distance <= 0: return None
             
-            # حماية من الستوب البعيد جداً
-            if (risk_distance / entry) * 100 > 5.0: return None 
+            # حماية من الستوب البعيد جداً (تم رفعها لـ 7% لأن 2.5 ATR قد تكون واسعة على بعض العملات)
+            if (risk_distance / entry) * 100 > 7.0: return None 
             
             del df
             return {
@@ -198,7 +186,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "BB & RSI PinBar", 
+                "strat": "Donchian Breakout", 
                 "risk_distance": risk_distance,
                 "atr": atr_val
             }
@@ -225,7 +213,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nStrict BB & RSI PinBar Setup Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nDonchian Breakout, SMA 200 & Volume Filter Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -370,7 +358,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | BB & RSI PinBar ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Donchian Breakout ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
