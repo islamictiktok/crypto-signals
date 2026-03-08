@@ -37,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V25000.0 - Bollinger & RSI Mean Reversion"
+    VERSION = "V26000.0 - BB & RSI PinBar Sniper"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -78,7 +78,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية الجديد (BB 20 + RSI 14)
+# 3. محرك الاستراتيجية (BB 20 + RSI 14 PinBar)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -104,14 +104,13 @@ class StrategyEngine:
             # 2. RSI (14)
             df['rsi'] = ta.rsi(df['close'], length=14)
 
-            # 3. ATR (14) للمسافات والأهداف
+            # 3. ATR (14) لمسافة الأمان
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
 
             df.dropna(inplace=True)
             if len(df) < 5: return None
 
-            curr = df.iloc[-2]  # الشمعة الحالية التي أغلقت للتو
-            prev = df.iloc[-3]  # الشمعة السابقة
+            curr = df.iloc[-2]  # الشمعة التي أغلقت للتو
             
             entry = float(curr['close'])
             atr_val = float(curr['atr'])
@@ -126,33 +125,35 @@ class StrategyEngine:
             bb_mid = float(curr['bb_mid'])
             bb_upper = float(curr['bb_upper'])
 
+            body = abs(candle_close - candle_open)
+            lower_wick = min(candle_open, candle_close) - candle_low
+            upper_wick = candle_high - max(candle_open, candle_close)
+
             setup = None
             
             candle_range = candle_high - candle_low
             if candle_range == 0: return None
 
-            # فلتر الشمعة الانفجارية المفرطة
+            # حماية من الشموع الانفجارية المجنونة
             if candle_range > atr_val * 2.5: 
                 return None
 
             # ==========================================
             # 🟢 شروط صفقة الشراء (LONG)
             # ==========================================
-            # 1. السعر يلمس أو يكسر الحد السفلي (في الشمعة الحالية أو التي قبلها)
-            touched_lower = (candle_low <= bb_lower) or (float(prev['low']) <= float(prev['bb_lower']))
-            
-            # 2. مؤشر RSI أقل من 30
-            rsi_oversold = rsi_val < 30
-            
-            # 3. شمعة انعكاس صاعدة (إغلاق أعلى من الافتتاح)
-            is_bullish = candle_close > candle_open
+            # تفتح أسفل أو عند الخط السفلي وتغلق فوقه
+            long_condition_price = (candle_open <= bb_lower) and (candle_close > bb_lower)
+            # RSI تشبع بيعي
+            long_condition_rsi = (rsi_val < 30)
+            # الذيل يمثل 25% من الجسم
+            long_condition_wick = (lower_wick >= body * 0.25)
 
-            if touched_lower and rsi_oversold and is_bullish:
-                sl = min(candle_low, float(prev['low'])) - (atr_val * 0.5) 
+            if long_condition_price and long_condition_rsi and long_condition_wick:
+                sl = candle_low - (atr_val * 0.5) 
                 
-                tp1 = bb_mid                   # الهدف الأول: خط المنتصف
-                tp2 = bb_upper                 # الهدف الثاني: الخط العلوي
-                tp3 = bb_upper + (atr_val * 1.0) # الهدف الثالث: اختراق للأعلى
+                tp1 = bb_mid
+                tp2 = bb_mid + ((bb_upper - bb_mid) / 2.0) # نصف المسافة بين الأوسط والعلوي
+                tp3 = bb_upper
                 
                 if tp1 > entry:
                     setup = {"side": "LONG", "sl": sl, "tps": [tp1, tp2, tp3]}
@@ -161,21 +162,19 @@ class StrategyEngine:
             # 🔴 شروط صفقة البيع (SHORT)
             # ==========================================
             if not setup:
-                # 1. السعر يلمس أو يكسر الحد العلوي (في الشمعة الحالية أو التي قبلها)
-                touched_upper = (candle_high >= bb_upper) or (float(prev['high']) >= float(prev['bb_upper']))
-                
-                # 2. مؤشر RSI أكبر من 70
-                rsi_overbought = rsi_val > 70
-                
-                # 3. شمعة انعكاس هابطة (إغلاق أقل من الافتتاح)
-                is_bearish = candle_close < candle_open
+                # تفتح أعلى أو عند الخط العلوي وتغلق تحته
+                short_condition_price = (candle_open >= bb_upper) and (candle_close < bb_upper)
+                # RSI تشبع شرائي
+                short_condition_rsi = (rsi_val > 70)
+                # الذيل يمثل 25% من الجسم
+                short_condition_wick = (upper_wick >= body * 0.25)
 
-                if touched_upper and rsi_overbought and is_bearish:
-                    sl = max(candle_high, float(prev['high'])) + (atr_val * 0.5) 
+                if short_condition_price and short_condition_rsi and short_condition_wick:
+                    sl = candle_high + (atr_val * 0.5) 
                     
-                    tp1 = bb_mid                   # الهدف الأول: خط المنتصف
-                    tp2 = bb_lower                 # الهدف الثاني: الخط السفلي
-                    tp3 = bb_lower - (atr_val * 1.0) # الهدف الثالث: اختراق للأسفل
+                    tp1 = bb_mid
+                    tp2 = bb_mid - ((bb_mid - bb_lower) / 2.0) # نصف المسافة بين الأوسط والسفلي
+                    tp3 = bb_lower
                     
                     if tp1 < entry:
                         setup = {"side": "SHORT", "sl": sl, "tps": [tp1, tp2, tp3]}
@@ -199,7 +198,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "BB & RSI Reversion", 
+                "strat": "BB & RSI PinBar", 
                 "risk_distance": risk_distance,
                 "atr": atr_val
             }
@@ -226,7 +225,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nBB 20 & RSI 14 Mean Reversion Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nStrict BB & RSI PinBar Setup Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -371,7 +370,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | BB+RSI Reversion ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | BB & RSI PinBar ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
