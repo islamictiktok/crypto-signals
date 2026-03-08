@@ -24,7 +24,7 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
     TF_MAIN = '5m'  
-    CANDLES_LIMIT = 250 
+    CANDLES_LIMIT = 100 
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 300_000 
@@ -37,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V23200.0 - Optimized Volatility & Closer TP3"
+    VERSION = "V25000.0 - Bollinger & RSI Mean Reversion"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -78,7 +78,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (Fibonacci LinReg + BB SMA)
+# 3. محرك الاستراتيجية الجديد (BB 20 + RSI 14)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -91,31 +91,31 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 200: return None 
+            if len(df) < 50: return None 
             
-            # 1. Bollinger Bands (21, 2) SMA Mode
-            bb = ta.bbands(df['close'], length=21, std=2, mamode="sma")
+            # 1. Bollinger Bands (20, 2)
+            bb = ta.bbands(df['close'], length=20, std=2, mamode="sma")
             if bb is not None:
                 df['bb_lower'] = bb.iloc[:, 0]  
                 df['bb_mid'] = bb.iloc[:, 1]    
                 df['bb_upper'] = bb.iloc[:, 2]
             else: return None
 
-            # 2. Linear Regression Channel (144, 2)
-            df['linreg_mid'] = ta.linreg(df['close'], length=144)
-            df['linreg_std'] = df['close'].rolling(144).std()
-            df['linreg_upper'] = df['linreg_mid'] + (2 * df['linreg_std'])
-            df['linreg_lower'] = df['linreg_mid'] - (2 * df['linreg_std'])
+            # 2. RSI (14)
+            df['rsi'] = ta.rsi(df['close'], length=14)
 
+            # 3. ATR (14) للمسافات والأهداف
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
 
             df.dropna(inplace=True)
             if len(df) < 5: return None
 
-            curr = df.iloc[-2]  
+            curr = df.iloc[-2]  # الشمعة الحالية التي أغلقت للتو
+            prev = df.iloc[-3]  # الشمعة السابقة
             
             entry = float(curr['close'])
             atr_val = float(curr['atr'])
+            rsi_val = float(curr['rsi'])
             
             candle_high = float(curr['high'])
             candle_low = float(curr['low'])
@@ -125,58 +125,59 @@ class StrategyEngine:
             bb_lower = float(curr['bb_lower'])
             bb_mid = float(curr['bb_mid'])
             bb_upper = float(curr['bb_upper'])
-            
-            lr_lower = float(curr['linreg_lower'])
-            lr_upper = float(curr['linreg_upper'])
-
-            body = abs(candle_close - candle_open)
-            lower_wick = min(candle_open, candle_close) - candle_low
-            upper_wick = candle_high - max(candle_open, candle_close)
 
             setup = None
             
             candle_range = candle_high - candle_low
             if candle_range == 0: return None
 
-            # فلتر الشمعة الانفجارية إلى 2.5 للسماح بذيول السحب القوية
+            # فلتر الشمعة الانفجارية المفرطة
             if candle_range > atr_val * 2.5: 
                 return None
 
             # ==========================================
             # 🟢 شروط صفقة الشراء (LONG)
             # ==========================================
-            pierced_both_lower = (candle_low < bb_lower) and (candle_low < lr_lower)
-            closed_above_bb_lower = (candle_close > bb_lower)
-            wick_condition_long = (lower_wick >= body * 0.25) # الذيل يمثل 25% من الجسم
+            # 1. السعر يلمس أو يكسر الحد السفلي (في الشمعة الحالية أو التي قبلها)
+            touched_lower = (candle_low <= bb_lower) or (float(prev['low']) <= float(prev['bb_lower']))
+            
+            # 2. مؤشر RSI أقل من 30
+            rsi_oversold = rsi_val < 30
+            
+            # 3. شمعة انعكاس صاعدة (إغلاق أعلى من الافتتاح)
+            is_bullish = candle_close > candle_open
 
-            if pierced_both_lower and closed_above_bb_lower and wick_condition_long:
-                sl = candle_low - (atr_val * 0.5) 
+            if touched_lower and rsi_oversold and is_bullish:
+                sl = min(candle_low, float(prev['low'])) - (atr_val * 0.5) 
                 
-                tp1 = bb_mid
-                tp2 = bb_upper - (atr_val * 0.1) 
-                # 👈 الهدف الثالث أصبح أقرب بكثير وأكثر واقعية للضرب المباشر
-                tp3 = tp2 + (atr_val * 1.0)
-
-                if (tp1 > entry) and (tp2 > tp1):
+                tp1 = bb_mid                   # الهدف الأول: خط المنتصف
+                tp2 = bb_upper                 # الهدف الثاني: الخط العلوي
+                tp3 = bb_upper + (atr_val * 1.0) # الهدف الثالث: اختراق للأعلى
+                
+                if tp1 > entry:
                     setup = {"side": "LONG", "sl": sl, "tps": [tp1, tp2, tp3]}
 
             # ==========================================
             # 🔴 شروط صفقة البيع (SHORT)
             # ==========================================
             if not setup:
-                pierced_both_upper = (candle_high > bb_upper) and (candle_high > lr_upper)
-                closed_below_bb_upper = (candle_close < bb_upper)
-                wick_condition_short = (upper_wick >= body * 0.25) # الذيل يمثل 25% من الجسم
+                # 1. السعر يلمس أو يكسر الحد العلوي (في الشمعة الحالية أو التي قبلها)
+                touched_upper = (candle_high >= bb_upper) or (float(prev['high']) >= float(prev['bb_upper']))
+                
+                # 2. مؤشر RSI أكبر من 70
+                rsi_overbought = rsi_val > 70
+                
+                # 3. شمعة انعكاس هابطة (إغلاق أقل من الافتتاح)
+                is_bearish = candle_close < candle_open
 
-                if pierced_both_upper and closed_below_bb_upper and wick_condition_short:
-                    sl = candle_high + (atr_val * 0.5) 
+                if touched_upper and rsi_overbought and is_bearish:
+                    sl = max(candle_high, float(prev['high'])) + (atr_val * 0.5) 
                     
-                    tp1 = bb_mid
-                    tp2 = bb_lower + (atr_val * 0.1) 
-                    # 👈 الهدف الثالث أصبح أقرب بكثير وأكثر واقعية للضرب المباشر
-                    tp3 = tp2 - (atr_val * 1.0)
+                    tp1 = bb_mid                   # الهدف الأول: خط المنتصف
+                    tp2 = bb_lower                 # الهدف الثاني: الخط السفلي
+                    tp3 = bb_lower - (atr_val * 1.0) # الهدف الثالث: اختراق للأسفل
                     
-                    if (tp1 < entry) and (tp2 < tp1):
+                    if tp1 < entry:
                         setup = {"side": "SHORT", "sl": sl, "tps": [tp1, tp2, tp3]}
 
             if not setup: return None
@@ -188,7 +189,7 @@ class StrategyEngine:
             risk_distance = abs(entry - sl)
             if risk_distance <= 0: return None
             
-            # حماية من المخاطرة العالية
+            # حماية من الستوب البعيد جداً
             if (risk_distance / entry) * 100 > 5.0: return None 
             
             del df
@@ -198,7 +199,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "Fib LinReg/BB Sweep", 
+                "strat": "BB & RSI Reversion", 
                 "risk_distance": risk_distance,
                 "atr": atr_val
             }
@@ -225,7 +226,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nOptimized Volatility Filter & Closer TP3 Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nBB 20 & RSI 14 Mean Reversion Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -315,7 +316,11 @@ class TradingSystem:
             trade['risk_amount'] = risk_amount; trade['leverage'] = dynamic_lev
             trade['margin'] = margin_required 
             
-            exact_app_name = sym.split(':')[0].replace('/', '')
+            # استخراج الاسم الصافي عبر API المنصة (الحل الذكي المعتمد)
+            market_info = self.exchange.markets.get(sym, {})
+            base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
+            exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
+            
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
             
             targets_msg = ""
@@ -366,7 +371,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Optimized Vol Filter ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | BB+RSI Reversion ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
