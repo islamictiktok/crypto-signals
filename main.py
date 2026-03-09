@@ -23,14 +23,14 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    TF_MAIN = '5m'  
-    # 👈 تم رفع عدد الشموع إلى 250 ليتمكن البوت من حساب متوسط 200 (SMA 200) بشكل صحيح
+    TF_MAIN = '15m'  
     CANDLES_LIMIT = 250 
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 300_000 
     MAX_ALLOWED_SPREAD = 0.003 
     
+    # نسبة المخاطرة 2% من المحفظة
     RISK_PER_TRADE_PCT = 2.0    
     MIN_LEVERAGE = 2
     MAX_LEVERAGE_CAP = 50       
@@ -38,7 +38,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V27000.0 - Donchian Trend Breakout"
+    VERSION = "V29100.0 - 15m Div ($100 Equity | 2% Risk)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -79,7 +79,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (Donchian + SMA 200 + Volume)
+# 3. محرك الاستراتيجية (SMA 200 + Divergence + Fractals)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -92,92 +92,105 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 220: return None # نحتاج شموع كافية لحساب SMA 200
+            if len(df) < 220: return None 
             
-            # 1. Trend Filter: SMA 200
+            # 1. المتوسط المتحرك 200
             df['sma_200'] = ta.sma(df['close'], length=200)
-
-            # 2. Donchian Channel (20)
-            # نأخذ قمة وقاع آخر 20 شمعة سابقة لمعرفة خط الاختراق الصحيح
-            df['dc_upper'] = df['high'].rolling(20).max().shift(1)
-            df['dc_lower'] = df['low'].rolling(20).min().shift(1)
-
-            # 3. Volume Filter: SMA 30 للفوليوم
-            df['vol_sma_30'] = ta.sma(df['vol'], length=30)
-
-            # 4. Volatility: ATR 14
+            
+            # 2. مؤشر RSI (14)
+            df['rsi'] = ta.rsi(df['close'], length=14)
+            
+            # 3. ATR لغرض حماية المسافات 
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
 
             df.dropna(inplace=True)
-            if len(df) < 5: return None
+            if len(df) < 100: return None
 
-            curr = df.iloc[-2]  # شمعة الاختراق التي أغلقت للتو
+            # دوال للبحث عن نموذج الـ 5 شموع (Fractals)
+            def is_fractal_low(i):
+                return (df['low'].iloc[i] < df['low'].iloc[i-1] and 
+                        df['low'].iloc[i] < df['low'].iloc[i-2] and 
+                        df['low'].iloc[i] < df['low'].iloc[i+1] and 
+                        df['low'].iloc[i] < df['low'].iloc[i+2])
+
+            def is_fractal_high(i):
+                return (df['high'].iloc[i] > df['high'].iloc[i-1] and 
+                        df['high'].iloc[i] > df['high'].iloc[i-2] and 
+                        df['high'].iloc[i] > df['high'].iloc[i+1] and 
+                        df['high'].iloc[i] > df['high'].iloc[i+2])
+
+            # تحديد مواقع الشموع
+            curr_idx = len(df) - 2 # الشمعة الخامسة التي أغلقت للتو
+            pivot_idx = curr_idx - 2 # الشمعة الوسطى في النموذج (القاع/القمة)
             
-            entry = float(curr['close'])
-            sma_200 = float(curr['sma_200'])
-            dc_upper = float(curr['dc_upper'])
-            dc_lower = float(curr['dc_lower'])
-            vol = float(curr['vol'])
-            vol_sma_30 = float(curr['vol_sma_30'])
-            atr_val = float(curr['atr'])
+            entry = float(df['close'].iloc[curr_idx])
+            sma_200 = float(df['sma_200'].iloc[curr_idx])
+            atr_val = float(df['atr'].iloc[curr_idx])
 
             setup = None
 
             # ==========================================
             # 🟢 شروط صفقة الشراء (LONG)
             # ==========================================
-            is_above_sma = entry > sma_200
-            is_dc_breakout_up = entry > dc_upper
-            is_high_volume = vol > vol_sma_30
-
-            if is_above_sma and is_dc_breakout_up and is_high_volume:
-                # الستوب لوس: 2.5 أضعاف الـ ATR
-                sl_distance = atr_val * 2.5
-                sl = entry - sl_distance
-                
-                # نسبة المخاطرة للعائد 1:2
-                total_reward_distance = sl_distance * 2.0 
-                
-                # تقسيم الهدف الكلي على 3 أهداف
-                tp1 = entry + (total_reward_distance / 3.0)
-                tp2 = entry + (total_reward_distance * 2.0 / 3.0)
-                tp3 = entry + total_reward_distance
-
-                setup = {"side": "LONG", "sl": sl, "tps": [tp1, tp2, tp3]}
+            if entry > sma_200:
+                if is_fractal_low(pivot_idx):
+                    prev_pivot_idx = None
+                    for j in range(pivot_idx - 3, pivot_idx - 80, -1):
+                        if j >= 2 and is_fractal_low(j):
+                            prev_pivot_idx = j
+                            break
+                    
+                    if prev_pivot_idx:
+                        curr_low = float(df['low'].iloc[pivot_idx])
+                        prev_low = float(df['low'].iloc[prev_pivot_idx])
+                        
+                        curr_rsi = float(df['rsi'].iloc[pivot_idx])
+                        prev_rsi = float(df['rsi'].iloc[prev_pivot_idx])
+                        
+                        # دايفرجنس إيجابي: قاع أدنى في السعر + قاع أعلى في RSI
+                        if (curr_low < prev_low) and (curr_rsi > prev_rsi):
+                            sl = curr_low - (atr_val * 0.1)
+                            risk = entry - sl
+                            
+                            if risk > 0 and (risk / entry * 100) <= 5.0: 
+                                # هدف واحد فقط بنسبة 1 إلى 2
+                                tp = entry + (risk * 2.0)
+                                setup = {"side": "LONG", "sl": sl, "tps": [tp]}
 
             # ==========================================
             # 🔴 شروط صفقة البيع (SHORT)
             # ==========================================
-            if not setup:
-                is_below_sma = entry < sma_200
-                is_dc_breakout_down = entry < dc_lower
-
-                if is_below_sma and is_dc_breakout_down and is_high_volume:
-                    # الستوب لوس: 2.5 أضعاف الـ ATR
-                    sl_distance = atr_val * 2.5
-                    sl = entry + sl_distance
+            if not setup and entry < sma_200:
+                if is_fractal_high(pivot_idx):
+                    prev_pivot_idx = None
+                    for j in range(pivot_idx - 3, pivot_idx - 80, -1):
+                        if j >= 2 and is_fractal_high(j):
+                            prev_pivot_idx = j
+                            break
                     
-                    # نسبة المخاطرة للعائد 1:2
-                    total_reward_distance = sl_distance * 2.0 
-                    
-                    # تقسيم الهدف الكلي على 3 أهداف
-                    tp1 = entry - (total_reward_distance / 3.0)
-                    tp2 = entry - (total_reward_distance * 2.0 / 3.0)
-                    tp3 = entry - total_reward_distance
-                    
-                    setup = {"side": "SHORT", "sl": sl, "tps": [tp1, tp2, tp3]}
+                    if prev_pivot_idx:
+                        curr_high = float(df['high'].iloc[pivot_idx])
+                        prev_high = float(df['high'].iloc[prev_pivot_idx])
+                        
+                        curr_rsi = float(df['rsi'].iloc[pivot_idx])
+                        prev_rsi = float(df['rsi'].iloc[prev_pivot_idx])
+                        
+                        # دايفرجنس سلبي: قمة أعلى في السعر + قمة أدنى في RSI
+                        if (curr_high > prev_high) and (curr_rsi < prev_rsi):
+                            sl = curr_high + (atr_val * 0.1)
+                            risk = sl - entry
+                            
+                            if risk > 0 and (risk / entry * 100) <= 5.0: 
+                                # هدف واحد فقط بنسبة 1 إلى 2
+                                tp = entry - (risk * 2.0)
+                                setup = {"side": "SHORT", "sl": sl, "tps": [tp]}
 
             if not setup: return None
 
             side = setup["side"]
             sl = setup["sl"]
             tps = setup["tps"]
-
             risk_distance = abs(entry - sl)
-            if risk_distance <= 0: return None
-            
-            # حماية من الستوب البعيد جداً (تم رفعها لـ 7% لأن 2.5 ATR قد تكون واسعة على بعض العملات)
-            if (risk_distance / entry) * 100 > 7.0: return None 
             
             del df
             return {
@@ -186,7 +199,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "Donchian Breakout", 
+                "strat": "15m Div & Fractals (1:2)", 
                 "risk_distance": risk_distance,
                 "atr": atr_val
             }
@@ -207,13 +220,14 @@ class TradingSystem:
         self.cached_valid_coins = [] 
         self.last_cache_time = 0
         self.semaphore = asyncio.Semaphore(15) 
-        self.stats = {"virtual_equity": 1000.0, "peak_equity": 1000.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "strats": {}} 
+        # 👈 تم تعديل الرصيد إلى 100 دولار هنا
+        self.stats = {"virtual_equity": 100.0, "peak_equity": 100.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "strats": {}} 
         self.running = True
 
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nDonchian Breakout, SMA 200 & Volume Filter Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nStarting Equity: $100 | Risk: 2% 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -229,6 +243,7 @@ class TradingSystem:
             try:
                 with open(Config.STATE_FILE, "r") as f:
                     state = json.load(f)
+                # إذا كانت النسخة مختلفة سيتم تجاهل الملف القديم للبدء بالـ 100 دولار الجديدة
                 if state.get("version") == Config.VERSION:
                     self.active_trades = state.get("active_trades", {}); self.cooldown_list = state.get("cooldown_list", {}); self.stats = state.get("stats", self.stats)
             except Exception: pass
@@ -310,11 +325,9 @@ class TradingSystem:
             
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
             
-            targets_msg = ""
-            for idx, tp in enumerate(safe_tps):
-                tp_roe = StrategyEngine.calc_actual_roe(safe_entry, tp, trade['side'], dynamic_lev)
-                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code> (+{tp_roe:.1f}% ROE)\n"
-
+            # هدف واحد فقط
+            tp = safe_tps[0]
+            tp_roe = StrategyEngine.calc_actual_roe(safe_entry, tp, trade['side'], dynamic_lev)
             pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
 
             msg = (
@@ -323,14 +336,14 @@ class TradingSystem:
                 f"🛒 <b>Entry:</b> <code>{safe_entry}</code>\n"
                 f"⚖️ <b>Leverage:</b> <b>{dynamic_lev}x</b>\n"
                 f"────────────────\n"
-                f"{targets_msg}"
+                f"🎯 <b>Take Profit (1:2):</b> <code>{tp}</code> (+{tp_roe:.1f}% ROE)\n"
                 f"────────────────\n"
                 f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)"
             )
             
             msg_id = await self.tg.send(msg)
             if msg_id:
-                trade['msg_id'] = msg_id; trade['step'] = 0; trade['last_tp_hit'] = 0; trade['last_sl_price'] = safe_sl
+                trade['msg_id'] = msg_id
                 self.active_trades[sym] = trade
                 self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
                 self.save_state() 
@@ -358,7 +371,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Donchian Breakout ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 15m Divergence ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -385,101 +398,48 @@ class TradingSystem:
                     if not ticker or not ticker.get('last'): continue 
                     
                     side = trade['side']; current_price = ticker['last']
-                    step = trade['step']; entry = trade['entry']
-                    current_sl = trade.get('last_sl_price', trade['sl'])
+                    entry = trade['entry']
+                    current_sl = trade['sl']
+                    target = trade['tps'][0] # الهدف الوحيد
                     pos_size = trade['position_size']; strat_name = trade['strat']
                     margin = trade.get('margin', 1.0)
                     
+                    # 🔴 تم ضرب الستوب لوس
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
-                        exit_price = current_sl
+                        pnl = (current_sl - entry) * pos_size if side == "LONG" else (entry - current_sl) * pos_size
+                        display_roe = (pnl / margin) * 100
                         
-                        pos_33 = pos_size * 0.33
-                        pos_34 = pos_size * 0.34
+                        msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:+.1f}% ROE)"
+                        self._log_trade_result('losses', display_roe, strat_name)
                         
-                        if step == 0: 
-                            pnl = (exit_price - entry) * pos_size if side == "LONG" else (entry - exit_price) * pos_size
-                            display_roe = (pnl / margin) * 100
-                            msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:+.1f}% ROE)"
-                            self._log_trade_result('losses', display_roe, strat_name)
-                            
-                        elif step == 1: 
-                            pnl_tp1 = (trade['tps'][0] - entry) * pos_33 if side == "LONG" else (entry - trade['tps'][0]) * pos_33
-                            pnl_rem = (exit_price - entry) * (pos_size - pos_33) if side == "LONG" else (entry - exit_price) * (pos_size - pos_33)
-                            pnl = pnl_tp1 + pnl_rem
-                            display_roe = (pnl / margin) * 100 
-                            
-                            msg = (
-                                f"🛡️ <b>Stopped out at Entry (Break Even)</b>\n"
-                                f"💰 <b>Secured Profit:</b> +{display_roe:.1f}% Total ROE\n"
-                                f"🎯 Last hit: TP1"
-                            )
-                            self._log_trade_result('break_evens', display_roe, strat_name)
-                            
-                        else: 
-                            pnl_1 = (trade['tps'][0] - entry) * pos_33 if side == "LONG" else (entry - trade['tps'][0]) * pos_33
-                            pnl_2 = (trade['tps'][1] - entry) * pos_33 if side == "LONG" else (entry - trade['tps'][1]) * pos_33
-                            pnl_trail = (exit_price - entry) * pos_34 if side == "LONG" else (entry - exit_price) * pos_34
-                            pnl = pnl_1 + pnl_2 + pnl_trail
-                            
-                            display_roe = (pnl / margin) * 100
-                            
-                            msg = (
-                                f"🛡️ <b>Stopped out in Profit (Trailing SL)</b>\n"
-                                f"💰 <b>Total Bagged:</b> +{display_roe:.1f}% Total ROE\n"
-                                f"🎯 Last hit: TP2"
-                            )
-                            self._log_trade_result('wins', display_roe, strat_name)
-
                         self._update_equity_and_drawdown(pnl)
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
-                        Log.print(f"Trade Closed: {sym} | Total ROE: {display_roe:+.1f}%", Log.YELLOW) 
-                        await self.tg.send(msg, trade['msg_id']); del self.active_trades[sym]; self.save_state(); continue
-
-                    target = trade['tps'][step] if step < 3 else None 
-                    if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
-                        
-                        trade['step'] += 1
-                        trade['last_tp_hit'] = trade['step']
-                        
-                        tp_roe = StrategyEngine.calc_actual_roe(entry, target, side, trade['leverage'])
-
-                        if trade['step'] == 1: 
-                            trade['last_sl_price'] = trade['entry']
-                            msg = (
-                                f"✅ <b>TP1 HIT! (+{tp_roe:.1f}% ROE)</b>\n"
-                                f"✂️ <b>Action:</b> Close 33% of position.\n"
-                                f"🛡️ <b>Update:</b> Move SL to Entry: <code>{trade['entry']}</code>"
-                            )
-                        elif trade['step'] == 2: 
-                            trade['last_sl_price'] = trade['tps'][0] 
-                            msg = (
-                                f"🔥 <b>TP2 HIT! (+{tp_roe:.1f}% ROE)</b>\n"
-                                f"✂️ <b>Action:</b> Close another 33% of position.\n"
-                                f"📈 <b>Update:</b> Move SL to TP1: <code>{trade['tps'][0]}</code>"
-                            )
-                            
-                        if trade['step'] == 3: 
-                            pos_33 = pos_size * 0.33; pos_34 = pos_size * 0.34
-                            pnl_1 = (trade['tps'][0] - entry) * pos_33 if side == "LONG" else (entry - trade['tps'][0]) * pos_33
-                            pnl_2 = (trade['tps'][1] - entry) * pos_33 if side == "LONG" else (entry - trade['tps'][1]) * pos_33
-                            pnl_3 = (current_price - entry) * pos_34 if side == "LONG" else (entry - current_price) * pos_34
-                            pnl = pnl_1 + pnl_2 + pnl_3
-                            
-                            self._update_equity_and_drawdown(pnl)
-                            blended_roe = (pnl / margin) * 100
-                            
-                            msg = (
-                                f"🏆 <b>ALL 3 TARGETS SMASHED!</b> 🏦\n"
-                                f"💰 <b>Total Bagged:</b> +{blended_roe:.1f}% ROE\n"
-                                f"✂️ <b>Action:</b> Close the remaining position. Trade Completed!"
-                            )
-                            self._log_trade_result('wins', blended_roe, strat_name)
-                            self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
-                            del self.active_trades[sym]
-                            
-                        Log.print(f"Hit TP{trade['step']}: {sym}", Log.GREEN)
+                        Log.print(f"Trade Closed SL: {sym} | ROE: {display_roe:+.1f}%", Log.YELLOW) 
                         await self.tg.send(msg, trade['msg_id'])
-                        self.save_state() 
+                        del self.active_trades[sym]
+                        self.save_state()
+                        continue
+
+                    # 🟢 تم ضرب الهدف (1:2 R:R)
+                    if (side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target):
+                        pnl = (target - entry) * pos_size if side == "LONG" else (entry - target) * pos_size
+                        display_roe = (pnl / margin) * 100
+                        
+                        msg = (
+                            f"🏆 <b>TARGET SMASHED! (1:2 R:R)</b> 🏦\n"
+                            f"💰 <b>Total Bagged:</b> +{display_roe:.1f}% ROE\n"
+                            f"✂️ <b>Action:</b> Close 100% of position. Trade Completed!"
+                        )
+                        self._log_trade_result('wins', display_roe, strat_name)
+                        
+                        self._update_equity_and_drawdown(pnl)
+                        self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
+                        Log.print(f"Hit Target: {sym} | ROE: +{display_roe:+.1f}%", Log.GREEN) 
+                        await self.tg.send(msg, trade['msg_id'])
+                        del self.active_trades[sym]
+                        self.save_state()
+                        continue
+                        
             except Exception: pass
             await asyncio.sleep(2) 
 
