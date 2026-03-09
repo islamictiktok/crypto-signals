@@ -38,7 +38,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V29100.0 - 15m Div ($100 Equity | 2% Risk)"
+    VERSION = "V27200.0 - 15m Donchian (Single Target)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -79,7 +79,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (SMA 200 + Divergence + Fractals)
+# 3. محرك الاستراتيجية (Donchian + SMA 200 + Volume)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -94,103 +94,74 @@ class StrategyEngine:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df) < 220: return None 
             
-            # 1. المتوسط المتحرك 200
+            # 1. Trend Filter: SMA 200
             df['sma_200'] = ta.sma(df['close'], length=200)
-            
-            # 2. مؤشر RSI (14)
-            df['rsi'] = ta.rsi(df['close'], length=14)
-            
-            # 3. ATR لغرض حماية المسافات 
+
+            # 2. Donchian Channel (20)
+            df['dc_upper'] = df['high'].rolling(20).max().shift(1)
+            df['dc_lower'] = df['low'].rolling(20).min().shift(1)
+
+            # 3. Volume Filter: SMA 30
+            df['vol_sma_30'] = ta.sma(df['vol'], length=30)
+
+            # 4. Volatility: ATR 14
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
 
             df.dropna(inplace=True)
-            if len(df) < 100: return None
+            if len(df) < 5: return None
 
-            # دوال للبحث عن نموذج الـ 5 شموع (Fractals)
-            def is_fractal_low(i):
-                return (df['low'].iloc[i] < df['low'].iloc[i-1] and 
-                        df['low'].iloc[i] < df['low'].iloc[i-2] and 
-                        df['low'].iloc[i] < df['low'].iloc[i+1] and 
-                        df['low'].iloc[i] < df['low'].iloc[i+2])
-
-            def is_fractal_high(i):
-                return (df['high'].iloc[i] > df['high'].iloc[i-1] and 
-                        df['high'].iloc[i] > df['high'].iloc[i-2] and 
-                        df['high'].iloc[i] > df['high'].iloc[i+1] and 
-                        df['high'].iloc[i] > df['high'].iloc[i+2])
-
-            # تحديد مواقع الشموع
-            curr_idx = len(df) - 2 # الشمعة الخامسة التي أغلقت للتو
-            pivot_idx = curr_idx - 2 # الشمعة الوسطى في النموذج (القاع/القمة)
+            curr = df.iloc[-2]  
             
-            entry = float(df['close'].iloc[curr_idx])
-            sma_200 = float(df['sma_200'].iloc[curr_idx])
-            atr_val = float(df['atr'].iloc[curr_idx])
+            entry = float(curr['close'])
+            sma_200 = float(curr['sma_200'])
+            dc_upper = float(curr['dc_upper'])
+            dc_lower = float(curr['dc_lower'])
+            vol = float(curr['vol'])
+            vol_sma_30 = float(curr['vol_sma_30'])
+            atr_val = float(curr['atr'])
 
             setup = None
 
             # ==========================================
             # 🟢 شروط صفقة الشراء (LONG)
             # ==========================================
-            if entry > sma_200:
-                if is_fractal_low(pivot_idx):
-                    prev_pivot_idx = None
-                    for j in range(pivot_idx - 3, pivot_idx - 80, -1):
-                        if j >= 2 and is_fractal_low(j):
-                            prev_pivot_idx = j
-                            break
-                    
-                    if prev_pivot_idx:
-                        curr_low = float(df['low'].iloc[pivot_idx])
-                        prev_low = float(df['low'].iloc[prev_pivot_idx])
-                        
-                        curr_rsi = float(df['rsi'].iloc[pivot_idx])
-                        prev_rsi = float(df['rsi'].iloc[prev_pivot_idx])
-                        
-                        # دايفرجنس إيجابي: قاع أدنى في السعر + قاع أعلى في RSI
-                        if (curr_low < prev_low) and (curr_rsi > prev_rsi):
-                            sl = curr_low - (atr_val * 0.1)
-                            risk = entry - sl
-                            
-                            if risk > 0 and (risk / entry * 100) <= 5.0: 
-                                # هدف واحد فقط بنسبة 1 إلى 2
-                                tp = entry + (risk * 2.0)
-                                setup = {"side": "LONG", "sl": sl, "tps": [tp]}
+            is_above_sma = entry > sma_200
+            is_dc_breakout_up = entry > dc_upper
+            is_high_volume = vol > vol_sma_30
+
+            if is_above_sma and is_dc_breakout_up and is_high_volume:
+                sl_distance = atr_val * 2.5
+                sl = entry - sl_distance
+                
+                # 👈 هدف واحد فقط بنسبة 1:2
+                tp = entry + (sl_distance * 2.0)
+                setup = {"side": "LONG", "sl": sl, "tps": [tp]}
 
             # ==========================================
             # 🔴 شروط صفقة البيع (SHORT)
             # ==========================================
-            if not setup and entry < sma_200:
-                if is_fractal_high(pivot_idx):
-                    prev_pivot_idx = None
-                    for j in range(pivot_idx - 3, pivot_idx - 80, -1):
-                        if j >= 2 and is_fractal_high(j):
-                            prev_pivot_idx = j
-                            break
+            if not setup:
+                is_below_sma = entry < sma_200
+                is_dc_breakout_down = entry < dc_lower
+
+                if is_below_sma and is_dc_breakout_down and is_high_volume:
+                    sl_distance = atr_val * 2.5
+                    sl = entry + sl_distance
                     
-                    if prev_pivot_idx:
-                        curr_high = float(df['high'].iloc[pivot_idx])
-                        prev_high = float(df['high'].iloc[prev_pivot_idx])
-                        
-                        curr_rsi = float(df['rsi'].iloc[pivot_idx])
-                        prev_rsi = float(df['rsi'].iloc[prev_pivot_idx])
-                        
-                        # دايفرجنس سلبي: قمة أعلى في السعر + قمة أدنى في RSI
-                        if (curr_high > prev_high) and (curr_rsi < prev_rsi):
-                            sl = curr_high + (atr_val * 0.1)
-                            risk = sl - entry
-                            
-                            if risk > 0 and (risk / entry * 100) <= 5.0: 
-                                # هدف واحد فقط بنسبة 1 إلى 2
-                                tp = entry - (risk * 2.0)
-                                setup = {"side": "SHORT", "sl": sl, "tps": [tp]}
+                    # 👈 هدف واحد فقط بنسبة 1:2
+                    tp = entry - (sl_distance * 2.0)
+                    setup = {"side": "SHORT", "sl": sl, "tps": [tp]}
 
             if not setup: return None
 
             side = setup["side"]
             sl = setup["sl"]
             tps = setup["tps"]
+
             risk_distance = abs(entry - sl)
+            if risk_distance <= 0: return None
+            
+            if (risk_distance / entry) * 100 > 7.0: return None 
             
             del df
             return {
@@ -199,7 +170,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "15m Div & Fractals (1:2)", 
+                "strat": "Donchian Breakout (1:2)", 
                 "risk_distance": risk_distance,
                 "atr": atr_val
             }
@@ -220,14 +191,15 @@ class TradingSystem:
         self.cached_valid_coins = [] 
         self.last_cache_time = 0
         self.semaphore = asyncio.Semaphore(15) 
-        # 👈 تم تعديل الرصيد إلى 100 دولار هنا
+        
+        # الرصيد الافتراضي 100 دولار
         self.stats = {"virtual_equity": 100.0, "peak_equity": 100.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "strats": {}} 
         self.running = True
 
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nStarting Equity: $100 | Risk: 2% 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n15m Donchian Single Target (1:2 R:R) Active 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -243,7 +215,7 @@ class TradingSystem:
             try:
                 with open(Config.STATE_FILE, "r") as f:
                     state = json.load(f)
-                # إذا كانت النسخة مختلفة سيتم تجاهل الملف القديم للبدء بالـ 100 دولار الجديدة
+                # تجاهل البيانات القديمة إذا تغير رقم الإصدار لضمان بدء الرصيد من 100
                 if state.get("version") == Config.VERSION:
                     self.active_trades = state.get("active_trades", {}); self.cooldown_list = state.get("cooldown_list", {}); self.stats = state.get("stats", self.stats)
             except Exception: pass
@@ -318,7 +290,6 @@ class TradingSystem:
             trade['risk_amount'] = risk_amount; trade['leverage'] = dynamic_lev
             trade['margin'] = margin_required 
             
-            # استخراج الاسم الصافي عبر API المنصة (الحل الذكي المعتمد)
             market_info = self.exchange.markets.get(sym, {})
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
@@ -343,7 +314,7 @@ class TradingSystem:
             
             msg_id = await self.tg.send(msg)
             if msg_id:
-                trade['msg_id'] = msg_id
+                trade['msg_id'] = msg_id; trade['step'] = 0; trade['last_tp_hit'] = 0; trade['last_sl_price'] = safe_sl
                 self.active_trades[sym] = trade
                 self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
                 self.save_state() 
@@ -371,7 +342,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 15m Divergence ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 15m Donchian Single Target ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -481,6 +452,7 @@ class TradingSystem:
     async def keep_alive(self):
         while self.running:
             try: 
+                # البينج الداخلي للمحافظة على الاستقرار في ريندر
                 async with aiohttp.ClientSession() as s: await s.get(Config.RENDER_URL)
             except Exception: pass
             await asyncio.sleep(300)
