@@ -23,14 +23,13 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    TF_MAIN = '15m'  
+    TF_MAIN = '5m'  
     CANDLES_LIMIT = 250 
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 300_000 
     MAX_ALLOWED_SPREAD = 0.003 
     
-    # نسبة المخاطرة 2% من المحفظة
     RISK_PER_TRADE_PCT = 2.0    
     MIN_LEVERAGE = 2
     MAX_LEVERAGE_CAP = 50       
@@ -38,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V27200.0 - 15m Donchian (Single Target)"
+    VERSION = "V27500.0 - 5m Donchian Scalper (2 Targets | $100)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -92,7 +91,7 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 220: return None 
+            if len(df) < 220: return None
             
             # 1. Trend Filter: SMA 200
             df['sma_200'] = ta.sma(df['close'], length=200)
@@ -133,9 +132,11 @@ class StrategyEngine:
                 sl_distance = atr_val * 2.5
                 sl = entry - sl_distance
                 
-                # 👈 هدف واحد فقط بنسبة 1:2
-                tp = entry + (sl_distance * 2.0)
-                setup = {"side": "LONG", "sl": sl, "tps": [tp]}
+                # هدفين قريبين فقط
+                tp1 = entry + sl_distance         # نسبة 1:1
+                tp2 = entry + (sl_distance * 2.0) # نسبة 1:2
+
+                setup = {"side": "LONG", "sl": sl, "tps": [tp1, tp2]}
 
             # ==========================================
             # 🔴 شروط صفقة البيع (SHORT)
@@ -148,9 +149,11 @@ class StrategyEngine:
                     sl_distance = atr_val * 2.5
                     sl = entry + sl_distance
                     
-                    # 👈 هدف واحد فقط بنسبة 1:2
-                    tp = entry - (sl_distance * 2.0)
-                    setup = {"side": "SHORT", "sl": sl, "tps": [tp]}
+                    # هدفين قريبين فقط
+                    tp1 = entry - sl_distance         # نسبة 1:1
+                    tp2 = entry - (sl_distance * 2.0) # نسبة 1:2
+                    
+                    setup = {"side": "SHORT", "sl": sl, "tps": [tp1, tp2]}
 
             if not setup: return None
 
@@ -170,7 +173,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "Donchian Breakout (1:2)", 
+                "strat": "Donchian Breakout", 
                 "risk_distance": risk_distance,
                 "atr": atr_val
             }
@@ -180,7 +183,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت (Execution Engine)
+# 4. مدير البوت (Execution Engine - 2 Targets Mode)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -192,14 +195,14 @@ class TradingSystem:
         self.last_cache_time = 0
         self.semaphore = asyncio.Semaphore(15) 
         
-        # الرصيد الافتراضي 100 دولار
+        # 👈 ضبط الرصيد الافتراضي لـ 100 دولار
         self.stats = {"virtual_equity": 100.0, "peak_equity": 100.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "strats": {}} 
         self.running = True
 
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n15m Donchian Single Target (1:2 R:R) Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n5m Donchian Scalper | 2 Targets | $100 Equity 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -215,7 +218,6 @@ class TradingSystem:
             try:
                 with open(Config.STATE_FILE, "r") as f:
                     state = json.load(f)
-                # تجاهل البيانات القديمة إذا تغير رقم الإصدار لضمان بدء الرصيد من 100
                 if state.get("version") == Config.VERSION:
                     self.active_trades = state.get("active_trades", {}); self.cooldown_list = state.get("cooldown_list", {}); self.stats = state.get("stats", self.stats)
             except Exception: pass
@@ -290,15 +292,18 @@ class TradingSystem:
             trade['risk_amount'] = risk_amount; trade['leverage'] = dynamic_lev
             trade['margin'] = margin_required 
             
+            # الحل الذكي للتسميات
             market_info = self.exchange.markets.get(sym, {})
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
             
             icon = "🟢" if trade['side'] == "LONG" else "🔴"
             
-            # هدف واحد فقط
-            tp = safe_tps[0]
-            tp_roe = StrategyEngine.calc_actual_roe(safe_entry, tp, trade['side'], dynamic_lev)
+            targets_msg = ""
+            for idx, tp in enumerate(safe_tps):
+                tp_roe = StrategyEngine.calc_actual_roe(safe_entry, tp, trade['side'], dynamic_lev)
+                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code> (+{tp_roe:.1f}% ROE)\n"
+
             pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
 
             msg = (
@@ -307,7 +312,7 @@ class TradingSystem:
                 f"🛒 <b>Entry:</b> <code>{safe_entry}</code>\n"
                 f"⚖️ <b>Leverage:</b> <b>{dynamic_lev}x</b>\n"
                 f"────────────────\n"
-                f"🎯 <b>Take Profit (1:2):</b> <code>{tp}</code> (+{tp_roe:.1f}% ROE)\n"
+                f"{targets_msg}"
                 f"────────────────\n"
                 f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)"
             )
@@ -342,7 +347,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 15m Donchian Single Target ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 5m Scalper ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -369,48 +374,78 @@ class TradingSystem:
                     if not ticker or not ticker.get('last'): continue 
                     
                     side = trade['side']; current_price = ticker['last']
-                    entry = trade['entry']
-                    current_sl = trade['sl']
-                    target = trade['tps'][0] # الهدف الوحيد
+                    step = trade['step']; entry = trade['entry']
+                    current_sl = trade.get('last_sl_price', trade['sl'])
                     pos_size = trade['position_size']; strat_name = trade['strat']
                     margin = trade.get('margin', 1.0)
                     
-                    # 🔴 تم ضرب الستوب لوس
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
-                        pnl = (current_sl - entry) * pos_size if side == "LONG" else (entry - current_sl) * pos_size
-                        display_roe = (pnl / margin) * 100
+                        exit_price = current_sl
                         
-                        msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:+.1f}% ROE)"
-                        self._log_trade_result('losses', display_roe, strat_name)
+                        # 👈 بما أن هناك هدفين، إذا ضرب الستوب في الخطوة 0 يخسر الكل، أما في الخطوة 1 يخسر المتبقي (النصف)
+                        pos_50 = pos_size * 0.50
                         
-                        self._update_equity_and_drawdown(pnl)
-                        self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
-                        Log.print(f"Trade Closed SL: {sym} | ROE: {display_roe:+.1f}%", Log.YELLOW) 
-                        await self.tg.send(msg, trade['msg_id'])
-                        del self.active_trades[sym]
-                        self.save_state()
-                        continue
+                        if step == 0: 
+                            pnl = (exit_price - entry) * pos_size if side == "LONG" else (entry - exit_price) * pos_size
+                            display_roe = (pnl / margin) * 100
+                            msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:+.1f}% ROE)"
+                            self._log_trade_result('losses', display_roe, strat_name)
+                            
+                        else: # step == 1 (أي أنه ضرب TP1 وحرك الستوب للدخول)
+                            pnl_tp1 = (trade['tps'][0] - entry) * pos_50 if side == "LONG" else (entry - trade['tps'][0]) * pos_50
+                            pnl_rem = (exit_price - entry) * pos_50 if side == "LONG" else (entry - exit_price) * pos_50
+                            pnl = pnl_tp1 + pnl_rem
+                            display_roe = (pnl / margin) * 100 
+                            
+                            msg = (
+                                f"🛡️ <b>Stopped out at Entry (Break Even)</b>\n"
+                                f"💰 <b>Secured Profit:</b> +{display_roe:.1f}% Total ROE\n"
+                                f"🎯 Last hit: TP1"
+                            )
+                            self._log_trade_result('break_evens', display_roe, strat_name)
 
-                    # 🟢 تم ضرب الهدف (1:2 R:R)
-                    if (side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target):
-                        pnl = (target - entry) * pos_size if side == "LONG" else (entry - target) * pos_size
-                        display_roe = (pnl / margin) * 100
-                        
-                        msg = (
-                            f"🏆 <b>TARGET SMASHED! (1:2 R:R)</b> 🏦\n"
-                            f"💰 <b>Total Bagged:</b> +{display_roe:.1f}% ROE\n"
-                            f"✂️ <b>Action:</b> Close 100% of position. Trade Completed!"
-                        )
-                        self._log_trade_result('wins', display_roe, strat_name)
-                        
                         self._update_equity_and_drawdown(pnl)
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
-                        Log.print(f"Hit Target: {sym} | ROE: +{display_roe:+.1f}%", Log.GREEN) 
-                        await self.tg.send(msg, trade['msg_id'])
-                        del self.active_trades[sym]
-                        self.save_state()
-                        continue
+                        Log.print(f"Trade Closed: {sym} | Total ROE: {display_roe:+.1f}%", Log.YELLOW) 
+                        await self.tg.send(msg, trade['msg_id']); del self.active_trades[sym]; self.save_state(); continue
+
+                    target = trade['tps'][step] if step < 2 else None 
+                    if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
                         
+                        trade['step'] += 1
+                        trade['last_tp_hit'] = trade['step']
+                        
+                        tp_roe = StrategyEngine.calc_actual_roe(entry, target, side, trade['leverage'])
+
+                        if trade['step'] == 1: 
+                            trade['last_sl_price'] = trade['entry']
+                            msg = (
+                                f"✅ <b>TP1 HIT! (+{tp_roe:.1f}% ROE)</b>\n"
+                                f"✂️ <b>Action:</b> Close 50% of position.\n"
+                                f"🛡️ <b>Update:</b> Move SL to Entry: <code>{trade['entry']}</code>"
+                            )
+                            
+                        elif trade['step'] == 2: 
+                            pos_50 = pos_size * 0.50
+                            pnl_1 = (trade['tps'][0] - entry) * pos_50 if side == "LONG" else (entry - trade['tps'][0]) * pos_50
+                            pnl_2 = (current_price - entry) * pos_50 if side == "LONG" else (entry - current_price) * pos_50
+                            pnl = pnl_1 + pnl_2
+                            
+                            self._update_equity_and_drawdown(pnl)
+                            blended_roe = (pnl / margin) * 100
+                            
+                            msg = (
+                                f"🏆 <b>ALL TARGETS SMASHED!</b> 🏦\n"
+                                f"💰 <b>Total Bagged:</b> +{blended_roe:.1f}% ROE\n"
+                                f"✂️ <b>Action:</b> Close the remaining position. Trade Completed!"
+                            )
+                            self._log_trade_result('wins', blended_roe, strat_name)
+                            self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
+                            del self.active_trades[sym]
+                            
+                        Log.print(f"Hit TP{trade['step']}: {sym}", Log.GREEN)
+                        await self.tg.send(msg, trade['msg_id'])
+                        self.save_state() 
             except Exception: pass
             await asyncio.sleep(2) 
 
@@ -452,7 +487,6 @@ class TradingSystem:
     async def keep_alive(self):
         while self.running:
             try: 
-                # البينج الداخلي للمحافظة على الاستقرار في ريندر
                 async with aiohttp.ClientSession() as s: await s.get(Config.RENDER_URL)
             except Exception: pass
             await asyncio.sleep(300)
