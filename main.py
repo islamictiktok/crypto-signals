@@ -37,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V27600.0 - 5m Donchian + ADX Lock ($100)"
+    VERSION = "V27700.0 - 5m Donchian + PA Filters ($100)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -78,7 +78,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (Donchian + SMA 200 + Volume + ADX)
+# 3. محرك الاستراتيجية (Donchian + SMA 200 + EMA 50 + Volume + PA)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -93,8 +93,9 @@ class StrategyEngine:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df) < 220: return None
             
-            # 1. Trend Filter: SMA 200
+            # 1. Trend Filters: SMA 200 & EMA 50
             df['sma_200'] = ta.sma(df['close'], length=200)
+            df['ema_50'] = ta.ema(df['close'], length=50)
 
             # 2. Donchian Channel (20)
             df['dc_upper'] = df['high'].rolling(20).max().shift(1)
@@ -105,13 +106,6 @@ class StrategyEngine:
 
             # 4. Volatility: ATR 14
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            
-            # 5. الفلتر الجديد الجبار: ADX لمعرفة قوة الترند
-            adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
-            if adx_df is not None:
-                df['adx'] = adx_df.iloc[:, 0] # نأخذ عمود ADX الأساسي
-            else:
-                df['adx'] = 0
 
             df.dropna(inplace=True)
             if len(df) < 5: return None
@@ -119,30 +113,40 @@ class StrategyEngine:
             curr = df.iloc[-2]  
             
             entry = float(curr['close'])
+            candle_open = float(curr['open'])
+            candle_high = float(curr['high'])
+            candle_low = float(curr['low'])
+            
             sma_200 = float(curr['sma_200'])
+            ema_50 = float(curr['ema_50'])
             dc_upper = float(curr['dc_upper'])
             dc_lower = float(curr['dc_lower'])
             vol = float(curr['vol'])
             vol_sma_30 = float(curr['vol_sma_30'])
             atr_val = float(curr['atr'])
-            adx_val = float(curr['adx'])
 
             setup = None
+            
+            # 👈 فلتر شمعة اليقين (Candle Conviction)
+            # التأكد أن جسم الشمعة يمثل على الأقل 50% من طولها الكلي (تجنب شموع الدوجي والخيانات)
+            candle_body = abs(entry - candle_open)
+            candle_range = candle_high - candle_low
+            is_conviction_candle = (candle_body / candle_range) >= 0.50 if candle_range > 0 else False
 
             # ==========================================
             # 🟢 شروط صفقة الشراء (LONG)
             # ==========================================
             is_above_sma = entry > sma_200
+            is_ema_aligned_up = ema_50 > sma_200 # ترند صاعد سليم
             is_dc_breakout_up = entry > dc_upper
             is_high_volume = vol > vol_sma_30
-            is_strong_trend = adx_val > 20 # شرط أن يكون الترند قوياً لتجنب التذبذب
 
-            if is_above_sma and is_dc_breakout_up and is_high_volume and is_strong_trend:
+            if is_above_sma and is_ema_aligned_up and is_dc_breakout_up and is_high_volume and is_conviction_candle:
                 sl_distance = atr_val * 2.5
                 sl = entry - sl_distance
                 
-                tp1 = entry + sl_distance         # نسبة 1:1
-                tp2 = entry + (sl_distance * 2.0) # نسبة 1:2
+                tp1 = entry + sl_distance         # الهدف الأول: 1:1
+                tp2 = entry + (sl_distance * 2.0) # الهدف الثاني: 1:2
 
                 setup = {"side": "LONG", "sl": sl, "tps": [tp1, tp2]}
 
@@ -151,14 +155,15 @@ class StrategyEngine:
             # ==========================================
             if not setup:
                 is_below_sma = entry < sma_200
+                is_ema_aligned_down = ema_50 < sma_200 # ترند هابط سليم
                 is_dc_breakout_down = entry < dc_lower
 
-                if is_below_sma and is_dc_breakout_down and is_high_volume and is_strong_trend:
+                if is_below_sma and is_ema_aligned_down and is_dc_breakout_down and is_high_volume and is_conviction_candle:
                     sl_distance = atr_val * 2.5
                     sl = entry + sl_distance
                     
-                    tp1 = entry - sl_distance         # نسبة 1:1
-                    tp2 = entry - (sl_distance * 2.0) # نسبة 1:2
+                    tp1 = entry - sl_distance         # الهدف الأول: 1:1
+                    tp2 = entry - (sl_distance * 2.0) # الهدف الثاني: 1:2
                     
                     setup = {"side": "SHORT", "sl": sl, "tps": [tp1, tp2]}
 
@@ -171,6 +176,7 @@ class StrategyEngine:
             risk_distance = abs(entry - sl)
             if risk_distance <= 0: return None
             
+            # حماية من المسافات الشاسعة
             if (risk_distance / entry) * 100 > 7.0: return None 
             
             del df
@@ -180,7 +186,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": f"Donchian (ADX:{adx_val:.0f})", 
+                "strat": "Donchian Breakout + PA", 
                 "risk_distance": risk_distance,
                 "atr": atr_val
             }
@@ -201,7 +207,7 @@ class TradingSystem:
         self.cached_valid_coins = [] 
         self.last_cache_time = 0
         self.semaphore = asyncio.Semaphore(15) 
-        self.trade_lock = asyncio.Lock() # 👈 قفل الأمان المروري لمنع فتح أكثر من 3 صفقات
+        self.trade_lock = asyncio.Lock() # 👈 قفل الأمان المروري لمنع تجاوز 3 صفقات
         
         self.stats = {"virtual_equity": 100.0, "peak_equity": 100.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "strats": {}} 
         self.running = True
@@ -209,7 +215,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nADX Filter Added | Hard Lock Active (Max 3 Trades) 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nPrice Action Filters ON | Hard Lock Active (Max 3) 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -244,6 +250,7 @@ class TradingSystem:
 
     async def process_symbol(self, sym):
         async with self.semaphore:
+            # فحص مبدئي لسرعة المعالجة
             if sym in self.active_trades or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
             try:
                 ohlcv_data = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MAIN, limit=Config.CANDLES_LIMIT)
@@ -258,34 +265,31 @@ class TradingSystem:
                 Log.print(f"⚠️ Symbol Process Error ({sym}): {e}", Log.RED)
 
     async def execute_trade(self, trade):
-        # 👈 فحص مبدئي للعدد
-        if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
-        
-        try:
-            sym = trade['symbol']
-            ticker = await fetch_with_retry(self.exchange.fetch_ticker, sym)
+        # 👈 فحص نهائي دقيق داخل القفل لتجنب فتح صفقات زائدة في نفس الثانية
+        async with self.trade_lock:
+            if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
             
-            if not ticker or 'last' not in ticker: return 
-            quote_volume = float(ticker.get('quoteVolume', 0))
-            if quote_volume < Config.MIN_24H_VOLUME_USDT: return
-
             try:
-                ask = float(ticker.get('ask'))
-                bid = float(ticker.get('bid'))
-                last = float(ticker.get('last'))
-                spread = abs(ask - bid) / last
-                if spread > Config.MAX_ALLOWED_SPREAD: return
-            except Exception: return 
-            
-            safe_entry = float(self.exchange.price_to_precision(sym, trade['entry']))
-            safe_sl = float(self.exchange.price_to_precision(sym, trade['sl']))
-            safe_tps = [float(self.exchange.price_to_precision(sym, tp)) for tp in trade['tps']]
+                sym = trade['symbol']
+                ticker = await fetch_with_retry(self.exchange.fetch_ticker, sym)
+                
+                if not ticker or 'last' not in ticker: return 
+                quote_volume = float(ticker.get('quoteVolume', 0))
+                if quote_volume < Config.MIN_24H_VOLUME_USDT: return
 
-            risk_distance = trade['risk_distance']
-            
-            # 👈 تفعيل قفل الأمان الصارم هنا قبل فتح الصفقة (يمنع التزامن الكاذب)
-            async with self.trade_lock:
-                if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
+                try:
+                    ask = float(ticker.get('ask'))
+                    bid = float(ticker.get('bid'))
+                    last = float(ticker.get('last'))
+                    spread = abs(ask - bid) / last
+                    if spread > Config.MAX_ALLOWED_SPREAD: return
+                except Exception: return 
+                
+                safe_entry = float(self.exchange.price_to_precision(sym, trade['entry']))
+                safe_sl = float(self.exchange.price_to_precision(sym, trade['sl']))
+                safe_tps = [float(self.exchange.price_to_precision(sym, tp)) for tp in trade['tps']]
+
+                risk_distance = trade['risk_distance']
                 
                 equity = self.stats['virtual_equity']
                 risk_amount = equity * (Config.RISK_PER_TRADE_PCT / 100.0) 
@@ -337,8 +341,8 @@ class TradingSystem:
                     self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
                     self.save_state() 
                     Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name} | Lev: {dynamic_lev}x", Log.GREEN)
-        except Exception as e: 
-            Log.print(f"⚠️ Execute Trade Error ({trade.get('symbol', 'Unknown')}): {e}", Log.RED)
+            except Exception as e: 
+                Log.print(f"⚠️ Execute Trade Error ({trade.get('symbol', 'Unknown')}): {e}", Log.RED)
 
     async def update_valid_coins_cache(self):
         current_ts = int(datetime.now(timezone.utc).timestamp())
@@ -360,7 +364,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 5m Donchian+ADX ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 5m Scalper ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -394,7 +398,6 @@ class TradingSystem:
                     
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
                         exit_price = current_sl
-                        
                         pos_50 = pos_size * 0.50
                         
                         if step == 0: 
@@ -416,6 +419,7 @@ class TradingSystem:
                             )
                             self._log_trade_result('break_evens', display_roe, strat_name)
 
+                        # إغلاق الصفقة وتحديث الرصيد تحت قفل الأمان
                         async with self.trade_lock:
                             self._update_equity_and_drawdown(pnl)
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
