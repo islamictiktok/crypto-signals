@@ -37,7 +37,7 @@ class Config:
     
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V27500.0 - 5m Donchian Scalper (2 Targets | $100)"
+    VERSION = "V27600.0 - 5m Donchian + ADX Lock ($100)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -78,7 +78,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (Donchian + SMA 200 + Volume)
+# 3. محرك الاستراتيجية (Donchian + SMA 200 + Volume + ADX)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -105,6 +105,13 @@ class StrategyEngine:
 
             # 4. Volatility: ATR 14
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            
+            # 5. الفلتر الجديد الجبار: ADX لمعرفة قوة الترند
+            adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
+            if adx_df is not None:
+                df['adx'] = adx_df.iloc[:, 0] # نأخذ عمود ADX الأساسي
+            else:
+                df['adx'] = 0
 
             df.dropna(inplace=True)
             if len(df) < 5: return None
@@ -118,6 +125,7 @@ class StrategyEngine:
             vol = float(curr['vol'])
             vol_sma_30 = float(curr['vol_sma_30'])
             atr_val = float(curr['atr'])
+            adx_val = float(curr['adx'])
 
             setup = None
 
@@ -127,12 +135,12 @@ class StrategyEngine:
             is_above_sma = entry > sma_200
             is_dc_breakout_up = entry > dc_upper
             is_high_volume = vol > vol_sma_30
+            is_strong_trend = adx_val > 20 # شرط أن يكون الترند قوياً لتجنب التذبذب
 
-            if is_above_sma and is_dc_breakout_up and is_high_volume:
+            if is_above_sma and is_dc_breakout_up and is_high_volume and is_strong_trend:
                 sl_distance = atr_val * 2.5
                 sl = entry - sl_distance
                 
-                # هدفين قريبين فقط
                 tp1 = entry + sl_distance         # نسبة 1:1
                 tp2 = entry + (sl_distance * 2.0) # نسبة 1:2
 
@@ -145,11 +153,10 @@ class StrategyEngine:
                 is_below_sma = entry < sma_200
                 is_dc_breakout_down = entry < dc_lower
 
-                if is_below_sma and is_dc_breakout_down and is_high_volume:
+                if is_below_sma and is_dc_breakout_down and is_high_volume and is_strong_trend:
                     sl_distance = atr_val * 2.5
                     sl = entry + sl_distance
                     
-                    # هدفين قريبين فقط
                     tp1 = entry - sl_distance         # نسبة 1:1
                     tp2 = entry - (sl_distance * 2.0) # نسبة 1:2
                     
@@ -173,7 +180,7 @@ class StrategyEngine:
                 "entry": entry, 
                 "sl": sl, 
                 "tps": tps,
-                "strat": "Donchian Breakout", 
+                "strat": f"Donchian (ADX:{adx_val:.0f})", 
                 "risk_distance": risk_distance,
                 "atr": atr_val
             }
@@ -183,7 +190,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت (Execution Engine - 2 Targets Mode)
+# 4. مدير البوت (Execution Engine - Locked Mode)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -194,15 +201,15 @@ class TradingSystem:
         self.cached_valid_coins = [] 
         self.last_cache_time = 0
         self.semaphore = asyncio.Semaphore(15) 
+        self.trade_lock = asyncio.Lock() # 👈 قفل الأمان المروري لمنع فتح أكثر من 3 صفقات
         
-        # 👈 ضبط الرصيد الافتراضي لـ 100 دولار
         self.stats = {"virtual_equity": 100.0, "peak_equity": 100.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "strats": {}} 
         self.running = True
 
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n5m Donchian Scalper | 2 Targets | $100 Equity 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nADX Filter Added | Hard Lock Active (Max 3 Trades) 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -251,6 +258,9 @@ class TradingSystem:
                 Log.print(f"⚠️ Symbol Process Error ({sym}): {e}", Log.RED)
 
     async def execute_trade(self, trade):
+        # 👈 فحص مبدئي للعدد
+        if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
+        
         try:
             sym = trade['symbol']
             ticker = await fetch_with_retry(self.exchange.fetch_ticker, sym)
@@ -273,57 +283,60 @@ class TradingSystem:
 
             risk_distance = trade['risk_distance']
             
-            equity = self.stats['virtual_equity']
-            risk_amount = equity * (Config.RISK_PER_TRADE_PCT / 100.0) 
-            
-            position_size_coins = risk_amount / risk_distance
-            
-            coin_volatility_pct = (trade['atr'] / safe_entry) * 100
-            raw_lev = Config.BASE_LEVERAGE * (1.0 / coin_volatility_pct) if coin_volatility_pct > 0 else Config.MIN_LEVERAGE
-            dynamic_lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
+            # 👈 تفعيل قفل الأمان الصارم هنا قبل فتح الصفقة (يمنع التزامن الكاذب)
+            async with self.trade_lock:
+                if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
+                
+                equity = self.stats['virtual_equity']
+                risk_amount = equity * (Config.RISK_PER_TRADE_PCT / 100.0) 
+                
+                position_size_coins = risk_amount / risk_distance
+                
+                coin_volatility_pct = (trade['atr'] / safe_entry) * 100
+                raw_lev = Config.BASE_LEVERAGE * (1.0 / coin_volatility_pct) if coin_volatility_pct > 0 else Config.MIN_LEVERAGE
+                dynamic_lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
 
-            margin_required = (position_size_coins * safe_entry) / dynamic_lev
-            if margin_required > (equity * 0.50): 
-                margin_required = equity * 0.50
-                position_size_coins = (margin_required * dynamic_lev) / safe_entry
+                margin_required = (position_size_coins * safe_entry) / dynamic_lev
+                if margin_required > (equity * 0.50): 
+                    margin_required = equity * 0.50
+                    position_size_coins = (margin_required * dynamic_lev) / safe_entry
 
-            trade['entry'] = safe_entry; trade['sl'] = safe_sl; trade['tps'] = safe_tps
-            trade['original_sl'] = safe_sl; trade['position_size'] = position_size_coins
-            trade['risk_amount'] = risk_amount; trade['leverage'] = dynamic_lev
-            trade['margin'] = margin_required 
-            
-            # الحل الذكي للتسميات
-            market_info = self.exchange.markets.get(sym, {})
-            base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
-            exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
-            
-            icon = "🟢" if trade['side'] == "LONG" else "🔴"
-            
-            targets_msg = ""
-            for idx, tp in enumerate(safe_tps):
-                tp_roe = StrategyEngine.calc_actual_roe(safe_entry, tp, trade['side'], dynamic_lev)
-                targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code> (+{tp_roe:.1f}% ROE)\n"
+                trade['entry'] = safe_entry; trade['sl'] = safe_sl; trade['tps'] = safe_tps
+                trade['original_sl'] = safe_sl; trade['position_size'] = position_size_coins
+                trade['risk_amount'] = risk_amount; trade['leverage'] = dynamic_lev
+                trade['margin'] = margin_required 
+                
+                market_info = self.exchange.markets.get(sym, {})
+                base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
+                exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
+                
+                icon = "🟢" if trade['side'] == "LONG" else "🔴"
+                
+                targets_msg = ""
+                for idx, tp in enumerate(safe_tps):
+                    tp_roe = StrategyEngine.calc_actual_roe(safe_entry, tp, trade['side'], dynamic_lev)
+                    targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{tp}</code> (+{tp_roe:.1f}% ROE)\n"
 
-            pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
+                pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
 
-            msg = (
-                f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
-                f"────────────────\n"
-                f"🛒 <b>Entry:</b> <code>{safe_entry}</code>\n"
-                f"⚖️ <b>Leverage:</b> <b>{dynamic_lev}x</b>\n"
-                f"────────────────\n"
-                f"{targets_msg}"
-                f"────────────────\n"
-                f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)"
-            )
-            
-            msg_id = await self.tg.send(msg)
-            if msg_id:
-                trade['msg_id'] = msg_id; trade['step'] = 0; trade['last_tp_hit'] = 0; trade['last_sl_price'] = safe_sl
-                self.active_trades[sym] = trade
-                self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
-                self.save_state() 
-                Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name} | Lev: {dynamic_lev}x", Log.GREEN)
+                msg = (
+                    f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
+                    f"────────────────\n"
+                    f"🛒 <b>Entry:</b> <code>{safe_entry}</code>\n"
+                    f"⚖️ <b>Leverage:</b> <b>{dynamic_lev}x</b>\n"
+                    f"────────────────\n"
+                    f"{targets_msg}"
+                    f"────────────────\n"
+                    f"🛑 <b>Stop Loss:</b> <code>{safe_sl}</code> ({pnl_sl_raw:.1f}% ROE)"
+                )
+                
+                msg_id = await self.tg.send(msg)
+                if msg_id:
+                    trade['msg_id'] = msg_id; trade['step'] = 0; trade['last_tp_hit'] = 0; trade['last_sl_price'] = safe_sl
+                    self.active_trades[sym] = trade
+                    self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
+                    self.save_state() 
+                    Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name} | Lev: {dynamic_lev}x", Log.GREEN)
         except Exception as e: 
             Log.print(f"⚠️ Execute Trade Error ({trade.get('symbol', 'Unknown')}): {e}", Log.RED)
 
@@ -347,7 +360,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 5m Scalper ON", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 5m Donchian+ADX ON", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -382,7 +395,6 @@ class TradingSystem:
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
                         exit_price = current_sl
                         
-                        # 👈 بما أن هناك هدفين، إذا ضرب الستوب في الخطوة 0 يخسر الكل، أما في الخطوة 1 يخسر المتبقي (النصف)
                         pos_50 = pos_size * 0.50
                         
                         if step == 0: 
@@ -391,7 +403,7 @@ class TradingSystem:
                             msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:+.1f}% ROE)"
                             self._log_trade_result('losses', display_roe, strat_name)
                             
-                        else: # step == 1 (أي أنه ضرب TP1 وحرك الستوب للدخول)
+                        else: 
                             pnl_tp1 = (trade['tps'][0] - entry) * pos_50 if side == "LONG" else (entry - trade['tps'][0]) * pos_50
                             pnl_rem = (exit_price - entry) * pos_50 if side == "LONG" else (entry - exit_price) * pos_50
                             pnl = pnl_tp1 + pnl_rem
@@ -404,10 +416,14 @@ class TradingSystem:
                             )
                             self._log_trade_result('break_evens', display_roe, strat_name)
 
-                        self._update_equity_and_drawdown(pnl)
-                        self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
-                        Log.print(f"Trade Closed: {sym} | Total ROE: {display_roe:+.1f}%", Log.YELLOW) 
-                        await self.tg.send(msg, trade['msg_id']); del self.active_trades[sym]; self.save_state(); continue
+                        async with self.trade_lock:
+                            self._update_equity_and_drawdown(pnl)
+                            self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
+                            Log.print(f"Trade Closed: {sym} | Total ROE: {display_roe:+.1f}%", Log.YELLOW) 
+                            await self.tg.send(msg, trade['msg_id'])
+                            if sym in self.active_trades: del self.active_trades[sym]
+                            self.save_state()
+                        continue
 
                     target = trade['tps'][step] if step < 2 else None 
                     if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
@@ -424,6 +440,9 @@ class TradingSystem:
                                 f"✂️ <b>Action:</b> Close 50% of position.\n"
                                 f"🛡️ <b>Update:</b> Move SL to Entry: <code>{trade['entry']}</code>"
                             )
+                            Log.print(f"Hit TP{trade['step']}: {sym}", Log.GREEN)
+                            await self.tg.send(msg, trade['msg_id'])
+                            self.save_state() 
                             
                         elif trade['step'] == 2: 
                             pos_50 = pos_size * 0.50
@@ -431,7 +450,6 @@ class TradingSystem:
                             pnl_2 = (current_price - entry) * pos_50 if side == "LONG" else (entry - current_price) * pos_50
                             pnl = pnl_1 + pnl_2
                             
-                            self._update_equity_and_drawdown(pnl)
                             blended_roe = (pnl / margin) * 100
                             
                             msg = (
@@ -440,12 +458,14 @@ class TradingSystem:
                                 f"✂️ <b>Action:</b> Close the remaining position. Trade Completed!"
                             )
                             self._log_trade_result('wins', blended_roe, strat_name)
-                            self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
-                            del self.active_trades[sym]
                             
-                        Log.print(f"Hit TP{trade['step']}: {sym}", Log.GREEN)
-                        await self.tg.send(msg, trade['msg_id'])
-                        self.save_state() 
+                            async with self.trade_lock:
+                                self._update_equity_and_drawdown(pnl)
+                                self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
+                                if sym in self.active_trades: del self.active_trades[sym]
+                                Log.print(f"Hit TP{trade['step']}: {sym}", Log.GREEN)
+                                await self.tg.send(msg, trade['msg_id'])
+                                self.save_state() 
             except Exception: pass
             await asyncio.sleep(2) 
 
