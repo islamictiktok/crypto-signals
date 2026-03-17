@@ -38,7 +38,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V31000.0 - Dynamic Targets (Max 10)"
+    VERSION = "V31100.0 - Dynamic Targets (Entry Bug Fixed)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -157,14 +157,14 @@ class StrategyEngine:
                     entry = curr['close']
                     sl = curr['low'] - (atr_val * 0.2) 
                     
-                    # 👈 حساب عدد الأهداف الديناميكي (بحد أقصى 10)
                     num_targets = max(1, min(10, int(pattern_height / atr_val)))
                     step_distance = pattern_height / num_targets
                     tps = [entry + (step_distance * i) for i in range(1, num_targets + 1)]
                     
                     risk = entry - sl
                     if risk > 0 and (risk / entry * 100) <= 10.0:
-                        setup = {"side": "LONG", "sl": sl, "tps": tps, "strat": pattern_name, "risk_distance": risk, "atr": atr_val}
+                        # 👈 تم إضافة entry هنا للقاموس
+                        setup = {"side": "LONG", "entry": entry, "sl": sl, "tps": tps, "strat": pattern_name, "risk_distance": risk, "atr": atr_val}
 
             # ==========================================
             # المحرك الثاني: النماذج المائلة (LONG & SHORT)
@@ -181,7 +181,6 @@ class StrategyEngine:
                 y_low_mean = np.mean(lows_series)
                 slope_low = np.sum((x - x_mean) * (lows_series - y_low_mean)) / np.sum((x - x_mean)**2)
                 
-                # 🟢 حالة الشراء: كسر ترند هابط (وتد هابط أو علم)
                 if slope_high < -0.0001: 
                     intercept_high = y_high_mean - slope_high * x_mean
                     
@@ -215,16 +214,15 @@ class StrategyEngine:
                             entry = curr['close']
                             sl = curr['low'] - (atr_val * 0.2)
                             
-                            # 👈 حساب عدد الأهداف الديناميكي (بحد أقصى 10)
                             num_targets = max(1, min(10, int(pattern_height / atr_val)))
                             step_distance = pattern_height / num_targets
                             tps = [entry + (step_distance * i) for i in range(1, num_targets + 1)]
                             
                             risk = entry - sl
                             if risk > 0 and (risk / entry * 100) <= 10.0:
-                                setup = {"side": "LONG", "sl": sl, "tps": tps, "strat": pattern_name, "risk_distance": risk, "atr": atr_val}
+                                # 👈 تم إضافة entry هنا
+                                setup = {"side": "LONG", "entry": entry, "sl": sl, "tps": tps, "strat": pattern_name, "risk_distance": risk, "atr": atr_val}
                 
-                # 🔴 حالة البيع: كسر ترند صاعد (وتد صاعد أو راية هابطة)
                 elif slope_low > 0.0001 and setup is None:
                     intercept_low = y_low_mean - slope_low * x_mean
                     
@@ -258,14 +256,14 @@ class StrategyEngine:
                             entry = curr['close']
                             sl = curr['high'] + (atr_val * 0.2)
                             
-                            # 👈 حساب عدد الأهداف الديناميكي (بحد أقصى 10)
                             num_targets = max(1, min(10, int(pattern_height / atr_val)))
                             step_distance = pattern_height / num_targets
                             tps = [entry - (step_distance * i) for i in range(1, num_targets + 1)]
                             
                             risk = sl - entry
                             if risk > 0 and (risk / entry * 100) <= 10.0:
-                                setup = {"side": "SHORT", "sl": sl, "tps": tps, "strat": pattern_name, "risk_distance": risk, "atr": atr_val}
+                                # 👈 تم إضافة entry هنا
+                                setup = {"side": "SHORT", "entry": entry, "sl": sl, "tps": tps, "strat": pattern_name, "risk_distance": risk, "atr": atr_val}
 
 
             if not setup: return None
@@ -305,7 +303,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nDynamic TPs (Max 10) Active 🎯🛡️")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nBug Fixed: Entry Price Linked! 🎯🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -397,7 +395,7 @@ class TradingSystem:
                 trade['original_sl'] = safe_sl; trade['position_size'] = position_size_coins
                 trade['risk_amount'] = risk_amount; trade['leverage'] = dynamic_lev
                 trade['margin'] = margin_required 
-                trade['realized_pnl'] = 0.0 # 👈 لتتبع الأرباح التراكمية مع كل هدف
+                trade['realized_pnl'] = 0.0 
                 
                 market_info = self.exchange.markets.get(sym, {})
                 base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
@@ -405,7 +403,6 @@ class TradingSystem:
                 
                 icon = "🟢" if trade['side'] == "LONG" else "🔴"
                 
-                # كتابة الأهداف ديناميكياً
                 targets_msg = ""
                 for idx, tp in enumerate(safe_tps):
                     tp_roe = StrategyEngine.calc_actual_roe(safe_entry, tp, trade['side'], dynamic_lev)
@@ -413,7 +410,6 @@ class TradingSystem:
 
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
 
-                # التنسيق النظيف
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
                     f"────────────────\n"
@@ -488,7 +484,7 @@ class TradingSystem:
                     margin = trade.get('margin', 1.0)
                     
                     num_tps = len(trade['tps'])
-                    pos_per_tp = pos_size / num_tps # حجم كل شريحة يغلقها البوت
+                    pos_per_tp = pos_size / num_tps 
                     realized_pnl = trade.get('realized_pnl', 0.0)
                     
                     # 🔴 ضرب الستوب لوس (أو ستوب التأمين)
@@ -529,7 +525,6 @@ class TradingSystem:
                         tp_roe = StrategyEngine.calc_actual_roe(entry, target, side, trade['leverage'])
                         
                         if new_step < num_tps:
-                            # تحريك الستوب لوس للأمان (إلى الدخول إذا ضرب الهدف الأول، أو للهدف السابق)
                             trade['last_sl_price'] = trade['entry'] if new_step == 1 else trade['tps'][new_step - 2]
                             frac = int((1 / num_tps) * 100)
                             
@@ -543,7 +538,6 @@ class TradingSystem:
                             self.save_state() 
                             
                         else:
-                            # جميع الأهداف انضربت
                             final_pnl = trade['realized_pnl']
                             display_roe = (final_pnl / margin) * 100 
                             
