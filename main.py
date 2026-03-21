@@ -25,21 +25,23 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    TF_MAIN = '4h'  
-    CANDLES_LIMIT = 200 
+    TF_MAIN = '15m'  
+    CANDLES_LIMIT = 250 # 👈 رفعنا الشموع لـ 250 لحساب متوسط 200 بدقة
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 500_000 
-    MAX_ALLOWED_SPREAD = 0.005 
+    MAX_ALLOWED_SPREAD = 0.004 
     
     RISK_PER_TRADE_PCT = 2.0    
-    MIN_LEVERAGE = 2
-    MAX_LEVERAGE_CAP = 50       
-    BASE_LEVERAGE = 10
+    MIN_LEVERAGE = 10    
+    MAX_LEVERAGE_CAP = 50 
     
-    COOLDOWN_SECONDS = 3600 
+    # 👈 الحد الأدنى لتقييم النخبة (80 من 100) لدخول الصفقة
+    MIN_GRADE_SCORE = 80.0 
+    
+    COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state.json"
-    VERSION = "V36000.0 - High Liquidity Priority"
+    VERSION = "V45000.0 - Institutional Confluence Scorer"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -80,7 +82,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (The 8 Patterns Break & Retest Engine)
+# 3. محرك الاستراتيجية (Confluence Scorer 100-Point System)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -93,232 +95,111 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 100: return None
+            if len(df) < 220: return None
             
-            df['vol_sma'] = ta.sma(df['vol'], length=30)
+            # المؤشرات الذهبية للتقييم
+            df['vol_sma'] = ta.sma(df['vol'], length=40)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            df.dropna(inplace=True)
+            df['ema_200'] = ta.ema(df['close'], length=200) # الاتجاه الكلي
+            df['rsi'] = ta.rsi(df['close'], length=14)      # الزخم
+            df['obv'] = ta.obv(df['close'], df['vol'])      # الأموال الذكية
+            df['obv_sma'] = ta.sma(df['obv'], length=20)
             
-            if len(df) < 80: return None
+            df['res_level'] = df['high'].rolling(20).max().shift(1)
+            df['sup_level'] = df['low'].rolling(20).min().shift(1)
+            
+            df.dropna(inplace=True)
+            if len(df) < 10: return None
 
             curr = df.iloc[-2] 
             
-            pattern_start = -60
-            pattern_end = -10 
-            
-            pattern_df = df.iloc[pattern_start:pattern_end].copy()
-            action_df = df.iloc[pattern_end:-1].copy()
+            # شرط السيولة المبدئي
+            vol_multiplier = curr['vol'] / max(1e-8, curr['vol_sma'])
+            if vol_multiplier < 2.5: return None 
+
+            zone_height = curr['res_level'] - curr['sup_level']
+            touch_margin = curr['atr'] * 0.5 
+            candle_range = curr['high'] - curr['low']
+            if candle_range == 0: return None
             
             setup = None
-            
-            # ==========================================
-            # المحرك الأول (أ): النماذج الأفقية الصاعدة (LONG)
-            # ==========================================
-            res_level = pattern_df['high'].max()
-            base_level = pattern_df['low'].min()
-            pattern_height = res_level - base_level
-            
-            if (pattern_height / curr['close']) * 100 > 2.0:
-                lows = []
-                window = 3
-                for i in range(window, len(pattern_df) - window):
-                    if pattern_df['low'].iloc[i] == min(pattern_df['low'].iloc[i-window:i+window+1]):
-                        lows.append(pattern_df['low'].iloc[i])
-                        
-                breakout_candle = None
-                for i in range(len(action_df)):
-                    row = action_df.iloc[i]
-                    if row['close'] > res_level and row['vol'] > (row['vol_sma'] * 1.5):
-                        breakout_candle = row
-                        break
-                        
-                if breakout_candle is not None:
-                    atr_val = curr['atr']
-                    touch_margin = atr_val * 0.5
+            FIB_LEVELS = [0.382, 0.618, 1.0, 1.272, 1.618, 2.0, 2.618, 3.0, 3.618, 4.236]
+
+            if zone_height > 0 and (zone_height / curr['close']) * 100 > 1.0:
+                
+                touched_support = curr['low'] <= (curr['sup_level'] + touch_margin)
+                is_bullish = curr['close'] > curr['open']
+                
+                # 🟢 تقييم صفقة الشراء (LONG)
+                if touched_support and is_bullish:
+                    score = 0.0
                     
-                    is_retest_touch = (curr['low'] <= res_level + touch_margin) and (curr['low'] >= res_level - touch_margin)
-                    is_bullish_bounce = curr['close'] > curr['open'] 
+                    # 1. صدمة السيولة (Max 30)
+                    score += min(30.0, vol_multiplier * 10)
                     
-                    if is_retest_touch and is_bullish_bounce:
-                        pattern_name = "Horizontal Pattern"
-                        if len(lows) >= 3:
-                            if lows[1] < lows[0] and lows[1] < lows[2]:
-                                pattern_name = "Inv Head & Shoulders"
-                            elif abs(lows[-1] - lows[-2])/max(0.0001, lows[-1]) < 0.015:
-                                pattern_name = "Triple Bottom"
-                            elif lows[0] < lows[1] < lows[2]:
-                                pattern_name = "Ascending Triangle"
-                            else:
-                                pattern_name = "Cup & Handle"
-                        elif len(lows) == 2:
-                            if abs(lows[0] - lows[1])/max(0.0001, lows[0]) < 0.015:
-                                pattern_name = "Double Bottom"
-                            else:
-                                pattern_name = "Cup & Handle"
-                                
+                    # 2. الاتجاه الكلي (Max 20)
+                    if curr['close'] > curr['ema_200']: score += 20.0
+                    
+                    # 3. جودة الزخم (Max 20)
+                    if 50 < curr['rsi'] < 75: score += 20.0
+                    elif curr['rsi'] >= 75: score += 10.0 # تشبع لكن قوي
+                    
+                    # 4. الأموال الذكية (Max 20)
+                    if curr['obv'] > curr['obv_sma']: score += 20.0
+                    
+                    # 5. تشريح ذيل الشمعة لرفض الدعم (Max 10)
+                    lower_wick = min(curr['open'], curr['close']) - curr['low']
+                    if (lower_wick / candle_range) >= 0.3: score += 10.0
+
+                    if score >= Config.MIN_GRADE_SCORE:
                         entry = curr['close']
-                        sl = curr['low'] - (atr_val * 0.2) 
-                        num_targets = max(1, min(10, int(pattern_height / atr_val)))
-                        step_distance = pattern_height / num_targets
-                        tps = [entry + (step_distance * i) for i in range(1, num_targets + 1)]
-                        
+                        sl = curr['sup_level'] - (curr['atr'] * 0.2) 
                         risk = entry - sl
-                        if risk > 0 and (risk / entry * 100) <= 15.0:
-                            setup = {"side": "LONG", "entry": entry, "sl": sl, "tps": tps, "strat": pattern_name, "risk_distance": risk, "atr": atr_val}
+                        
+                        if risk > 0 and (risk / entry * 100) <= 5.0: 
+                            num_targets = max(1, min(10, int(zone_height / (curr['atr'] * 0.8))))
+                            tps = [entry + (zone_height * fib) for fib in FIB_LEVELS[:num_targets]]
+                            
+                            grade = "A+" if score >= 90 else "A"
+                            setup = {"side": "LONG", "entry": entry, "sl": sl, "tps": tps, "strat": "Point Zero", "risk_distance": risk, "atr": curr['atr'], "score": score, "grade": grade}
 
-            # ==========================================
-            # المحرك الأول (ب): النماذج الأفقية الهابطة (SHORT)
-            # ==========================================
-            if setup is None and (pattern_height / curr['close']) * 100 > 2.0:
-                highs = []
-                window = 3
-                for i in range(window, len(pattern_df) - window):
-                    if pattern_df['high'].iloc[i] == max(pattern_df['high'].iloc[i-window:i+window+1]):
-                        highs.append(pattern_df['high'].iloc[i])
-                        
-                breakdown_candle = None
-                for i in range(len(action_df)):
-                    row = action_df.iloc[i]
-                    if row['close'] < base_level and row['vol'] > (row['vol_sma'] * 1.5):
-                        breakdown_candle = row
-                        break
-                        
-                if breakdown_candle is not None:
-                    atr_val = curr['atr']
-                    touch_margin = atr_val * 0.5
+                # 🔴 تقييم صفقة البيع (SHORT)
+                touched_resistance = curr['high'] >= (curr['res_level'] - touch_margin)
+                is_bearish = curr['close'] < curr['open']
+                
+                if touched_resistance and is_bearish and setup is None:
+                    score = 0.0
                     
-                    is_retest_touch = (curr['high'] >= base_level - touch_margin) and (curr['high'] <= base_level + touch_margin)
-                    is_bearish_bounce = curr['close'] < curr['open'] 
+                    # 1. صدمة السيولة (Max 30)
+                    score += min(30.0, vol_multiplier * 10)
                     
-                    if is_retest_touch and is_bearish_bounce:
-                        pattern_name = "Horizontal Pattern"
-                        if len(highs) >= 3:
-                            if highs[1] > highs[0] and highs[1] > highs[2]:
-                                pattern_name = "Head & Shoulders"
-                            elif abs(highs[-1] - highs[-2])/max(0.0001, highs[-1]) < 0.015:
-                                pattern_name = "Triple Top"
-                            elif highs[0] > highs[1] > highs[2]:
-                                pattern_name = "Descending Triangle"
-                            else:
-                                pattern_name = "Inv Cup & Handle"
-                        elif len(highs) == 2:
-                            if abs(highs[0] - highs[1])/max(0.0001, highs[0]) < 0.015:
-                                pattern_name = "Double Top"
-                            else:
-                                pattern_name = "Inv Cup & Handle"
-                                
+                    # 2. الاتجاه الكلي (Max 20)
+                    if curr['close'] < curr['ema_200']: score += 20.0
+                    
+                    # 3. جودة الزخم (Max 20)
+                    if 25 < curr['rsi'] < 50: score += 20.0
+                    elif curr['rsi'] <= 25: score += 10.0 # تشبع بيعي
+                    
+                    # 4. الأموال الذكية (Max 20)
+                    if curr['obv'] < curr['obv_sma']: score += 20.0
+                    
+                    # 5. تشريح ذيل الشمعة لرفض المقاومة (Max 10)
+                    upper_wick = curr['high'] - max(curr['open'], curr['close'])
+                    if (upper_wick / candle_range) >= 0.3: score += 10.0
+
+                    if score >= Config.MIN_GRADE_SCORE:
                         entry = curr['close']
-                        sl = curr['high'] + (atr_val * 0.2) 
-                        num_targets = max(1, min(10, int(pattern_height / atr_val)))
-                        step_distance = pattern_height / num_targets
-                        tps = [entry - (step_distance * i) for i in range(1, num_targets + 1)]
-                        
+                        sl = curr['res_level'] + (curr['atr'] * 0.2) 
                         risk = sl - entry
-                        if risk > 0 and (risk / entry * 100) <= 15.0:
-                            setup = {"side": "SHORT", "entry": entry, "sl": sl, "tps": tps, "strat": pattern_name, "risk_distance": risk, "atr": atr_val}
+                        
+                        if risk > 0 and (risk / entry * 100) <= 5.0:
+                            num_targets = max(1, min(10, int(zone_height / (curr['atr'] * 0.8))))
+                            tps = [entry - (zone_height * fib) for fib in FIB_LEVELS[:num_targets]]
+                            
+                            grade = "A+" if score >= 90 else "A"
+                            setup = {"side": "SHORT", "entry": entry, "sl": sl, "tps": tps, "strat": "Point Zero", "risk_distance": risk, "atr": curr['atr'], "score": score, "grade": grade}
 
-            # ==========================================
-            # المحرك الثاني: النماذج المائلة (LONG & SHORT)
-            # ==========================================
-            if setup is None:
-                highs_series = pattern_df['high'].values
-                lows_series = pattern_df['low'].values
-                x = np.arange(len(highs_series))
-                
-                x_mean = np.mean(x)
-                y_high_mean = np.mean(highs_series)
-                slope_high = np.sum((x - x_mean) * (highs_series - y_high_mean)) / max(1e-8, np.sum((x - x_mean)**2))
-                
-                y_low_mean = np.mean(lows_series)
-                slope_low = np.sum((x - x_mean) * (lows_series - y_low_mean)) / max(1e-8, np.sum((x - x_mean)**2))
-                
-                pattern_height = np.max(highs_series) - np.min(lows_series)
-                
-                # 🟢 شراء (كسر مقاومة مائلة لأسفل)
-                if slope_high < -0.0001: 
-                    intercept_high = y_high_mean - slope_high * x_mean
-                    
-                    if (pattern_height / curr['close']) * 100 > 2.0: 
-                        breakout_candle = None
-                        for i in range(len(action_df)):
-                            idx = i + len(pattern_df) 
-                            dynamic_res = intercept_high + slope_high * idx
-                            row = action_df.iloc[i]
-                            
-                            if row['close'] > dynamic_res and row['vol'] > (row['vol_sma'] * 1.5):
-                                breakout_candle = row
-                                break
-                                
-                        if breakout_candle is not None:
-                            curr_x = len(pattern_df) + len(action_df) - 1
-                            dynamic_res_now = intercept_high + slope_high * curr_x
-                            atr_val = curr['atr']
-                            
-                            is_retest_touch = (curr['low'] <= dynamic_res_now + atr_val*0.5) and (curr['low'] >= dynamic_res_now - atr_val*0.5)
-                            is_bullish_bounce = curr['close'] > curr['open']
-                            
-                            if is_retest_touch and is_bullish_bounce:
-                                pattern_name = "Sloping Pattern"
-                                if slope_low < -0.0001:
-                                    if abs(slope_high - slope_low) < abs(slope_high) * 0.3:
-                                        pattern_name = "Bull Flag"
-                                    else:
-                                        pattern_name = "Descending Wedge"
-                                        
-                                entry = curr['close']
-                                sl = curr['low'] - (atr_val * 0.2)
-                                
-                                num_targets = max(1, min(10, int(pattern_height / atr_val)))
-                                step_distance = pattern_height / num_targets
-                                tps = [entry + (step_distance * i) for i in range(1, num_targets + 1)]
-                                
-                                risk = entry - sl
-                                if risk > 0 and (risk / entry * 100) <= 15.0:
-                                    setup = {"side": "LONG", "entry": entry, "sl": sl, "tps": tps, "strat": pattern_name, "risk_distance": risk, "atr": atr_val}
-                
-                # 🔴 بيع (كسر دعم مائل لأعلى)
-                elif slope_low > 0.0001 and setup is None:
-                    intercept_low = y_low_mean - slope_low * x_mean
-                    
-                    if (pattern_height / curr['close']) * 100 > 2.0: 
-                        breakdown_candle = None
-                        for i in range(len(action_df)):
-                            idx = i + len(pattern_df) 
-                            dynamic_supp = intercept_low + slope_low * idx
-                            row = action_df.iloc[i]
-                            
-                            if row['close'] < dynamic_supp and row['vol'] > (row['vol_sma'] * 1.5):
-                                breakdown_candle = row
-                                break
-                                
-                        if breakdown_candle is not None:
-                            curr_x = len(pattern_df) + len(action_df) - 1
-                            dynamic_supp_now = intercept_low + slope_low * curr_x
-                            atr_val = curr['atr']
-                            
-                            is_retest_touch = (curr['high'] >= dynamic_supp_now - atr_val*0.5) and (curr['high'] <= dynamic_supp_now + atr_val*0.5)
-                            is_bearish_bounce = curr['close'] < curr['open']
-                            
-                            if is_retest_touch and is_bearish_bounce:
-                                pattern_name = "Sloping Pattern"
-                                if slope_high > 0.0001:
-                                    if abs(slope_high - slope_low) < abs(slope_low) * 0.3:
-                                        pattern_name = "Bear Flag"
-                                    else:
-                                        pattern_name = "Rising Wedge"
-                                        
-                                entry = curr['close']
-                                sl = curr['high'] + (atr_val * 0.2)
-                                
-                                num_targets = max(1, min(10, int(pattern_height / atr_val)))
-                                step_distance = pattern_height / num_targets
-                                tps = [entry - (step_distance * i) for i in range(1, num_targets + 1)]
-                                
-                                risk = sl - entry
-                                if risk > 0 and (risk / entry * 100) <= 15.0:
-                                    setup = {"side": "SHORT", "entry": entry, "sl": sl, "tps": tps, "strat": pattern_name, "risk_distance": risk, "atr": atr_val}
-
-            del df, pattern_df, action_df
+            del df
             
             if not setup: return None
 
@@ -330,15 +211,16 @@ class StrategyEngine:
                 "tps": setup["tps"],
                 "strat": setup["strat"], 
                 "risk_distance": setup["risk_distance"],
-                "atr": setup["atr"]
+                "atr": setup["atr"],
+                "score": setup["score"],
+                "grade": setup["grade"]
             }
 
         except Exception as e:
-            Log.print(f"⚠️ Strategy Analysis Error on {symbol}: {e}", Log.RED)
             return None
 
 # ==========================================
-# 4. مدير البوت (Execution Engine - Highly Optimized)
+# 4. مدير البوت (Execution Engine - Instant Eval)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -357,7 +239,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nHigh Liquidity Scanning Priority Active! 🏆")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n100-Point Confluence Engine Active! Only Grade A trades allowed. 🎓💎")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -390,6 +272,7 @@ class TradingSystem:
         self.stats['strats'][strat_name][result_type] += 1
         self.stats['all_time']['total_roe'] += roe_val; self.stats['daily']['total_roe'] += roe_val; self.stats['strats'][strat_name]['total_roe'] += roe_val
 
+    # التنفيذ اللحظي السريع
     async def process_symbol(self, sym):
         async with self.semaphore:
             if sym in self.active_trades or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
@@ -400,10 +283,12 @@ class TradingSystem:
                 res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_data)
                 
                 if res: 
+                    # الدخول الفوري لأن دالة التقييم قامت بتصفية الصفقات القوية (فوق 80)
+                    Log.print(f"🌟 Grade {res['grade']} Match: {sym} (Score {res['score']:.1f}/100). Executing instantly!", Log.GREEN)
                     await self.execute_trade(res)
 
             except Exception as e: 
-                Log.print(f"⚠️ Symbol Process Error ({sym}): {e}", Log.RED)
+                pass
 
     async def execute_trade(self, trade):
         async with self.trade_lock:
@@ -436,8 +321,12 @@ class TradingSystem:
                 
                 position_size_coins = risk_amount / risk_distance
                 
-                coin_volatility_pct = (trade['atr'] / safe_entry) * 100
-                raw_lev = Config.BASE_LEVERAGE * (1.0 / coin_volatility_pct) if coin_volatility_pct > 0 else Config.MIN_LEVERAGE
+                sl_distance_pct = (risk_distance / safe_entry) * 100
+                if sl_distance_pct > 0:
+                    raw_lev = 40.0 / sl_distance_pct 
+                else:
+                    raw_lev = Config.MIN_LEVERAGE
+                    
                 dynamic_lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
 
                 margin_required = (position_size_coins * safe_entry) / dynamic_lev
@@ -463,9 +352,11 @@ class TradingSystem:
 
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
 
+                # رسالة احترافية تظهر درجة التقييم
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
                     f"────────────────\n"
+                    f"🏆 <b>Grade: {trade['grade']}</b> ({trade['score']:.1f}/100)\n"
                     f"🛒 <b>Entry:</b> <code>{safe_entry}</code>\n"
                     f"⚖️ <b>Leverage:</b> <b>{dynamic_lev}x</b>\n"
                     f"────────────────\n"
@@ -480,7 +371,6 @@ class TradingSystem:
                     self.active_trades[sym] = trade
                     self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
                     self.save_state() 
-                    Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name} | {len(safe_tps)} Targets", Log.GREEN)
             except Exception as e: 
                 Log.print(f"⚠️ Execute Trade Error ({trade.get('symbol', 'Unknown')}): {e}", Log.RED)
 
@@ -496,7 +386,6 @@ class TradingSystem:
                 tickers = await fetch_with_retry(self.exchange.fetch_tickers)
                 if not tickers: return
                 
-                # 👈 التعديل العبقري: ترتيب العملات بحسب السيولة (الأضخم أولاً)
                 valid_coins_with_vol = []
                 for sym, d in tickers.items():
                     if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
@@ -504,14 +393,11 @@ class TradingSystem:
                         if vol >= Config.MIN_24H_VOLUME_USDT:
                             valid_coins_with_vol.append((sym, vol))
                 
-                # الترتيب التنازلي
                 valid_coins_with_vol.sort(key=lambda x: x[1], reverse=True)
-                
-                # استخراج الرموز فقط بعد الترتيب
                 self.cached_valid_coins = [x[0] for x in valid_coins_with_vol]
                 
                 if self.cached_valid_coins: self.last_cache_time = current_ts
-                Log.print(f"🔄 Coins Cache Updated. Valid Pairs: {len(self.cached_valid_coins)} (Sorted by Vol)", Log.BLUE)
+                Log.print(f"🔄 Coins Cache Updated. Valid Pairs: {len(self.cached_valid_coins)}", Log.BLUE)
             except Exception: pass
 
     async def scan_market(self):
@@ -523,17 +409,20 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | High Liquidity First 🥇", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Institutional Confluence Filter 🧠", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
+                    if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break 
+                    
                     chunk = scan_list[i:i+chunk_size]
                     tasks = [self.process_symbol(sym) for sym in chunk]
-                    await asyncio.gather(*tasks); await asyncio.sleep(1) 
+                    await asyncio.gather(*tasks)
+                    await asyncio.sleep(1) 
                 
                 Log.print("✅ [RADAR] Cycle Complete. Resting & Cleaning RAM...", Log.BLUE)
                 gc.collect() 
-                await asyncio.sleep(15) 
+                await asyncio.sleep(10) 
             except Exception: await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
@@ -609,8 +498,7 @@ class TradingSystem:
                             
                             msg = (
                                 f"🏆 <b>ALL {num_tps} TARGETS SMASHED!</b> 🏦\n"
-                                f"💰 <b>Total Bagged:</b> +{display_roe:.1f}% ROE\n"
-                                f"✂️ <b>Action:</b> Close 100% of position. Trade Completed!"
+                                f"💰 <b>Total Bagged:</b> +{display_roe:.1f}% ROE"
                             )
                             self._log_trade_result('wins', display_roe, strat_name)
                             
