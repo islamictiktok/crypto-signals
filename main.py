@@ -25,8 +25,8 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    TF_MAIN = '15m'  
-    CANDLES_LIMIT = 250 # 👈 رفعنا الشموع لـ 250 لحساب متوسط 200 بدقة
+    TF_MAIN = '1h'  # 👈 فريم 1 ساعة هو الأقوى والأدق لاستراتيجية دونشين
+    CANDLES_LIMIT = 250 
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 500_000 
@@ -36,12 +36,9 @@ class Config:
     MIN_LEVERAGE = 10    
     MAX_LEVERAGE_CAP = 50 
     
-    # 👈 الحد الأدنى لتقييم النخبة (80 من 100) لدخول الصفقة
-    MIN_GRADE_SCORE = 80.0 
-    
-    COOLDOWN_SECONDS = 1800 
+    COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V45000.0 - Institutional Confluence Scorer"
+    VERSION = "V46000.0 - Advanced Donchian Dynamics"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -82,7 +79,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (Confluence Scorer 100-Point System)
+# 3. محرك الاستراتيجية (Advanced Donchian Channel)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -97,107 +94,75 @@ class StrategyEngine:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df) < 220: return None
             
-            # المؤشرات الذهبية للتقييم
+            # المؤشرات المساعدة
             df['vol_sma'] = ta.sma(df['vol'], length=40)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            df['ema_200'] = ta.ema(df['close'], length=200) # الاتجاه الكلي
-            df['rsi'] = ta.rsi(df['close'], length=14)      # الزخم
-            df['obv'] = ta.obv(df['close'], df['vol'])      # الأموال الذكية
-            df['obv_sma'] = ta.sma(df['obv'], length=20)
+            df['ema_200'] = ta.ema(df['close'], length=200) # فلتر الاتجاه الصارم
             
-            df['res_level'] = df['high'].rolling(20).max().shift(1)
-            df['sup_level'] = df['low'].rolling(20).min().shift(1)
+            # 👈 برمجة قنوات دونشين (Donchian Channels - 20 Periods)
+            donchian_period = 20
+            df['DCU'] = df['high'].rolling(donchian_period).max().shift(1) # السقف
+            df['DCL'] = df['low'].rolling(donchian_period).min().shift(1)  # الأرضية
+            df['DCM'] = (df['DCU'] + df['DCL']) / 2.0                      # خط المنتصف
             
             df.dropna(inplace=True)
             if len(df) < 10: return None
 
-            curr = df.iloc[-2] 
-            
-            # شرط السيولة المبدئي
-            vol_multiplier = curr['vol'] / max(1e-8, curr['vol_sma'])
-            if vol_multiplier < 2.5: return None 
-
-            zone_height = curr['res_level'] - curr['sup_level']
-            touch_margin = curr['atr'] * 0.5 
-            candle_range = curr['high'] - curr['low']
-            if candle_range == 0: return None
+            curr = df.iloc[-2] # إغلاق الشمعة الحالية
+            prev = df.iloc[-3] # الشمعة السابقة
             
             setup = None
-            FIB_LEVELS = [0.382, 0.618, 1.0, 1.272, 1.618, 2.0, 2.618, 3.0, 3.618, 4.236]
+            
+            # عرض قناة دونشين = المسافة بين السقف والأرضية
+            channel_width = curr['DCU'] - curr['DCL']
+            if channel_width <= 0: return None
 
-            if zone_height > 0 and (zone_height / curr['close']) * 100 > 1.0:
+            # 🟢 استراتيجية الشراء (Long Donchian Breakout)
+            # الشرط: السعر يكسر سقف القناة + فوق متوسط 200 + فوليوم عالي
+            is_long_breakout = curr['close'] > curr['DCU'] and prev['close'] <= prev['DCU']
+            is_uptrend = curr['close'] > curr['ema_200']
+            has_volume = curr['vol'] > (curr['vol_sma'] * 1.5)
+            
+            if is_long_breakout and is_uptrend and has_volume:
+                entry = curr['close']
+                # الستوب هو خط منتصف القناة (كسر المنتصف يعني فشل الاختراق)
+                sl = curr['DCM'] 
+                risk = entry - sl
                 
-                touched_support = curr['low'] <= (curr['sup_level'] + touch_margin)
-                is_bullish = curr['close'] > curr['open']
+                if risk > 0 and (risk / entry * 100) <= 8.0: 
+                    # 👈 الأهداف الديناميكية: نقسم عرض القناة على تذبذب الـ ATR (بحد أقصى 10 أهداف)
+                    num_targets = max(1, min(10, int(channel_width / curr['atr'])))
+                    step_distance = channel_width / num_targets
+                    
+                    tps = [entry + (step_distance * i) for i in range(1, num_targets + 1)]
+                    
+                    setup = {
+                        "side": "LONG", "entry": entry, "sl": sl, "tps": tps, 
+                        "strat": "Donchian Breakout 🐢🚀", "risk_distance": risk, "atr": curr['atr']
+                    }
+
+            # 🔴 استراتيجية البيع (Short Donchian Breakdown)
+            # الشرط: السعر يكسر أرضية القناة + تحت متوسط 200 + فوليوم عالي
+            is_short_breakdown = curr['close'] < curr['DCL'] and prev['close'] >= prev['DCL']
+            is_downtrend = curr['close'] < curr['ema_200']
+            
+            if setup is None and is_short_breakdown and is_downtrend and has_volume:
+                entry = curr['close']
+                # الستوب هو خط منتصف القناة
+                sl = curr['DCM'] 
+                risk = sl - entry
                 
-                # 🟢 تقييم صفقة الشراء (LONG)
-                if touched_support and is_bullish:
-                    score = 0.0
+                if risk > 0 and (risk / entry * 100) <= 8.0:
+                    # 👈 الأهداف الديناميكية (من 1 إلى 10)
+                    num_targets = max(1, min(10, int(channel_width / curr['atr'])))
+                    step_distance = channel_width / num_targets
                     
-                    # 1. صدمة السيولة (Max 30)
-                    score += min(30.0, vol_multiplier * 10)
+                    tps = [entry - (step_distance * i) for i in range(1, num_targets + 1)]
                     
-                    # 2. الاتجاه الكلي (Max 20)
-                    if curr['close'] > curr['ema_200']: score += 20.0
-                    
-                    # 3. جودة الزخم (Max 20)
-                    if 50 < curr['rsi'] < 75: score += 20.0
-                    elif curr['rsi'] >= 75: score += 10.0 # تشبع لكن قوي
-                    
-                    # 4. الأموال الذكية (Max 20)
-                    if curr['obv'] > curr['obv_sma']: score += 20.0
-                    
-                    # 5. تشريح ذيل الشمعة لرفض الدعم (Max 10)
-                    lower_wick = min(curr['open'], curr['close']) - curr['low']
-                    if (lower_wick / candle_range) >= 0.3: score += 10.0
-
-                    if score >= Config.MIN_GRADE_SCORE:
-                        entry = curr['close']
-                        sl = curr['sup_level'] - (curr['atr'] * 0.2) 
-                        risk = entry - sl
-                        
-                        if risk > 0 and (risk / entry * 100) <= 5.0: 
-                            num_targets = max(1, min(10, int(zone_height / (curr['atr'] * 0.8))))
-                            tps = [entry + (zone_height * fib) for fib in FIB_LEVELS[:num_targets]]
-                            
-                            grade = "A+" if score >= 90 else "A"
-                            setup = {"side": "LONG", "entry": entry, "sl": sl, "tps": tps, "strat": "Point Zero", "risk_distance": risk, "atr": curr['atr'], "score": score, "grade": grade}
-
-                # 🔴 تقييم صفقة البيع (SHORT)
-                touched_resistance = curr['high'] >= (curr['res_level'] - touch_margin)
-                is_bearish = curr['close'] < curr['open']
-                
-                if touched_resistance and is_bearish and setup is None:
-                    score = 0.0
-                    
-                    # 1. صدمة السيولة (Max 30)
-                    score += min(30.0, vol_multiplier * 10)
-                    
-                    # 2. الاتجاه الكلي (Max 20)
-                    if curr['close'] < curr['ema_200']: score += 20.0
-                    
-                    # 3. جودة الزخم (Max 20)
-                    if 25 < curr['rsi'] < 50: score += 20.0
-                    elif curr['rsi'] <= 25: score += 10.0 # تشبع بيعي
-                    
-                    # 4. الأموال الذكية (Max 20)
-                    if curr['obv'] < curr['obv_sma']: score += 20.0
-                    
-                    # 5. تشريح ذيل الشمعة لرفض المقاومة (Max 10)
-                    upper_wick = curr['high'] - max(curr['open'], curr['close'])
-                    if (upper_wick / candle_range) >= 0.3: score += 10.0
-
-                    if score >= Config.MIN_GRADE_SCORE:
-                        entry = curr['close']
-                        sl = curr['res_level'] + (curr['atr'] * 0.2) 
-                        risk = sl - entry
-                        
-                        if risk > 0 and (risk / entry * 100) <= 5.0:
-                            num_targets = max(1, min(10, int(zone_height / (curr['atr'] * 0.8))))
-                            tps = [entry - (zone_height * fib) for fib in FIB_LEVELS[:num_targets]]
-                            
-                            grade = "A+" if score >= 90 else "A"
-                            setup = {"side": "SHORT", "entry": entry, "sl": sl, "tps": tps, "strat": "Point Zero", "risk_distance": risk, "atr": curr['atr'], "score": score, "grade": grade}
+                    setup = {
+                        "side": "SHORT", "entry": entry, "sl": sl, "tps": tps, 
+                        "strat": "Donchian Breakdown 🐢🩸", "risk_distance": risk, "atr": curr['atr']
+                    }
 
             del df
             
@@ -211,9 +176,7 @@ class StrategyEngine:
                 "tps": setup["tps"],
                 "strat": setup["strat"], 
                 "risk_distance": setup["risk_distance"],
-                "atr": setup["atr"],
-                "score": setup["score"],
-                "grade": setup["grade"]
+                "atr": setup["atr"]
             }
 
         except Exception as e:
@@ -239,7 +202,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n100-Point Confluence Engine Active! Only Grade A trades allowed. 🎓💎")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nAdvanced Donchian Channels Active 🐢📈")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -272,7 +235,7 @@ class TradingSystem:
         self.stats['strats'][strat_name][result_type] += 1
         self.stats['all_time']['total_roe'] += roe_val; self.stats['daily']['total_roe'] += roe_val; self.stats['strats'][strat_name]['total_roe'] += roe_val
 
-    # التنفيذ اللحظي السريع
+    # التنفيذ اللحظي المباشر بمجرد اختراق دونشين
     async def process_symbol(self, sym):
         async with self.semaphore:
             if sym in self.active_trades or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
@@ -283,8 +246,7 @@ class TradingSystem:
                 res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_data)
                 
                 if res: 
-                    # الدخول الفوري لأن دالة التقييم قامت بتصفية الصفقات القوية (فوق 80)
-                    Log.print(f"🌟 Grade {res['grade']} Match: {sym} (Score {res['score']:.1f}/100). Executing instantly!", Log.GREEN)
+                    Log.print(f"🌟 Donchian Breakout: {sym}. Executing instantly!", Log.GREEN)
                     await self.execute_trade(res)
 
             except Exception as e: 
@@ -352,11 +314,10 @@ class TradingSystem:
 
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
 
-                # رسالة احترافية تظهر درجة التقييم
+                # رسالة احترافية ونظيفة جداً
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
                     f"────────────────\n"
-                    f"🏆 <b>Grade: {trade['grade']}</b> ({trade['score']:.1f}/100)\n"
                     f"🛒 <b>Entry:</b> <code>{safe_entry}</code>\n"
                     f"⚖️ <b>Leverage:</b> <b>{dynamic_lev}x</b>\n"
                     f"────────────────\n"
@@ -409,7 +370,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Institutional Confluence Filter 🧠", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Donchian Master 🐢", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
