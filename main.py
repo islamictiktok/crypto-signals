@@ -25,7 +25,7 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    TF_MAIN = '1h'  # 👈 فريم 1 ساعة هو الأقوى والأدق لاستراتيجية دونشين
+    TF_MAIN = '30m'  # 👈 تم التغيير لفريم 30 دقيقة الذهبي
     CANDLES_LIMIT = 250 
     
     MAX_TRADES_AT_ONCE = 3  
@@ -38,7 +38,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V46000.0 - Advanced Donchian Dynamics"
+    VERSION = "V47000.0 - 30m Donchian & ATR Trailing"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -94,46 +94,37 @@ class StrategyEngine:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df) < 220: return None
             
-            # المؤشرات المساعدة
             df['vol_sma'] = ta.sma(df['vol'], length=40)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            df['ema_200'] = ta.ema(df['close'], length=200) # فلتر الاتجاه الصارم
+            df['ema_200'] = ta.ema(df['close'], length=200) 
             
-            # 👈 برمجة قنوات دونشين (Donchian Channels - 20 Periods)
             donchian_period = 20
-            df['DCU'] = df['high'].rolling(donchian_period).max().shift(1) # السقف
-            df['DCL'] = df['low'].rolling(donchian_period).min().shift(1)  # الأرضية
-            df['DCM'] = (df['DCU'] + df['DCL']) / 2.0                      # خط المنتصف
+            df['DCU'] = df['high'].rolling(donchian_period).max().shift(1) 
+            df['DCL'] = df['low'].rolling(donchian_period).min().shift(1)  
+            df['DCM'] = (df['DCU'] + df['DCL']) / 2.0                      
             
             df.dropna(inplace=True)
             if len(df) < 10: return None
 
-            curr = df.iloc[-2] # إغلاق الشمعة الحالية
-            prev = df.iloc[-3] # الشمعة السابقة
+            curr = df.iloc[-2] 
+            prev = df.iloc[-3] 
             
             setup = None
-            
-            # عرض قناة دونشين = المسافة بين السقف والأرضية
             channel_width = curr['DCU'] - curr['DCL']
             if channel_width <= 0: return None
 
-            # 🟢 استراتيجية الشراء (Long Donchian Breakout)
-            # الشرط: السعر يكسر سقف القناة + فوق متوسط 200 + فوليوم عالي
             is_long_breakout = curr['close'] > curr['DCU'] and prev['close'] <= prev['DCU']
             is_uptrend = curr['close'] > curr['ema_200']
             has_volume = curr['vol'] > (curr['vol_sma'] * 1.5)
             
             if is_long_breakout and is_uptrend and has_volume:
                 entry = curr['close']
-                # الستوب هو خط منتصف القناة (كسر المنتصف يعني فشل الاختراق)
                 sl = curr['DCM'] 
                 risk = entry - sl
                 
                 if risk > 0 and (risk / entry * 100) <= 8.0: 
-                    # 👈 الأهداف الديناميكية: نقسم عرض القناة على تذبذب الـ ATR (بحد أقصى 10 أهداف)
                     num_targets = max(1, min(10, int(channel_width / curr['atr'])))
                     step_distance = channel_width / num_targets
-                    
                     tps = [entry + (step_distance * i) for i in range(1, num_targets + 1)]
                     
                     setup = {
@@ -141,22 +132,17 @@ class StrategyEngine:
                         "strat": "Donchian Breakout 🐢🚀", "risk_distance": risk, "atr": curr['atr']
                     }
 
-            # 🔴 استراتيجية البيع (Short Donchian Breakdown)
-            # الشرط: السعر يكسر أرضية القناة + تحت متوسط 200 + فوليوم عالي
             is_short_breakdown = curr['close'] < curr['DCL'] and prev['close'] >= prev['DCL']
             is_downtrend = curr['close'] < curr['ema_200']
             
             if setup is None and is_short_breakdown and is_downtrend and has_volume:
                 entry = curr['close']
-                # الستوب هو خط منتصف القناة
                 sl = curr['DCM'] 
                 risk = sl - entry
                 
                 if risk > 0 and (risk / entry * 100) <= 8.0:
-                    # 👈 الأهداف الديناميكية (من 1 إلى 10)
                     num_targets = max(1, min(10, int(channel_width / curr['atr'])))
                     step_distance = channel_width / num_targets
-                    
                     tps = [entry - (step_distance * i) for i in range(1, num_targets + 1)]
                     
                     setup = {
@@ -183,7 +169,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت (Execution Engine - Instant Eval)
+# 4. مدير البوت (Execution Engine - Smart ATR Trailing)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -202,7 +188,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nAdvanced Donchian Channels Active 🐢📈")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\n30m Active | Smart ATR Trailing Stop ON 🛡️🧠")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -235,7 +221,6 @@ class TradingSystem:
         self.stats['strats'][strat_name][result_type] += 1
         self.stats['all_time']['total_roe'] += roe_val; self.stats['daily']['total_roe'] += roe_val; self.stats['strats'][strat_name]['total_roe'] += roe_val
 
-    # التنفيذ اللحظي المباشر بمجرد اختراق دونشين
     async def process_symbol(self, sym):
         async with self.semaphore:
             if sym in self.active_trades or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
@@ -314,7 +299,6 @@ class TradingSystem:
 
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
 
-                # رسالة احترافية ونظيفة جداً
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
                     f"────────────────\n"
@@ -370,7 +354,7 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Donchian Master 🐢", Log.BLUE)
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | 30m Donchian 🐢", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
@@ -442,14 +426,39 @@ class TradingSystem:
                         tp_roe = StrategyEngine.calc_actual_roe(entry, target, side, trade['leverage'])
                         
                         if new_step < num_tps:
-                            proposed_sl = trade['entry'] if new_step == 1 else trade['tps'][new_step - 2]
-                            trade['last_sl_price'] = proposed_sl
+                            # 👈 تقنية قرار رفع الستوب لوس بذكاء (مساحة التنفس ATR Pullback Filter)
+                            atr_val = trade['atr']
+                            moved = False
                             
+                            if side == "LONG":
+                                ideal_sl = target - (atr_val * 1.5) # مساحة أمان قدرها 1.5 ATR
+                                proposed_sl = max(entry, ideal_sl) if new_step == 1 else ideal_sl
+                                safe_sl = max(trade['last_sl_price'], proposed_sl)
+                                
+                                if safe_sl > trade['last_sl_price'] + (atr_val * 0.05): # تأكيد الرفع المنطقي
+                                    trade['last_sl_price'] = safe_sl
+                                    moved = True
+                                    
+                            else: # SHORT
+                                ideal_sl = target + (atr_val * 1.5)
+                                proposed_sl = min(entry, ideal_sl) if new_step == 1 else ideal_sl
+                                safe_sl = min(trade['last_sl_price'], proposed_sl)
+                                
+                                if safe_sl < trade['last_sl_price'] - (atr_val * 0.05):
+                                    trade['last_sl_price'] = safe_sl
+                                    moved = True
+
+                            # رسالة التحديث بناءً على قرار البوت
+                            if moved:
+                                update_msg = f"🛡️ <b>Update:</b> SL moved to <code>{trade['last_sl_price']:.5g}</code>"
+                            else:
+                                update_msg = f"🛡️ <b>Update:</b> SL kept at <code>{trade['last_sl_price']:.5g}</code> (Avoiding noise 🌪️)"
+                                
                             msg = (
                                 f"✅ <b>TP {new_step} HIT! (+{tp_roe:.1f}% ROE)</b>\n"
-                                f"🛡️ <b>Update:</b> SL moved to <code>{trade['last_sl_price']}</code>"
+                                f"{update_msg}"
                             )
-                            Log.print(f"Hit TP{new_step}/{num_tps} (Holding 100%): {sym}", Log.GREEN)
+                            Log.print(f"Hit TP{new_step}/{num_tps}: {sym} | Moved SL: {moved}", Log.GREEN)
                             await self.tg.send(msg, trade['msg_id'])
                             self.save_state() 
                             
