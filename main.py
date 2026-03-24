@@ -25,12 +25,8 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    # 👈 نظام الفريمات المزدوجة (MTF)
-    TF_MACRO = '1d'   # فريم التحليل والرسم
-    TF_MICRO = '15m'  # فريم الدخول الخاطف والتأكيد
-    
-    CANDLES_LIMIT_MACRO = 100 
-    CANDLES_LIMIT_MICRO = 100 
+    TF_MAIN = '15m'  
+    CANDLES_LIMIT = 150 
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 500_000 
@@ -40,9 +36,9 @@ class Config:
     MIN_LEVERAGE = 5    
     MAX_LEVERAGE_CAP = 50 
     
-    COOLDOWN_SECONDS = 3600 # تبريد ساعة واحدة بعد إغلاق الصفقة
+    COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V55000.0 - MTF Price Action Sniper (1D + 15m)"
+    VERSION = "V59000.0 - Stealth VIP Mode"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -52,6 +48,7 @@ class Log:
         print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
 
 def format_price(price):
+    if price <= 0: return "0.0001" 
     if price < 0.001: return f"{price:.7f}".rstrip('0').rstrip('.')
     elif price < 1: return f"{price:.5f}".rstrip('0').rstrip('.')
     return f"{price:.4f}".rstrip('0').rstrip('.')
@@ -88,149 +85,74 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (Multi-Timeframe Engine)
+# 3. محرك الاستراتيجية (Volumnacci Core)
 # ==========================================
 class StrategyEngine:
     @staticmethod
     def calc_actual_roe(entry, exit_price, side, lev):
-        if entry <= 0: return 0.0 
+        if entry <= 0 or exit_price <= 0: return 0.0 
         if side == "LONG": return float(((exit_price - entry) / entry) * 100.0 * lev)
         else: return float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def analyze_symbol(symbol, ohlcv_1d, ohlcv_15m):
+    def analyze_symbol(symbol, ohlcv_data):
         try:
-            # --- 1. تحليل الفريم الأكبر (1D) لرسم الخريطة ---
-            df_1d = pd.DataFrame(ohlcv_1d, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df_1d) < 60: return None 
+            df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            if len(df) < 100: return None 
             
-            df_1d['atr'] = ta.atr(df_1d['high'], df_1d['low'], df_1d['close'], length=14)
-            df_1d.dropna(inplace=True)
-            daily_curr = df_1d.iloc[-1] # اليوم الحالي
+            df['vol_sma'] = ta.sma(df['vol'], length=50)
+            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            df.dropna(inplace=True)
             
-            pattern_df = df_1d.iloc[-60:-1] # آخر شهرين بدون اليوم الحالي لتكوين المثلث
-            
-            x = np.arange(len(pattern_df))
-            y_high = pattern_df['high'].values
-            y_low = pattern_df['low'].values
-            
-            slope_high, intercept_high = np.polyfit(x, y_high, 1)
-            slope_low, intercept_low = np.polyfit(x, y_low, 1)
-            
-            norm_slope_high = slope_high / daily_curr['close']
-            norm_slope_low = slope_low / daily_curr['close']
-            
-            res_level = np.max(y_high)
-            sup_level = np.min(y_low)
-            pattern_height = res_level - sup_level
-            daily_atr = daily_curr['atr']
-            
-            if pattern_height <= 0: return None
+            if len(df) < 30: return None
 
-            # نقطة الترند لليوم الحالي
-            today_x = len(pattern_df)
-            today_dyn_res = intercept_high + slope_high * today_x
-            today_dyn_sup = intercept_low + slope_low * today_x
+            anchor_idx = None
+            for i in range(len(df)-25, len(df)-2):
+                if df['vol'].iloc[i] > (df['vol_sma'].iloc[i] * 3.5):
+                    anchor_idx = i
+
+            if anchor_idx is None: return None
+
+            anchor_candle = df.iloc[anchor_idx]
+            curr = df.iloc[-2] 
+            prev = df.iloc[-3] 
             
-            # --- 2. تحليل الفريم الأصغر (15m) للتنفيذ ---
-            df_15m = pd.DataFrame(ohlcv_15m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df_15m) < 40: return None
+            a_high = anchor_candle['high'] 
+            a_low = anchor_candle['low']   
+            a_range = a_high - a_low
             
-            df_15m['vol_sma'] = ta.sma(df_15m['vol'], length=30)
-            df_15m.dropna(inplace=True)
-            
-            curr_15m = df_15m.iloc[-2] # شمعة 15م المغلقة للتو
-            prev_15m = df_15m.iloc[-3] # الشمعة التي قبلها
-            
-            touch_margin = daily_atr * 0.1 # هامش اللمس دقيق جداً لأنه مبني على اليومي
+            if a_range <= 0: return None
+
+            FIB_EXT = [1.272, 1.618, 2.0, 2.618, 3.0, 3.618, 4.236]
             setup = None
-            FIB_LEVELS = [0.382, 0.618, 1.0, 1.272, 1.618, 2.0, 2.618, 3.0]
 
-            # التأكد من وجود سيولة عالية وقت الكسر على فريم 15 دقيقة
-            vol_spike = curr_15m['vol'] > (curr_15m['vol_sma'] * 1.5)
-
-            # ==========================================
-            # 🔻 المثلث الهابط (ترند يومي هابط + دعم ثابت)
-            # ==========================================
-            if norm_slope_high < -0.001: 
-                support = sup_level
+            # LONG
+            if prev['close'] <= a_high and curr['close'] > a_high and curr['close'] > curr['open']:
+                entry = curr['close']
+                sl = a_low - (curr['atr'] * 0.1) 
+                risk = entry - sl
                 
-                # 1. كسر خط الترند (1D) للأعلى على فريم 15 دقيقة
-                if prev_15m['close'] <= today_dyn_res and curr_15m['close'] > today_dyn_res and curr_15m['close'] > curr_15m['open'] and vol_spike:
-                    entry = curr_15m['close']
-                    sl = curr_15m['low'] - (daily_atr * 0.2) # ستوب محمي بالتذبذب اليومي
-                    risk = entry - sl
+                if risk > 0 and (risk / entry * 100) <= 8.0:
+                    tps = [a_low + (a_range * fib) for fib in FIB_EXT]
+                    tps = [tp for tp in tps if tp > entry] 
                     
-                    if risk > 0 and (risk / entry * 100) <= 8.0:
-                        num_targets = max(1, min(8, int(pattern_height / daily_atr)))
-                        tps = [entry + (pattern_height * fib) for fib in FIB_LEVELS[:num_targets]]
-                        setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": "MTF Downtrend Breakout 🚀", "risk_distance": risk, "atr": daily_atr}
+                    if len(tps) > 0:
+                        setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": "Volumnacci Bullish Breakout 🦅", "risk_distance": risk, "atr": curr['atr']}
 
-                # 2. لمس الدعم اليومي والارتداد بشمعة 15 دقيقة خضراء وسيولة
-                elif curr_15m['low'] <= support + touch_margin and curr_15m['close'] > curr_15m['open'] and curr_15m['close'] > support and vol_spike:
-                    entry = curr_15m['close']
-                    sl = support - (daily_atr * 0.3)
-                    risk = entry - sl
-                    
-                    if risk > 0 and (risk / entry * 100) <= 8.0 and setup is None:
-                        num_targets = max(1, min(8, int(pattern_height / daily_atr)))
-                        tps = [entry + (pattern_height * fib) for fib in FIB_LEVELS[:num_targets]]
-                        setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": "MTF Support Bounce 🟢", "risk_distance": risk, "atr": daily_atr}
-
-                # 3. إعادة اختبار الدعم المكسور والرفض
-                elif curr_15m['high'] >= support - touch_margin and curr_15m['high'] <= support + touch_margin and curr_15m['close'] < curr_15m['open'] and vol_spike:
-                    if prev_15m['close'] < support: 
-                        entry = curr_15m['close']
-                        sl = curr_15m['high'] + (daily_atr * 0.2)
-                        risk = sl - entry
-                        
-                        if risk > 0 and (risk / entry * 100) <= 8.0 and setup is None:
-                            num_targets = max(1, min(8, int(pattern_height / daily_atr)))
-                            tps = [entry - (pattern_height * fib) for fib in FIB_LEVELS[:num_targets]]
-                            setup = {"side": "SHORT", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": "MTF Support Retest Rejection 🩸", "risk_distance": risk, "atr": daily_atr}
-
-            # ==========================================
-            # 🔺 المثلث الصاعد (ترند يومي صاعد + مقاومة ثابتة)
-            # ==========================================
-            if norm_slope_low > 0.001 and setup is None: 
-                resistance = res_level
+            # SHORT
+            elif prev['close'] >= a_low and curr['close'] < a_low and curr['close'] < curr['open']:
+                entry = curr['close']
+                sl = a_high + (curr['atr'] * 0.1) 
+                risk = sl - entry
                 
-                # 1. كسر خط الترند لأسفل
-                if prev_15m['close'] >= today_dyn_sup and curr_15m['close'] < today_dyn_sup and curr_15m['close'] < curr_15m['open'] and vol_spike:
-                    entry = curr_15m['close']
-                    sl = curr_15m['high'] + (daily_atr * 0.2)
-                    risk = sl - entry
+                if risk > 0 and (risk / entry * 100) <= 8.0:
+                    tps = [a_high - (a_range * fib) for fib in FIB_EXT]
+                    tps = [tp for tp in tps if tp > 0.000001] 
                     
-                    if risk > 0 and (risk / entry * 100) <= 8.0:
-                        num_targets = max(1, min(8, int(pattern_height / daily_atr)))
-                        tps = [entry - (pattern_height * fib) for fib in FIB_LEVELS[:num_targets]]
-                        setup = {"side": "SHORT", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": "MTF Uptrend Breakdown 🩸", "risk_distance": risk, "atr": daily_atr}
+                    if len(tps) > 0:
+                        setup = {"side": "SHORT", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": "Volumnacci Bearish Breakdown 🩸", "risk_distance": risk, "atr": curr['atr']}
 
-                # 2. الرفض من المقاومة
-                elif curr_15m['high'] >= resistance - touch_margin and curr_15m['close'] < curr_15m['open'] and curr_15m['close'] < resistance and vol_spike:
-                    entry = curr_15m['close']
-                    sl = resistance + (daily_atr * 0.3)
-                    risk = sl - entry
-                    
-                    if risk > 0 and (risk / entry * 100) <= 8.0 and setup is None:
-                        num_targets = max(1, min(8, int(pattern_height / daily_atr)))
-                        tps = [entry - (pattern_height * fib) for fib in FIB_LEVELS[:num_targets]]
-                        setup = {"side": "SHORT", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": "MTF Resistance Rejection 🔴", "risk_distance": risk, "atr": daily_atr}
-
-                # 3. اختراق المقاومة وإعادة الاختبار
-                elif curr_15m['low'] <= resistance + touch_margin and curr_15m['low'] >= resistance - touch_margin and curr_15m['close'] > curr_15m['open'] and vol_spike:
-                    if prev_15m['close'] > resistance: 
-                        entry = curr_15m['close']
-                        sl = curr_15m['low'] - (daily_atr * 0.2)
-                        risk = entry - sl
-                        
-                        if risk > 0 and (risk / entry * 100) <= 8.0 and setup is None:
-                            num_targets = max(1, min(8, int(pattern_height / daily_atr)))
-                            tps = [entry + (pattern_height * fib) for fib in FIB_LEVELS[:num_targets]]
-                            setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": "MTF Resistance Retest Bounce 🚀", "risk_distance": risk, "atr": daily_atr}
-
-            del df_1d, df_15m
-            
+            del df
             if not setup: return None
 
             return {
@@ -242,7 +164,7 @@ class StrategyEngine:
                 "tps": setup["tps"],
                 "strat": setup["strat"], 
                 "risk_distance": setup["risk_distance"],
-                "atr": setup["atr"] # Daily ATR للحماية
+                "atr": setup["atr"] 
             }
 
         except Exception as e:
@@ -250,7 +172,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت (Execution Engine - 24/7 Core)
+# 4. مدير البوت (Execution Engine - Stealth Mode)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -260,7 +182,7 @@ class TradingSystem:
         self.cooldown_list = {} 
         self.cached_valid_coins = [] 
         self.last_cache_time = 0
-        self.semaphore = asyncio.Semaphore(10) # حماية من الـ Rate Limit 
+        self.semaphore = asyncio.Semaphore(15) 
         self.trade_lock = asyncio.Lock() 
         
         self.stats = {"virtual_equity": 100.0, "peak_equity": 100.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "strats": {}} 
@@ -269,7 +191,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nMTF Engine Active: 1D Maps + 15m Triggers 📐⚡")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nStealth Mode Active: Secrets Hidden! 🤫💼")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -306,18 +228,13 @@ class TradingSystem:
         async with self.semaphore:
             if sym in self.active_trades or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
             try:
-                # 👈 سحب متوازي للفريمين (1D و 15m) لضمان السرعة
-                task_1d = fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=Config.CANDLES_LIMIT_MACRO)
-                task_15m = fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MICRO, limit=Config.CANDLES_LIMIT_MICRO)
+                ohlcv_data = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MAIN, limit=Config.CANDLES_LIMIT)
+                if not ohlcv_data: return
                 
-                ohlcv_1d, ohlcv_15m = await asyncio.gather(task_1d, task_15m)
-                
-                if not ohlcv_1d or not ohlcv_15m: return
-                
-                res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_1d, ohlcv_15m)
+                res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_data)
                 
                 if res: 
-                    Log.print(f"🌟 MTF Signal Detected: {sym}. Executing!", Log.GREEN)
+                    Log.print(f"🌟 Stealth Signal Detected: {sym}. Executing!", Log.GREEN)
                     await self.execute_trade(res)
 
             except Exception as e: 
@@ -385,10 +302,10 @@ class TradingSystem:
 
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
 
+                # 👈 مسحنا اسم الاستراتيجية تماماً لتبقى سرية
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
                     f"────────────────\n"
-                    f"📐 <b>Setup:</b> {trade['strat']}\n"
                     f"🛒 <b>Entry:</b> <code>{format_price(safe_entry)}</code>\n"
                     f"⚖️ <b>Leverage:</b> <b>{dynamic_lev}x</b>\n"
                     f"────────────────\n"
@@ -441,8 +358,8 @@ class TradingSystem:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | MTF: 1D Maps + 15m Triggers ⚡", Log.BLUE)
-                chunk_size = 8 # تم تقليلها لتفادي Rate Limit مع الفريمين
+                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Stealth Mode 🤫", Log.BLUE)
+                chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running: break
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break 
@@ -450,12 +367,11 @@ class TradingSystem:
                     chunk = scan_list[i:i+chunk_size]
                     tasks = [self.process_symbol(sym) for sym in chunk]
                     await asyncio.gather(*tasks)
-                    await asyncio.sleep(1.5) # راحة للـ API
+                    await asyncio.sleep(1) 
                 
                 Log.print("✅ [RADAR] Cycle Complete. Resting & Cleaning RAM...", Log.BLUE)
                 gc.collect() 
-                # 👈 مسح مستمر وسريع للقبض على شمعة 15 دقيقة، البوت لن ينام 12 ساعة بعد الآن!
-                await asyncio.sleep(15) 
+                await asyncio.sleep(10) 
             except Exception: await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
@@ -485,7 +401,7 @@ class TradingSystem:
                     pos_size = trade['position_size']
                     strat_name = trade['strat']
                     margin = trade.get('margin', 1.0)
-                    atr_val = trade['atr'] # هذا الـ ATR اليومي، لحماية הستوب من التذبذب السريع
+                    atr_val = trade['atr']
                     num_tps = len(trade['tps'])
                     
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
@@ -493,7 +409,7 @@ class TradingSystem:
                         display_roe = (pnl / margin) * 100
                         
                         if display_roe > 0.5: 
-                            msg = f"🛡️ <b>Trade Secured in Profit (Target SL)</b> (+{display_roe:.1f}% ROE)"
+                            msg = f"🛡️ <b>Trade Secured in Profit</b> (+{display_roe:.1f}% ROE)"
                             self._log_trade_result('wins', display_roe, strat_name)
                         elif -0.5 <= display_roe <= 0.5:
                             msg = f"⚖️ <b>Trade Closed at Break-Even</b> (0.0% ROE)"
@@ -521,13 +437,12 @@ class TradingSystem:
                         if new_step < num_tps:
                             moved = False
                             
-                            # ملاحقة الأهداف والستوب
                             if side == "LONG":
                                 if new_step == 1: 
-                                    proposed_sl = entry if (target - entry) >= (atr_val * 0.5) else (entry - (atr_val * 0.2))
+                                    proposed_sl = entry if (target - entry) >= (atr_val * 1.5) else (entry - (atr_val * 0.5))
                                 else: 
                                     prev_tp = trade['tps'][new_step - 2]
-                                    breathing_space = target - (atr_val * 0.5)
+                                    breathing_space = target - (atr_val * 1.5)
                                     proposed_sl = min(prev_tp, breathing_space)
                                     proposed_sl = max(proposed_sl, entry) 
                                 
@@ -539,10 +454,10 @@ class TradingSystem:
                                     
                             else: # SHORT
                                 if new_step == 1:
-                                    proposed_sl = entry if (entry - target) >= (atr_val * 0.5) else (entry + (atr_val * 0.2))
+                                    proposed_sl = entry if (entry - target) >= (atr_val * 1.5) else (entry + (atr_val * 0.5))
                                 else:
                                     prev_tp = trade['tps'][new_step - 2]
-                                    breathing_space = target + (atr_val * 0.5)
+                                    breathing_space = target + (atr_val * 1.5)
                                     proposed_sl = max(prev_tp, breathing_space)
                                     proposed_sl = min(proposed_sl, entry)
                                 
@@ -593,16 +508,7 @@ class TradingSystem:
                 wr = (d_stats['wins'] / total_decisive * 100) if total_decisive > 0 else 0
                 avg_roe = (d_stats['total_roe'] / total_trades) if total_trades > 0 else 0 
                 
-                strats_msg = "\n💎 <b>Price Action Patterns Performance:</b>\n"
-                if self.stats.get('strats'):
-                    for s_name, s_data in self.stats['strats'].items():
-                        s_trades = s_data['wins'] + s_data['losses'] + s_data['break_evens']
-                        s_decisive = s_data['wins'] + s_data['losses']
-                        if s_trades > 0:
-                            s_wr = (s_data['wins'] / s_decisive * 100) if s_decisive > 0 else 0
-                            s_avg_roe = s_data['total_roe'] / s_trades
-                            strats_msg += f"▪️ {s_name}: {s_wr:.0f}% Win Rate\n"
-
+                # 👈 مسحنا إظهار أداء الاستراتيجيات للحفاظ على السرية
                 msg = (
                     f"📈 <b>VIP DAILY REPORT (24H)</b> 📉\n"
                     f"────────────────\n"
@@ -614,15 +520,13 @@ class TradingSystem:
                     f"────────────────\n"
                     f"📉 <b>Max Drawdown:</b> {self.stats['max_drawdown_pct']:.2f}%\n"
                     f"📐 <b>Average Net Profit:</b> {avg_roe:+.1f}% ROE\n"
-                    f"💵 <b>Simulated Equity:</b> ${self.stats['virtual_equity']:.2f}\n"
-                    f"────────────────{strats_msg}"
+                    f"💵 <b>Simulated Equity:</b> ${self.stats['virtual_equity']:.2f}"
                 )
                 await self.tg.send(msg)
                 self.stats['daily'] = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}
                 self.save_state()
             except Exception: pass
 
-    # 👈 تم تحصين دالة إبقاء السيرفر حياً لتعمل بكفاءة 24/7 دون توقف
     async def keep_alive(self):
         while self.running:
             try: 
@@ -630,7 +534,7 @@ class TradingSystem:
                     await s.get(Config.RENDER_URL)
                     Log.print("💓 Keep-Alive Ping Sent.", Log.BLUE)
             except Exception: pass
-            await asyncio.sleep(600) # يرسل نبضة كل 10 دقائق للسيرفر المجاني
+            await asyncio.sleep(600) 
 
 bot = TradingSystem()
 
