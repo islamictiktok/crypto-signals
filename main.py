@@ -25,8 +25,8 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    TF_MAIN = '15m'  
-    CANDLES_LIMIT = 150 
+    TF_MAIN = '1h'  
+    CANDLES_LIMIT = 250 
     
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 500_000 
@@ -38,7 +38,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V59000.0 - Stealth VIP Mode"
+    VERSION = "V63000.0 - Immortal Volumnacci (Always 200 OK)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -85,7 +85,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (Volumnacci Core)
+# 3. محرك الاستراتيجية (Official Volumnacci VSA)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -98,60 +98,135 @@ class StrategyEngine:
     def analyze_symbol(symbol, ohlcv_data):
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 100: return None 
+            if len(df) < 60: return None 
             
-            df['vol_sma'] = ta.sma(df['vol'], length=50)
-            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            df['vol_sma'] = ta.sma(df['vol'], length=40)
+            df['spread'] = df['high'] - df['low']
+            df['spread_sma'] = ta.sma(df['spread'], length=40)
+            df['kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
+            
             df.dropna(inplace=True)
-            
-            if len(df) < 30: return None
+            if len(df) < 15: return None
 
-            anchor_idx = None
-            for i in range(len(df)-25, len(df)-2):
-                if df['vol'].iloc[i] > (df['vol_sma'].iloc[i] * 3.5):
-                    anchor_idx = i
-
-            if anchor_idx is None: return None
-
-            anchor_candle = df.iloc[anchor_idx]
-            curr = df.iloc[-2] 
-            prev = df.iloc[-3] 
-            
-            a_high = anchor_candle['high'] 
-            a_low = anchor_candle['low']   
-            a_range = a_high - a_low
-            
-            if a_range <= 0: return None
-
-            FIB_EXT = [1.272, 1.618, 2.0, 2.618, 3.0, 3.618, 4.236]
+            FIB_EXT = [1.618, 2.618, 4.236, 6.854, 11.09] 
             setup = None
 
-            # LONG
-            if prev['close'] <= a_high and curr['close'] > a_high and curr['close'] > curr['open']:
-                entry = curr['close']
-                sl = a_low - (curr['atr'] * 0.1) 
-                risk = entry - sl
+            for i in range(len(df)-10, len(df)-2):
+                anchor = df.iloc[i]
+                conf = df.iloc[i+1] 
+                curr = df.iloc[-1]  
+                prev = df.iloc[-2]  
                 
-                if risk > 0 and (risk / entry * 100) <= 8.0:
-                    tps = [a_low + (a_range * fib) for fib in FIB_EXT]
-                    tps = [tp for tp in tps if tp > entry] 
-                    
-                    if len(tps) > 0:
-                        setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": "Volumnacci Bullish Breakout 🦅", "risk_distance": risk, "atr": curr['atr']}
-
-            # SHORT
-            elif prev['close'] >= a_low and curr['close'] < a_low and curr['close'] < curr['open']:
-                entry = curr['close']
-                sl = a_high + (curr['atr'] * 0.1) 
-                risk = sl - entry
+                a_spread = anchor['spread']
+                a_vol = anchor['vol']
+                a_high = anchor['high']
+                a_low = anchor['low']
+                a_close = anchor['close']
+                a_open = anchor['open']
                 
-                if risk > 0 and (risk / entry * 100) <= 8.0:
-                    tps = [a_high - (a_range * fib) for fib in FIB_EXT]
-                    tps = [tp for tp in tps if tp > 0.000001] 
-                    
-                    if len(tps) > 0:
-                        setup = {"side": "SHORT", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": "Volumnacci Bearish Breakdown 🩸", "risk_distance": risk, "atr": curr['atr']}
+                vol_avg = anchor['vol_sma']
+                spread_avg = anchor['spread_sma']
+                
+                is_ultra_vol = a_vol > (vol_avg * 2.5) 
+                is_high_vol = a_vol > (vol_avg * 1.5)  
+                is_low_vol = a_vol < (vol_avg * 0.8)
+                
+                is_wide_spread = a_spread > (spread_avg * 1.5) 
+                is_narrow_spread = a_spread < (spread_avg * 0.8)
+                
+                body_middle = a_low + (a_spread / 2)
+                upper_third = a_high - (a_spread / 3)
+                lower_third = a_low + (a_spread / 3)
+                
+                is_up = a_close > a_open
+                is_down = a_close < a_open
 
+                anchor_type = None
+                direction = None
+                
+                # 🟢 مظاهر قوة
+                if is_high_vol and a_close > body_middle and (min(a_open, a_close) - a_low) > (a_spread * 0.5):
+                    anchor_type = "Shake Out"
+                    direction = "LONG"
+                elif is_up and is_high_vol and a_close > df.iloc[i-1]['high'] and df.iloc[i-1]['close'] < df.iloc[i-1]['open']:
+                    anchor_type = "Bottom Reversal"
+                    direction = "LONG"
+                elif is_wide_spread and is_ultra_vol and a_close > lower_third:
+                    anchor_type = "Selling Climax"
+                    direction = "LONG"
+                elif not is_wide_spread and is_high_vol and lower_third <= a_close <= upper_third:
+                    anchor_type = "Stopping Volume"
+                    direction = "LONG"
+                elif is_down and is_narrow_spread and is_low_vol:
+                    anchor_type = "No Supply"
+                    direction = "LONG"
+                elif is_up and is_wide_spread and is_high_vol and a_close > upper_third:
+                    anchor_type = "Effort to Rise"
+                    direction = "LONG"
+
+                # 🔴 مظاهر ضعف
+                if anchor_type is None:
+                    if is_high_vol and a_close < body_middle and (a_high - max(a_open, a_close)) > (a_spread * 0.5):
+                        anchor_type = "Up Thrust"
+                        direction = "SHORT"
+                    elif is_down and is_high_vol and a_close < df.iloc[i-1]['low'] and df.iloc[i-1]['close'] > df.iloc[i-1]['open']:
+                        anchor_type = "Top Reversal"
+                        direction = "SHORT"
+                    elif is_wide_spread and is_ultra_vol and a_close < upper_third:
+                        anchor_type = "Buying Climax"
+                        direction = "SHORT"
+                    elif is_narrow_spread and is_high_vol and a_close < body_middle:
+                        anchor_type = "End of Rising Market"
+                        direction = "SHORT"
+                    elif is_up and is_narrow_spread and is_low_vol:
+                        anchor_type = "No Demand"
+                        direction = "SHORT"
+                    elif is_down and is_wide_spread and is_high_vol and a_close < lower_third:
+                        anchor_type = "Effort to Fall"
+                        direction = "SHORT"
+
+                if anchor_type and direction:
+                    conf_is_up = conf['close'] > conf['open']
+                    valid_conf = (direction == "LONG" and conf_is_up) or (direction == "SHORT" and not conf_is_up)
+                    
+                    if valid_conf:
+                        a_range = a_high - a_low
+                        if direction == "LONG":
+                            level_100 = a_high
+                            level_0 = a_low
+                            kijun_ok = curr['close'] > curr['kijun']
+                            
+                            is_breakout = prev['close'] <= level_100 and curr['close'] > level_100
+                            is_retest = curr['low'] <= level_100 and curr['close'] > level_100 and prev['close'] > level_100
+                            
+                            if (is_breakout or is_retest) and kijun_ok:
+                                entry = curr['close']
+                                sl = level_0 
+                                risk = entry - sl
+                                if risk > 0 and (risk / entry * 100) <= 10.0:
+                                    tps = [level_0 + (a_range * fib) for fib in FIB_EXT]
+                                    setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {anchor_type}", "risk_distance": risk}
+                                    break
+                                    
+                        elif direction == "SHORT":
+                            level_100 = a_low
+                            level_0 = a_high
+                            kijun_ok = curr['close'] < curr['kijun']
+                            
+                            is_breakout = prev['close'] >= level_100 and curr['close'] < level_100
+                            is_retest = curr['high'] >= level_100 and curr['close'] < level_100 and prev['close'] < level_100
+                            
+                            if (is_breakout or is_retest) and kijun_ok:
+                                entry = curr['close']
+                                sl = level_0 
+                                risk = sl - entry
+                                if risk > 0 and (risk / entry * 100) <= 10.0:
+                                    tps = [level_0 - (a_range * fib) for fib in FIB_EXT]
+                                    tps = [tp for tp in tps if tp > 0.000001]
+                                    if len(tps) > 0:
+                                        setup = {"side": "SHORT", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {anchor_type}", "risk_distance": risk}
+                                        break
+                                        
             del df
             if not setup: return None
 
@@ -163,16 +238,12 @@ class StrategyEngine:
                 "original_sl": setup["original_sl"], 
                 "tps": setup["tps"],
                 "strat": setup["strat"], 
-                "risk_distance": setup["risk_distance"],
-                "atr": setup["atr"] 
+                "risk_distance": setup["risk_distance"]
             }
-
-        except Exception as e:
-            Log.print(f"⚠️ Strategy Analysis Error on {symbol}: {e}", Log.RED)
-            return None
+        except Exception: return None
 
 # ==========================================
-# 4. مدير البوت (Execution Engine - Stealth Mode)
+# 4. مدير البوت (Execution Engine - Immortal 24/7)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -182,16 +253,16 @@ class TradingSystem:
         self.cooldown_list = {} 
         self.cached_valid_coins = [] 
         self.last_cache_time = 0
-        self.semaphore = asyncio.Semaphore(15) 
+        self.semaphore = asyncio.Semaphore(10) 
         self.trade_lock = asyncio.Lock() 
         
-        self.stats = {"virtual_equity": 100.0, "peak_equity": 100.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "strats": {}} 
+        self.stats = {"virtual_equity": 100.0, "peak_equity": 100.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}} 
         self.running = True
 
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nStealth Mode Active: Secrets Hidden! 🤫💼")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nImmortal Core Active: Anti-Crash & Always 200 OK 🛡️♾️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -218,11 +289,9 @@ class TradingSystem:
             dd = ((self.stats['peak_equity'] - self.stats['virtual_equity']) / self.stats['peak_equity']) * 100
             self.stats['max_drawdown_pct'] = max(self.stats['max_drawdown_pct'], dd)
 
-    def _log_trade_result(self, result_type, roe_val, strat_name):
+    def _log_trade_result(self, result_type, roe_val):
         self.stats['all_time'][result_type] += 1; self.stats['daily'][result_type] += 1
-        if strat_name not in self.stats['strats']: self.stats['strats'][strat_name] = {"wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}
-        self.stats['strats'][strat_name][result_type] += 1
-        self.stats['all_time']['total_roe'] += roe_val; self.stats['daily']['total_roe'] += roe_val; self.stats['strats'][strat_name]['total_roe'] += roe_val
+        self.stats['all_time']['total_roe'] += roe_val; self.stats['daily']['total_roe'] += roe_val
 
     async def process_symbol(self, sym):
         async with self.semaphore:
@@ -230,55 +299,34 @@ class TradingSystem:
             try:
                 ohlcv_data = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MAIN, limit=Config.CANDLES_LIMIT)
                 if not ohlcv_data: return
-                
                 res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_data)
-                
-                if res: 
-                    Log.print(f"🌟 Stealth Signal Detected: {sym}. Executing!", Log.GREEN)
-                    await self.execute_trade(res)
-
-            except Exception as e: 
-                pass
+                if res: await self.execute_trade(res)
+            except Exception: pass
 
     async def execute_trade(self, trade):
         async with self.trade_lock:
             if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
-            
             try:
                 sym = trade['symbol']
                 ticker = await fetch_with_retry(self.exchange.fetch_ticker, sym)
-                
                 if not ticker or 'last' not in ticker: return 
                 quote_volume = float(ticker.get('quoteVolume', 0))
                 if quote_volume < Config.MIN_24H_VOLUME_USDT: return
-
-                try:
-                    ask = float(ticker.get('ask'))
-                    bid = float(ticker.get('bid'))
-                    last = float(ticker.get('last'))
-                    spread = abs(ask - bid) / last
-                    if spread > Config.MAX_ALLOWED_SPREAD: return
-                except Exception: return 
                 
                 safe_entry = float(self.exchange.price_to_precision(sym, trade['entry']))
                 safe_sl = float(self.exchange.price_to_precision(sym, trade['sl']))
                 safe_tps = [float(self.exchange.price_to_precision(sym, tp)) for tp in trade['tps']]
 
                 risk_distance = trade['risk_distance']
-                
                 equity = self.stats['virtual_equity']
                 risk_amount = equity * (Config.RISK_PER_TRADE_PCT / 100.0) 
-                
                 position_size_coins = risk_amount / risk_distance
                 
                 sl_distance_pct = (risk_distance / safe_entry) * 100
-                if sl_distance_pct > 0:
-                    raw_lev = 50.0 / sl_distance_pct 
-                else:
-                    raw_lev = Config.MIN_LEVERAGE
+                if sl_distance_pct > 0: raw_lev = 50.0 / sl_distance_pct 
+                else: raw_lev = Config.MIN_LEVERAGE
                     
                 dynamic_lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
-
                 margin_required = (position_size_coins * safe_entry) / dynamic_lev
                 if margin_required > (equity * 0.50): 
                     margin_required = equity * 0.50
@@ -286,13 +334,11 @@ class TradingSystem:
 
                 trade['entry'] = safe_entry; trade['sl'] = safe_sl; trade['tps'] = safe_tps
                 trade['original_sl'] = trade['original_sl']; trade['position_size'] = position_size_coins
-                trade['risk_amount'] = risk_amount; trade['leverage'] = dynamic_lev
-                trade['margin'] = margin_required 
+                trade['margin'] = margin_required ; trade['leverage'] = dynamic_lev
                 
                 market_info = self.exchange.markets.get(sym, {})
                 base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
                 exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
-                
                 icon = "🟢" if trade['side'] == "LONG" else "🔴"
                 
                 targets_msg = ""
@@ -302,7 +348,6 @@ class TradingSystem:
 
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
 
-                # 👈 مسحنا اسم الاستراتيجية تماماً لتبقى سرية
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
                     f"────────────────\n"
@@ -313,81 +358,73 @@ class TradingSystem:
                     f"────────────────\n"
                     f"🛑 <b>Stop Loss:</b> <code>{format_price(safe_sl)}</code> ({pnl_sl_raw:.1f}% ROE)"
                 )
-                
                 msg_id = await self.tg.send(msg)
                 if msg_id:
                     trade['msg_id'] = msg_id; trade['step'] = 0; trade['last_sl_price'] = safe_sl
                     self.active_trades[sym] = trade
                     self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
                     self.save_state() 
-            except Exception as e: 
-                Log.print(f"⚠️ Execute Trade Error ({trade.get('symbol', 'Unknown')}): {e}", Log.RED)
+            except Exception: pass
 
     async def update_valid_coins_cache(self):
         current_ts = int(datetime.now(timezone.utc).timestamp())
         if current_ts - self.last_cache_time > 86400:
-            try:
-                await self.exchange.load_markets(reload=True)
+            try: await self.exchange.load_markets(reload=True)
             except Exception: pass
 
         if current_ts - self.last_cache_time > 900 or not self.cached_valid_coins:
             try:
                 tickers = await fetch_with_retry(self.exchange.fetch_tickers)
                 if not tickers: return
-                
                 valid_coins_with_vol = []
                 for sym, d in tickers.items():
                     if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
                         vol = float(d.get('quoteVolume') or 0)
                         if vol >= Config.MIN_24H_VOLUME_USDT:
                             valid_coins_with_vol.append((sym, vol))
-                
                 valid_coins_with_vol.sort(key=lambda x: x[1], reverse=True)
                 self.cached_valid_coins = [x[0] for x in valid_coins_with_vol]
-                
                 if self.cached_valid_coins: self.last_cache_time = current_ts
-                Log.print(f"🔄 Coins Cache Updated. Valid Pairs: {len(self.cached_valid_coins)}", Log.BLUE)
             except Exception: pass
 
+    # 👈 الدرع الواقي الأول (Scan Loop Immortal)
     async def scan_market(self):
         while self.running:
-            if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
-                await asyncio.sleep(10); continue
-            await self.update_valid_coins_cache()
             try:
+                if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
+                    await asyncio.sleep(10); continue
+                await self.update_valid_coins_cache()
+                
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                Log.print(f"🔍 [RADAR] Scanning {len(scan_list)} pairs | Stealth Mode 🤫", Log.BLUE)
                 chunk_size = 10
                 for i in range(0, len(scan_list), chunk_size):
-                    if not self.running: break
-                    if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break 
-                    
+                    if not self.running or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break 
                     chunk = scan_list[i:i+chunk_size]
                     tasks = [self.process_symbol(sym) for sym in chunk]
                     await asyncio.gather(*tasks)
-                    await asyncio.sleep(1) 
+                    await asyncio.sleep(1.5) 
                 
-                Log.print("✅ [RADAR] Cycle Complete. Resting & Cleaning RAM...", Log.BLUE)
                 gc.collect() 
-                await asyncio.sleep(10) 
-            except Exception: await asyncio.sleep(5)
+                await asyncio.sleep(15) 
+            except Exception as e:
+                Log.print(f"⚠️ Scan Market Handled Exception: {e}", Log.YELLOW)
+                await asyncio.sleep(5) # יنام قليلاً ثم ينهض ولا يسقط أبداً
 
+    # 👈 الدرع الواقي الثاني (Monitor Loop Immortal)
     async def monitor_open_trades(self):
         while self.running:
-            if self.stats.get('max_drawdown_pct', 0.0) > 20.0:
-                await self.tg.send("⚠️ <b>SYSTEM HALTED</b>: Max Drawdown Exceeded 20%!"); self.running = False; break
-            if not self.active_trades: await asyncio.sleep(5); continue
-            
             try:
-                symbols_to_fetch = list(self.active_trades.keys())
+                if self.stats.get('max_drawdown_pct', 0.0) > 20.0:
+                    await self.tg.send("⚠️ <b>SYSTEM HALTED</b>: Max Drawdown Exceeded 20%!"); self.running = False; break
+                if not self.active_trades: await asyncio.sleep(5); continue
                 
+                symbols_to_fetch = list(self.active_trades.keys())
                 if symbols_to_fetch:
                     tickers = await fetch_with_retry(self.exchange.fetch_tickers, symbols_to_fetch)
                     if not tickers: 
-                        await asyncio.sleep(5)
-                        continue
+                        await asyncio.sleep(5); continue
 
                 for sym, trade in list(self.active_trades.items()):
                     ticker = tickers.get(sym)
@@ -399,29 +436,19 @@ class TradingSystem:
                     entry = trade['entry']
                     current_sl = trade.get('last_sl_price', trade['sl'])
                     pos_size = trade['position_size']
-                    strat_name = trade['strat']
                     margin = trade.get('margin', 1.0)
-                    atr_val = trade['atr']
                     num_tps = len(trade['tps'])
                     
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
                         pnl = (current_sl - entry) * pos_size if side == "LONG" else (entry - current_sl) * pos_size
                         display_roe = (pnl / margin) * 100
-                        
-                        if display_roe > 0.5: 
-                            msg = f"🛡️ <b>Trade Secured in Profit</b> (+{display_roe:.1f}% ROE)"
-                            self._log_trade_result('wins', display_roe, strat_name)
-                        elif -0.5 <= display_roe <= 0.5:
-                            msg = f"⚖️ <b>Trade Closed at Break-Even</b> (0.0% ROE)"
-                            self._log_trade_result('break_evens', display_roe, strat_name)
-                        else:
-                            msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:.1f}% ROE)"
-                            self._log_trade_result('losses', display_roe, strat_name)
+                        if display_roe > 0.5: msg = f"🛡️ <b>Trade Secured in Profit</b> (+{display_roe:.1f}% ROE)"; self._log_trade_result('wins', display_roe)
+                        elif -0.5 <= display_roe <= 0.5: msg = f"⚖️ <b>Trade Closed at Break-Even</b> (0.0% ROE)"; self._log_trade_result('break_evens', display_roe)
+                        else: msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:.1f}% ROE)"; self._log_trade_result('losses', display_roe)
 
                         async with self.trade_lock:
                             self._update_equity_and_drawdown(pnl)
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
-                            Log.print(f"Trade Closed: {sym} | ROE: {display_roe:+.1f}%", Log.YELLOW) 
                             await self.tg.send(msg, trade['msg_id'])
                             if sym in self.active_trades: del self.active_trades[sym]
                             self.save_state()
@@ -429,95 +456,53 @@ class TradingSystem:
 
                     target = trade['tps'][step] if step < num_tps else None 
                     if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
-                        
                         trade['step'] += 1
                         new_step = trade['step']
                         tp_roe = StrategyEngine.calc_actual_roe(entry, target, side, trade['leverage'])
                         
                         if new_step < num_tps:
                             moved = False
-                            
-                            if side == "LONG":
-                                if new_step == 1: 
-                                    proposed_sl = entry if (target - entry) >= (atr_val * 1.5) else (entry - (atr_val * 0.5))
-                                else: 
-                                    prev_tp = trade['tps'][new_step - 2]
-                                    breathing_space = target - (atr_val * 1.5)
-                                    proposed_sl = min(prev_tp, breathing_space)
-                                    proposed_sl = max(proposed_sl, entry) 
-                                
-                                proposed_sl = max(proposed_sl, trade['original_sl'])
-                                    
-                                if proposed_sl > trade['last_sl_price']:
-                                    trade['last_sl_price'] = proposed_sl
-                                    moved = True
-                                    
-                            else: # SHORT
-                                if new_step == 1:
-                                    proposed_sl = entry if (entry - target) >= (atr_val * 1.5) else (entry + (atr_val * 0.5))
-                                else:
-                                    prev_tp = trade['tps'][new_step - 2]
-                                    breathing_space = target + (atr_val * 1.5)
-                                    proposed_sl = max(prev_tp, breathing_space)
-                                    proposed_sl = min(proposed_sl, entry)
-                                
-                                proposed_sl = min(proposed_sl, trade['original_sl'])
-                                    
-                                if proposed_sl < trade['last_sl_price']:
-                                    trade['last_sl_price'] = proposed_sl
-                                    moved = True
+                            if new_step == 1:
+                                trade['last_sl_price'] = entry
+                                moved = True
 
-                            status_tag = "(Break-Even Secured)" if new_step == 1 and moved and proposed_sl == entry else "(Risk Reduced)" if new_step == 1 and moved else "(Profit Locked)"
-                            update_msg = f"🛡️ <b>Update:</b> SL moved to <code>{format_price(trade['last_sl_price'])}</code> {status_tag}" if moved else ""
-                                
-                            msg = (
-                                f"✅ <b>TP {new_step} HIT! (+{tp_roe:.1f}% ROE)</b>\n"
-                                f"{update_msg}"
-                            )
-                            Log.print(f"Hit TP{new_step}/{num_tps}: {sym} | Moved SL: {moved}", Log.GREEN)
+                            status_tag = "(Break-Even Secured)" if moved else ""
+                            update_msg = f"🛡️ <b>Update:</b> SL moved to Entry <code>{format_price(entry)}</code> {status_tag}" if moved else ""
+                            msg = f"✅ <b>TP {new_step} HIT! (+{tp_roe:.1f}% ROE)</b>\n{update_msg}" if update_msg else f"✅ <b>TP {new_step} HIT! (+{tp_roe:.1f}% ROE)</b>"
                             await self.tg.send(msg, trade['msg_id'])
                             self.save_state() 
-                            
                         else:
                             pnl = (target - entry) * pos_size if side == "LONG" else (entry - target) * pos_size
                             display_roe = (pnl / margin) * 100 
-                            
-                            msg = (
-                                f"🏆 <b>ALL TARGETS SMASHED!</b> 🏦\n"
-                                f"💰 <b>Total Bagged:</b> +{display_roe:.1f}% ROE"
-                            )
-                            self._log_trade_result('wins', display_roe, strat_name)
-                            
+                            msg = f"🏆 <b>ALL TARGETS SMASHED!</b> 🏦\n💰 <b>Total Bagged:</b> +{display_roe:.1f}% ROE"
+                            self._log_trade_result('wins', display_roe)
                             async with self.trade_lock:
                                 self._update_equity_and_drawdown(pnl)
                                 self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                                 if sym in self.active_trades: del self.active_trades[sym]
-                                Log.print(f"All Targets Hit (Full Profit): {sym}", Log.GREEN)
                                 await self.tg.send(msg, trade['msg_id'])
                                 self.save_state() 
-            except Exception: pass
-            await asyncio.sleep(2) 
+                await asyncio.sleep(2)
+            except Exception as e:
+                Log.print(f"⚠️ Monitor Trades Handled Exception: {e}", Log.YELLOW)
+                await asyncio.sleep(5)
 
+    # 👈 الدرع الواقي الثالث
     async def daily_report(self):
         while self.running:
-            await asyncio.sleep(86400)
             try:
+                await asyncio.sleep(86400)
                 d_stats = self.stats['daily']
                 total_trades = d_stats['wins'] + d_stats['losses'] + d_stats['break_evens']
                 total_decisive = d_stats['wins'] + d_stats['losses']
                 wr = (d_stats['wins'] / total_decisive * 100) if total_decisive > 0 else 0
                 avg_roe = (d_stats['total_roe'] / total_trades) if total_trades > 0 else 0 
                 
-                # 👈 مسحنا إظهار أداء الاستراتيجيات للحفاظ على السرية
                 msg = (
-                    f"📈 <b>VIP DAILY REPORT (24H)</b> 📉\n"
-                    f"────────────────\n"
-                    f"🎯 <b>Total Signals:</b> {d_stats['signals']}\n"
-                    f"✅ <b>Winning Trades:</b> {d_stats['wins']}\n"
-                    f"🛡️ <b>Break-Evens:</b> {d_stats['break_evens']}\n"
-                    f"❌ <b>Losing Trades:</b> {d_stats['losses']}\n"
-                    f"📊 <b>Decisive Win Rate:</b> {wr:.1f}%\n"
-                    f"────────────────\n"
+                    f"📈 <b>VIP DAILY REPORT (24H)</b> 📉\n────────────────\n"
+                    f"🎯 <b>Total Signals:</b> {d_stats['signals']}\n✅ <b>Winning Trades:</b> {d_stats['wins']}\n"
+                    f"🛡️ <b>Break-Evens:</b> {d_stats['break_evens']}\n❌ <b>Losing Trades:</b> {d_stats['losses']}\n"
+                    f"📊 <b>Decisive Win Rate:</b> {wr:.1f}%\n────────────────\n"
                     f"📉 <b>Max Drawdown:</b> {self.stats['max_drawdown_pct']:.2f}%\n"
                     f"📐 <b>Average Net Profit:</b> {avg_roe:+.1f}% ROE\n"
                     f"💵 <b>Simulated Equity:</b> ${self.stats['virtual_equity']:.2f}"
@@ -525,16 +510,19 @@ class TradingSystem:
                 await self.tg.send(msg)
                 self.stats['daily'] = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}
                 self.save_state()
-            except Exception: pass
+            except Exception as e:
+                Log.print(f"⚠️ Daily Report Handled Exception: {e}", Log.YELLOW)
+                await asyncio.sleep(5)
 
+    # 👈 الدرع الواقي الرابع
     async def keep_alive(self):
         while self.running:
             try: 
                 async with aiohttp.ClientSession() as s: 
                     await s.get(Config.RENDER_URL)
-                    Log.print("💓 Keep-Alive Ping Sent.", Log.BLUE)
-            except Exception: pass
-            await asyncio.sleep(600) 
+            except Exception as e: 
+                Log.print(f"⚠️ Keep-Alive Handled Exception: {e}", Log.YELLOW)
+            await asyncio.sleep(300) 
 
 bot = TradingSystem()
 
@@ -547,11 +535,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-@app.get("/favicon.ico", include_in_schema=False)
-async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
-
-@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER {Config.VERSION} ONLINE</h1></body></html>"
+# 👈 الثقب الأسود: أي مسار أو رابط سيتم طلبه من السيرفر، سيرد عليه البوت بـ 200 OK الإجبارية
+@app.api_route("/{path_name:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
+async def catch_all(path_name: str):
+    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1><p>Status: Immortal</p></body></html>", status_code=200)
 
 async def run_bot_background():
     try:
