@@ -41,7 +41,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V67000.0 - The Volumnacci Holy Grail (Clusters & Divergence)"
+    VERSION = "V68000.0 - Volumnacci Holy Grail (TP1 Sniper Edition)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -108,9 +108,10 @@ class StrategyEngine:
             if len(df_macro) < 20: return None
 
             anchors_found = []
-            FIB_EXT = [1.618, 2.618, 4.236, 6.854, 11.09] 
             
-            # 👈 استخراج 12 نموذج VSA (تخزين كل الشموع المطابقة لاكتشاف الكلاستر)
+            # 👈 هدف واحد فقط (1.618) لاقتناص الربح المضمون وتجنب الانعكاس
+            FIB_EXT = [1.618] 
+            
             for i in range(len(df_macro)-20, len(df_macro)-1):
                 anchor = df_macro.iloc[i]
                 conf = df_macro.iloc[i+1] 
@@ -159,14 +160,12 @@ class StrategyEngine:
 
             if not anchors_found: return None
 
-            # 👈 خوارزمية الكلاستر (Cluster Detection - ص 70)
-            primary_anchor = anchors_found[-1] # الشمعة الأحدث
+            # الكلاستر
+            primary_anchor = anchors_found[-1] 
             cluster_msg = ""
-            
             if len(anchors_found) >= 2:
                 prev_anchor = anchors_found[-2]
                 if primary_anchor['dir'] == prev_anchor['dir']:
-                    # هل توجد مستويات فيبوناتشي متطابقة بنسبة 99% بين الشمعتين؟
                     for f1 in FIB_EXT:
                         lvl1 = primary_anchor['low'] + (primary_anchor['range'] * f1) if primary_anchor['dir'] == "LONG" else primary_anchor['high'] - (primary_anchor['range'] * f1)
                         for f2 in FIB_EXT:
@@ -187,8 +186,6 @@ class StrategyEngine:
             setup = None
             is_effort_volume = curr_m['vol'] > prev_m['vol']
             
-            # 👈 خوارزمية الدايفرجنس (Volume Divergence - ص 67)
-            # فحص إذا كان السعر يرتفع/ينخفض ولكن الفوليوم لا يدعمه
             bullish_divergence = curr_m['low'] < prev_m['low'] and curr_m['vol_sma'] < prev_m['vol_sma']
             bearish_divergence = curr_m['high'] > prev_m['high'] and curr_m['vol_sma'] < prev_m['vol_sma']
 
@@ -204,14 +201,13 @@ class StrategyEngine:
                 is_breakout = prev_m['close'] <= level_100 and curr_m['close'] > level_100
                 is_retest = curr_m['low'] <= level_100 and curr_m['close'] > level_100 and prev_m['close'] > level_100
                 
-                # تأكيد الكسر بالفوليوم ومنع الكسر في حال وجود دايفرجنس بيعي يعاكسنا
                 if (is_breakout or is_retest) and is_effort_volume and curr_m['close'] > curr_m['open'] and kijun_ok and not bearish_divergence:
                     entry = curr_m['close']
                     sl = curr_m['low'] - (curr_m['high'] - curr_m['low']) * 0.1 
                     risk = entry - sl
                     
                     if risk > 0 and (risk / entry * 100) <= 8.0:
-                        tps = [level_0 + (a_range * fib) for fib in FIB_EXT]
+                        tps = [level_0 + (a_range * fib) for fib in FIB_EXT] # هدف واحد فقط
                         setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}{cluster_msg}", "risk_distance": risk}
 
             elif primary_anchor['dir'] == "SHORT":
@@ -228,7 +224,7 @@ class StrategyEngine:
                     risk = sl - entry
                     
                     if risk > 0 and (risk / entry * 100) <= 8.0:
-                        tps = [level_0 - (a_range * fib) for fib in FIB_EXT]
+                        tps = [level_0 - (a_range * fib) for fib in FIB_EXT] # هدف واحد فقط
                         tps = [tp for tp in tps if tp > 0.000001]
                         if len(tps) > 0:
                             setup = {"side": "SHORT", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}{cluster_msg}", "risk_distance": risk}
@@ -250,7 +246,7 @@ class StrategyEngine:
         except Exception: return None
 
 # ==========================================
-# 4. مدير البوت (Execution Engine - Immortal 24/7)
+# 4. مدير البوت (Execution Engine - One Shot Sniper)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -269,7 +265,7 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nThe Book is 100% Implemented (Clusters, Divergence, 12 VSA, MTF) 📖🛡️")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nSniper Mode Activated: 100% Profit taken at Target 1 🎯💰")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -352,21 +348,17 @@ class TradingSystem:
                 exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
                 icon = "🟢" if trade['side'] == "LONG" else "🔴"
                 
-                targets_msg = ""
-                for idx, tp in enumerate(safe_tps):
-                    tp_roe = StrategyEngine.calc_actual_roe(safe_entry, tp, trade['side'], dynamic_lev)
-                    targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{format_price(tp)}</code> (+{tp_roe:.1f}%)\n"
-
+                tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
 
-                # رسالة سرية بدون ذكر أي تفاصيل
+                # رسالة الدخول مع هدف واحد فقط
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
                     f"────────────────\n"
                     f"🛒 <b>Entry:</b> <code>{format_price(safe_entry)}</code>\n"
                     f"⚖️ <b>Leverage:</b> <b>{dynamic_lev}x</b>\n"
                     f"────────────────\n"
-                    f"{targets_msg}"
+                    f"🎯 <b>Sniper Target:</b> <code>{format_price(safe_tps[0])}</code> (+{tp_roe:.1f}%)\n"
                     f"────────────────\n"
                     f"🛑 <b>Stop Loss:</b> <code>{format_price(safe_sl)}</code> ({pnl_sl_raw:.1f}% ROE)"
                 )
@@ -440,19 +432,18 @@ class TradingSystem:
                     
                     side = trade['side']
                     current_price = ticker['last']
-                    step = trade['step']
                     entry = trade['entry']
                     current_sl = trade.get('last_sl_price', trade['sl'])
                     pos_size = trade['position_size']
                     margin = trade.get('margin', 1.0)
-                    num_tps = len(trade['tps'])
+                    target = trade['tps'][0] # يوجد هدف واحد فقط
                     
+                    # 🔴 ضرب الستوب لوس
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
                         pnl = (current_sl - entry) * pos_size if side == "LONG" else (entry - current_sl) * pos_size
                         display_roe = (pnl / margin) * 100
-                        if display_roe > 0.5: msg = f"🛡️ <b>Trade Secured in Profit</b> (+{display_roe:.1f}% ROE)"; self._log_trade_result('wins', display_roe)
-                        elif -0.5 <= display_roe <= 0.5: msg = f"⚖️ <b>Trade Closed at Break-Even</b> (0.0% ROE)"; self._log_trade_result('break_evens', display_roe)
-                        else: msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:.1f}% ROE)"; self._log_trade_result('losses', display_roe)
+                        msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:.1f}% ROE)"
+                        self._log_trade_result('losses', display_roe)
 
                         async with self.trade_lock:
                             self._update_equity_and_drawdown(pnl)
@@ -462,34 +453,21 @@ class TradingSystem:
                             self.save_state()
                         continue
 
-                    target = trade['tps'][step] if step < num_tps else None 
+                    # 🟢 ضرب الهدف (إغلاق الصفقة بالكامل مباشرة)
                     if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
-                        trade['step'] += 1
-                        new_step = trade['step']
-                        tp_roe = StrategyEngine.calc_actual_roe(entry, target, side, trade['leverage'])
+                        pnl = (target - entry) * pos_size if side == "LONG" else (entry - target) * pos_size
+                        display_roe = (pnl / margin) * 100 
                         
-                        if new_step < num_tps:
-                            moved = False
-                            if new_step == 1:
-                                trade['last_sl_price'] = entry
-                                moved = True
-
-                            status_tag = "(Break-Even Secured)" if moved else ""
-                            update_msg = f"🛡️ <b>Update:</b> SL moved to Entry <code>{format_price(entry)}</code> {status_tag}" if moved else ""
-                            msg = f"✅ <b>TP {new_step} HIT! (+{tp_roe:.1f}% ROE)</b>\n{update_msg}" if update_msg else f"✅ <b>TP {new_step} HIT! (+{tp_roe:.1f}% ROE)</b>"
+                        msg = f"🏆 <b>SNIPER HIT! (Target Secured)</b> 🏦\n💰 <b>Net Profit:</b> +{display_roe:.1f}% ROE"
+                        self._log_trade_result('wins', display_roe)
+                        
+                        async with self.trade_lock:
+                            self._update_equity_and_drawdown(pnl)
+                            self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
+                            if sym in self.active_trades: del self.active_trades[sym]
                             await self.tg.send(msg, trade['msg_id'])
                             self.save_state() 
-                        else:
-                            pnl = (target - entry) * pos_size if side == "LONG" else (entry - target) * pos_size
-                            display_roe = (pnl / margin) * 100 
-                            msg = f"🏆 <b>ALL TARGETS SMASHED!</b> 🏦\n💰 <b>Total Bagged:</b> +{display_roe:.1f}% ROE"
-                            self._log_trade_result('wins', display_roe)
-                            async with self.trade_lock:
-                                self._update_equity_and_drawdown(pnl)
-                                self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
-                                if sym in self.active_trades: del self.active_trades[sym]
-                                await self.tg.send(msg, trade['msg_id'])
-                                self.save_state() 
+                            
                 await asyncio.sleep(2)
             except Exception: await asyncio.sleep(5)
 
@@ -506,7 +484,7 @@ class TradingSystem:
                 msg = (
                     f"📈 <b>VIP DAILY REPORT (24H)</b> 📉\n────────────────\n"
                     f"🎯 <b>Total Signals:</b> {d_stats['signals']}\n✅ <b>Winning Trades:</b> {d_stats['wins']}\n"
-                    f"🛡️ <b>Break-Evens:</b> {d_stats['break_evens']}\n❌ <b>Losing Trades:</b> {d_stats['losses']}\n"
+                    f"❌ <b>Losing Trades:</b> {d_stats['losses']}\n"
                     f"📊 <b>Decisive Win Rate:</b> {wr:.1f}%\n────────────────\n"
                     f"📉 <b>Max Drawdown:</b> {self.stats['max_drawdown_pct']:.2f}%\n"
                     f"📐 <b>Average Net Profit:</b> {avg_roe:+.1f}% ROE\n"
