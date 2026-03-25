@@ -40,14 +40,19 @@ class Config:
     CANDLES_LIMIT_MICRO = 100 
     MAX_TRADES_AT_ONCE = 3  
     
-    MIN_24H_VOLUME_USDT = 1_000_000 
+    # 👈 القائمة النخبوية: العملات الرئيسية + TAO و RIVER
+    TARGET_COINS = [
+        'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 
+        'BNB/USDT:USDT', 'XRP/USDT:USDT', 'ADA/USDT:USDT', 
+        'TAO/USDT:USDT', 'RIVER/USDT:USDT'
+    ]
     
     FIXED_MARGIN_USDT = 0.15  # 👈 الدخول الصارم بـ 0.15$
-    FIXED_LEVERAGE = 50       # 👈 الرافعة المحاسبية (يفضل ضبطها يدوياً بالتطبيق)
+    FIXED_LEVERAGE = 50       
     
-    COOLDOWN_SECONDS = 3600 
+    COOLDOWN_SECONDS = 3600   # 👈 فترة التبريد الإجبارية لمنع التكرار (ساعة كاملة)
     STATE_FILE = "bot_state.json"
-    VERSION = "V68000.17 - The Final Apex (Fast Algo TP/SL)"
+    VERSION = "V68000.18 - The Silent Elite Sniper"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -71,7 +76,7 @@ async def fetch_with_retry(coro, *args, retries=3, delay=2.0, **kwargs):
             await asyncio.sleep(delay)
 
 # ==========================================
-# 2. محرك WEEX السريع (بدون مسار الرافعة الميت)
+# 2. محرك WEEX للفيوتشر (Algo Orders)
 # ==========================================
 class WeexExecutor:
     def __init__(self):
@@ -308,10 +313,8 @@ class TradingSystem:
         self.tg = TelegramNotifier()
         self.active_trades = {}
         self.cooldown_list = {} 
-        self.cached_valid_coins = [] 
-        self.last_cache_time = 0
         self.last_scan_time = "Not Scanned Yet"
-        self.semaphore = asyncio.Semaphore(10) 
+        self.semaphore = asyncio.Semaphore(5) 
         self.trade_lock = asyncio.Lock() 
         self.stats = {"virtual_equity": 100.0, "peak_equity": 100.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}} 
         self.running = True
@@ -322,7 +325,7 @@ class TradingSystem:
         await self.exchange_data.load_markets()
         self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Margin: ${Config.FIXED_MARGIN_USDT} | Coins > $1M Vol")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Coins: Elite List | Anti-Spam Active 🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -352,27 +355,6 @@ class TradingSystem:
         self.stats['all_time'][result_type] += 1; self.stats['daily'][result_type] += 1
         self.stats['all_time']['total_roe'] += roe_val; self.stats['daily']['total_roe'] += roe_val
 
-    async def update_valid_coins_cache(self):
-        current_ts = int(datetime.now(timezone.utc).timestamp())
-        if current_ts - self.last_cache_time > 86400:
-            try: await self.exchange_data.load_markets(reload=True)
-            except Exception: pass
-
-        if current_ts - self.last_cache_time > 900 or not self.cached_valid_coins:
-            try:
-                tickers = await fetch_with_retry(self.exchange_data.fetch_tickers)
-                if not tickers: return
-                valid_coins_with_vol = []
-                for sym, d in tickers.items():
-                    if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
-                        vol = float(d.get('quoteVolume') or 0)
-                        if vol >= Config.MIN_24H_VOLUME_USDT:
-                            valid_coins_with_vol.append((sym, vol))
-                valid_coins_with_vol.sort(key=lambda x: x[1], reverse=True)
-                self.cached_valid_coins = [x[0] for x in valid_coins_with_vol]
-                if self.cached_valid_coins: self.last_cache_time = current_ts
-            except Exception: pass
-
     async def process_symbol(self, sym):
         async with self.semaphore:
             if sym in self.active_trades or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
@@ -390,6 +372,11 @@ class TradingSystem:
             if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
             try:
                 sym = trade['symbol']
+                
+                # 🛑 التبريد الفوري: مجرد محاولة الدخول تعطي العملة حظر تبريد لمنع التكرار نهائياً
+                self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
+                self.save_state()
+
                 ticker = await fetch_with_retry(self.exchange_data.fetch_ticker, sym)
                 if not ticker or 'last' not in ticker: return 
                 
@@ -414,7 +401,7 @@ class TradingSystem:
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
                 
-                # 🚀 النظام الجديد النظيف
+                # إرسال أمر الماركت
                 order_success = await self.weex.open_market_order(sym, trade['side'], position_size_str)
 
                 weex_status = "⚠️ WEEX Execution Failed (Check Balance/Margin)"
@@ -440,7 +427,6 @@ class TradingSystem:
                 if msg_id and order_success:
                     trade['msg_id'] = msg_id
                     self.active_trades[sym] = trade
-                    self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
                     self.save_state() 
             except Exception: pass
 
@@ -451,10 +437,9 @@ class TradingSystem:
                 if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
                     await asyncio.sleep(10); continue
                 
-                await self.update_valid_coins_cache()
-                
                 current_time = int(datetime.now(timezone.utc).timestamp())
-                scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
+                # 👈 مسح القائمة النخبوية فقط (بدون رادار معقد)
+                scan_list = [c for c in Config.TARGET_COINS if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
                 chunk_size = 3 
                 for i in range(0, len(scan_list), chunk_size):
@@ -492,7 +477,6 @@ class TradingSystem:
                     margin = trade['margin']
                     target = trade['tps'][0] 
                     
-                    # البوت الآن يراقب السعر لحساب الأرباح وإفراغ الذاكرة فقط (المنصة تتكفل بالإغلاق الفعلي)
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
                         pnl = (current_sl - entry) * pos_size if side == "LONG" else (entry - current_sl) * pos_size
                         display_roe = (pnl / margin) * 100
@@ -501,6 +485,7 @@ class TradingSystem:
 
                         async with self.trade_lock:
                             self._update_equity_and_drawdown(pnl)
+                            # تجديد الحظر عند الإغلاق أيضاً للتأكيد
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
                             await self.tg.send(msg, trade['msg_id'])
                             if sym in self.active_trades: del self.active_trades[sym]
@@ -570,10 +555,10 @@ async def catch_all(path_name: str):
         <h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1>
         <hr style="border: 1px solid #333;">
         <h3>Live Diagnostics:</h3>
-        <p><b>Target Coins:</b> ALL Coins > $1M Volume</p>
-        <p><b>Margin per Trade:</b> ${Config.FIXED_MARGIN_USDT}</p>
+        <p><b>Target Coins:</b> Elite List (BTC, ETH, SOL, BNB, XRP, ADA, TAO, RIVER)</p>
+        <p><b>Margin per Trade:</b> ${Config.FIXED_MARGIN_USDT} | <b>Lev:</b> {Config.FIXED_LEVERAGE}x</p>
         <p><b>Last Market Scan:</b> {bot.last_scan_time}</p>
-        <p><b>System Status:</b> RUNNING (Anti-Sleep Guard + Algo Shield Active)</p>
+        <p><b>System Status:</b> RUNNING (Anti-Spam Elite Shield Active)</p>
     </body>
     </html>
     """
