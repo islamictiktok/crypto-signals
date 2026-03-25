@@ -25,7 +25,7 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    # 🔑 مفاتيح منصة WEEX (للتنفيذ الفعلي للصفقات)
+    # 🔑 مفاتيح منصة WEEX المدمجة
     WEEX_API_KEY = "weex_64531a2b79748e202623fe9cd96ff478"
     WEEX_SECRET_KEY = "263f6868f81b6d9dd4af394c6f07d8798b5d4ba220b42c1a598893acb95bbc12"
     
@@ -38,7 +38,7 @@ class Config:
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 500_000 
     
-    # 💵 إدارة رأس المال (مبلغ ثابت لكل صفقة كما طلبت)
+    # 💵 إدارة رأس المال (مبلغ ثابت 0.20$ لكل صفقة)
     FIXED_MARGIN_USDT = 0.20  
     
     MIN_LEVERAGE = 10    
@@ -46,7 +46,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V68000.0 - WEEX Auto-Execution (Fixed 0.20$)"
+    VERSION = "V68000.0 - WEEX Sniper Edition (Fixed 0.20$)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -89,7 +89,7 @@ class TelegramNotifier:
         except Exception: return None
 
 # ==========================================
-# 3. محرك الاستراتيجية (بدون أي تغيير - العقل المحلل)
+# 3. محرك الاستراتيجية (The 100% Book Logic)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -113,7 +113,7 @@ class StrategyEngine:
             if len(df_macro) < 20: return None
 
             anchors_found = []
-            FIB_EXT = [1.618] # هدف واحد فقط
+            FIB_EXT = [1.618] # 👈 هدف واحد فقط (الهدف الأول)
             
             for i in range(len(df_macro)-20, len(df_macro)-1):
                 anchor = df_macro.iloc[i]
@@ -237,17 +237,13 @@ class StrategyEngine:
 # ==========================================
 class TradingSystem:
     def __init__(self):
-        # 🧠 العقل: قراءة البيانات من MEXC
         self.exchange_data = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
-        
-        # 🦾 اليد: التنفيذ الفعلي في منصة WEEX
         self.exchange_weex = ccxt.weex({
             'apiKey': Config.WEEX_API_KEY,
             'secret': Config.WEEX_SECRET_KEY,
             'enableRateLimit': True,
             'options': {'defaultType': 'swap'}
         })
-        
         self.tg = TelegramNotifier()
         self.active_trades = {}
         self.cooldown_list = {} 
@@ -260,18 +256,15 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         await self.exchange_data.load_markets()
-        
-        # التأكد من عمل API WEEX
         try:
-            if Config.WEEX_API_KEY != "ضع_مفتاح_weex_هنا":
-                await self.exchange_weex.load_markets()
-                Log.print("✅ WEEX API Connected Successfully!", Log.GREEN)
+            await self.exchange_weex.load_markets()
+            Log.print("✅ WEEX API Connected Successfully!", Log.GREEN)
         except Exception as e:
             Log.print(f"⚠️ WEEX Connection Error: {e}", Log.YELLOW)
             
         self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nWEEX Auto-Execution Mode (Fixed Margin: ${Config.FIXED_MARGIN_USDT}) 🤖💸")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nWEEX Auto-Execution Mode (Fixed Margin: ${Config.FIXED_MARGIN_USDT} - Single TP) 🤖💸")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -310,11 +303,10 @@ class TradingSystem:
             try:
                 sym = trade['symbol']
                 
-                # 🛑 الجراحة رقم 1: التحقق من وجود العملة في WEEX
-                if Config.WEEX_API_KEY != "ضع_مفتاح_weex_هنا":
-                    if sym not in self.exchange_weex.markets:
-                        Log.print(f"⚠️ Symbol {sym} not found in WEEX. Skipping.", Log.YELLOW)
-                        return # العملة غير موجودة، تجاهل بصمت
+                # التحقق من وجود العملة في WEEX
+                if sym not in self.exchange_weex.markets:
+                    Log.print(f"⚠️ Symbol {sym} not found in WEEX. Skipping.", Log.YELLOW)
+                    return 
 
                 ticker = await fetch_with_retry(self.exchange_data.fetch_ticker, sym)
                 if not ticker or 'last' not in ticker: return 
@@ -323,7 +315,7 @@ class TradingSystem:
                 
                 safe_entry = float(self.exchange_data.price_to_precision(sym, trade['entry']))
                 safe_sl = float(self.exchange_data.price_to_precision(sym, trade['sl']))
-                safe_tps = [float(self.exchange_data.price_to_precision(sym, tp)) for tp in trade['tps']]
+                safe_tps = [float(self.exchange_data.price_to_precision(sym, tp)) for tp in trade['tps']] # يحتوي على هدف واحد فقط
 
                 risk_distance = trade['risk_distance']
                 sl_distance_pct = (risk_distance / safe_entry) * 100
@@ -332,19 +324,15 @@ class TradingSystem:
                     
                 dynamic_lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
                 
-                # 🛑 الجراحة رقم 2: ضبط الرافعة لتناسب قوانين منصة WEEX
-                if Config.WEEX_API_KEY != "ضع_مفتاح_weex_هنا":
-                    market_weex = self.exchange_weex.markets[sym]
-                    # سحب أقصى رافعة مسموحة لهذه العملة في WEEX (إذا كانت متوفرة في API)
-                    weex_max_lev = market_weex.get('limits', {}).get('leverage', {}).get('max', Config.MAX_LEVERAGE_CAP)
-                    if dynamic_lev > weex_max_lev:
-                        dynamic_lev = int(weex_max_lev)
+                # ضبط الرافعة بناءً على حدود WEEX
+                market_weex = self.exchange_weex.markets[sym]
+                weex_max_lev = market_weex.get('limits', {}).get('leverage', {}).get('max', Config.MAX_LEVERAGE_CAP)
+                if dynamic_lev > weex_max_lev:
+                    dynamic_lev = int(weex_max_lev)
                 
-                # 🛑 الجراحة رقم 3: الدخول بمبلغ 0.20$ ثابت
+                # الدخول بمبلغ 0.20$
                 margin_required = Config.FIXED_MARGIN_USDT 
                 position_size_coins = (margin_required * dynamic_lev) / safe_entry
-                
-                # التأكد من صيغة حجم العملات (لتجنب رفض الأوامر من المنصة)
                 position_size_coins = float(self.exchange_data.amount_to_precision(sym, position_size_coins))
 
                 trade['entry'] = safe_entry; trade['sl'] = safe_sl; trade['tps'] = safe_tps
@@ -358,27 +346,23 @@ class TradingSystem:
                 
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 
-                # 🛑 الجراحة رقم 4: إرسال الأوامر الفعلية لمنصة WEEX
+                # إرسال الأمر لمنصة WEEX
                 order_success = False
-                if Config.WEEX_API_KEY != "ضع_مفتاح_weex_هنا":
-                    try:
-                        # 1. ضبط الرافعة المالية أولاً
-                        await self.exchange_weex.set_leverage(dynamic_lev, sym)
-                        
-                        # 2. فتح الصفقة ماركت (Market) مع الهدف والستوب المرفقين
-                        order_params = {
-                            'stopLossPrice': safe_sl,
-                            'takeProfitPrice': safe_tps[0]
-                        }
-                        order_side = 'buy' if trade['side'] == 'LONG' else 'sell'
-                        await self.exchange_weex.create_order(sym, 'market', order_side, position_size_coins, None, order_params)
-                        order_success = True
-                    except Exception as e:
-                        Log.print(f"⚠️ WEEX Order Failed: {e}", Log.RED)
-                        order_success = False # فشل فتح الصفقة بسبب رصيد غير كافٍ أو خطأ في المنصة
+                try:
+                    await self.exchange_weex.set_leverage(dynamic_lev, sym)
+                    order_params = {
+                        'stopLossPrice': safe_sl,
+                        'takeProfitPrice': safe_tps[0] # 👈 هدف واحد فقط
+                    }
+                    order_side = 'buy' if trade['side'] == 'LONG' else 'sell'
+                    await self.exchange_weex.create_order(sym, 'market', order_side, position_size_coins, None, order_params)
+                    order_success = True
+                except Exception as e:
+                    Log.print(f"⚠️ WEEX Order Failed: {e}", Log.RED)
+                    order_success = False 
 
-                # رسالة الدخول للتيليجرام
-                weex_status = "✅ WEEX Executed" if order_success else "⚠️ Simulation Only"
+                # رسالة التيليجرام بهدف واحد فقط
+                weex_status = "✅ WEEX Executed" if order_success else "⚠️ WEEX Execution Failed"
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
                     f"────────────────\n"
@@ -386,7 +370,7 @@ class TradingSystem:
                     f"⚖️ <b>Leverage:</b> <b>{dynamic_lev}x</b>\n"
                     f"💵 <b>Margin:</b> <b>${margin_required}</b>\n"
                     f"────────────────\n"
-                    f"🎯 <b>Target:</b> <code>{format_price(safe_tps[0])}</code> (+{tp_roe:.1f}%)\n"
+                    f"🎯 <b>Sniper Target:</b> <code>{format_price(safe_tps[0])}</code> (+{tp_roe:.1f}%)\n"
                     f"🛑 <b>Stop Loss:</b> <code>{format_price(safe_sl)}</code>\n"
                     f"────────────────\n"
                     f"<i>{weex_status}</i>"
@@ -463,7 +447,7 @@ class TradingSystem:
                     current_sl = trade.get('last_sl_price', trade['sl'])
                     pos_size = trade['position_size']
                     margin = trade.get('margin', 1.0)
-                    target = trade['tps'][0] 
+                    target = trade['tps'][0] # 👈 هدف واحد فقط
                     
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
                         pnl = (current_sl - entry) * pos_size if side == "LONG" else (entry - current_sl) * pos_size
