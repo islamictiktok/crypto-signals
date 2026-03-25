@@ -25,7 +25,7 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    # 🔑 مفاتيح منصة WEEX المدمجة
+    # 🔑 مفاتيح منصة WEEX
     WEEX_API_KEY = "weex_64531a2b79748e202623fe9cd96ff478"
     WEEX_SECRET_KEY = "263f6868f81b6d9dd4af394c6f07d8798b5d4ba220b42c1a598893acb95bbc12"
     
@@ -35,11 +35,10 @@ class Config:
     CANDLES_LIMIT_MACRO = 200 
     CANDLES_LIMIT_MICRO = 100 
     
-    MAX_TRADES_AT_ONCE = 3  
+    MAX_TRADES_AT_ONCE = 3  # 👈 3 صفقات كحد أقصى
     MIN_24H_VOLUME_USDT = 500_000 
     
-    # 💵 إدارة رأس المال (مبلغ ثابت 0.20$ لكل صفقة)
-    FIXED_MARGIN_USDT = 0.20  
+    FIXED_MARGIN_USDT = 0.20  # 👈 الدخول بـ 20 سنت فقط للصفقة
     
     MIN_LEVERAGE = 10    
     MAX_LEVERAGE_CAP = 100 
@@ -113,7 +112,7 @@ class StrategyEngine:
             if len(df_macro) < 20: return None
 
             anchors_found = []
-            FIB_EXT = [1.618] # 👈 هدف واحد فقط (الهدف الأول)
+            FIB_EXT = [1.618] # 👈 هدف واحد فقط ولا غيره
             
             for i in range(len(df_macro)-20, len(df_macro)-1):
                 anchor = df_macro.iloc[i]
@@ -227,8 +226,7 @@ class StrategyEngine:
 
             return {
                 "symbol": symbol, "side": setup["side"], "entry": setup["entry"], 
-                "sl": setup["sl"], "original_sl": setup["original_sl"], "tps": setup["tps"],
-                "strat": setup["strat"], "risk_distance": setup["risk_distance"]
+                "sl": setup["sl"], "tps": setup["tps"], "strat": setup["strat"], "risk_distance": setup["risk_distance"]
             }
         except Exception: return None
 
@@ -264,7 +262,7 @@ class TradingSystem:
             
         self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nWEEX Auto-Execution Mode (Fixed Margin: ${Config.FIXED_MARGIN_USDT} - Single TP) 🤖💸")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nWEEX Sniper Mode (Fixed Margin: ${Config.FIXED_MARGIN_USDT} - Single TP) 🤖💸")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -299,14 +297,13 @@ class TradingSystem:
 
     async def execute_trade(self, trade):
         async with self.trade_lock:
+            # 👈 التأكد للمرة الأخيرة من عدم تخطي 3 صفقات
             if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
             try:
                 sym = trade['symbol']
                 
-                # التحقق من وجود العملة في WEEX
-                if sym not in self.exchange_weex.markets:
-                    Log.print(f"⚠️ Symbol {sym} not found in WEEX. Skipping.", Log.YELLOW)
-                    return 
+                # تجاهل العملة بصمت إذا لم تكن في WEEX
+                if sym not in self.exchange_weex.markets: return 
 
                 ticker = await fetch_with_retry(self.exchange_data.fetch_ticker, sym)
                 if not ticker or 'last' not in ticker: return 
@@ -315,7 +312,7 @@ class TradingSystem:
                 
                 safe_entry = float(self.exchange_data.price_to_precision(sym, trade['entry']))
                 safe_sl = float(self.exchange_data.price_to_precision(sym, trade['sl']))
-                safe_tps = [float(self.exchange_data.price_to_precision(sym, tp)) for tp in trade['tps']] # يحتوي على هدف واحد فقط
+                safe_tps = [float(self.exchange_data.price_to_precision(sym, tp)) for tp in trade['tps']] # هدف واحد
 
                 risk_distance = trade['risk_distance']
                 sl_distance_pct = (risk_distance / safe_entry) * 100
@@ -324,13 +321,12 @@ class TradingSystem:
                     
                 dynamic_lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
                 
-                # ضبط الرافعة بناءً على حدود WEEX
                 market_weex = self.exchange_weex.markets[sym]
                 weex_max_lev = market_weex.get('limits', {}).get('leverage', {}).get('max', Config.MAX_LEVERAGE_CAP)
                 if dynamic_lev > weex_max_lev:
                     dynamic_lev = int(weex_max_lev)
                 
-                # الدخول بمبلغ 0.20$
+                # 0.20$ ثابت لكل صفقة
                 margin_required = Config.FIXED_MARGIN_USDT 
                 position_size_coins = (margin_required * dynamic_lev) / safe_entry
                 position_size_coins = float(self.exchange_data.amount_to_precision(sym, position_size_coins))
@@ -346,13 +342,13 @@ class TradingSystem:
                 
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 
-                # إرسال الأمر لمنصة WEEX
                 order_success = False
                 try:
                     await self.exchange_weex.set_leverage(dynamic_lev, sym)
+                    # 👈 نرسل لمنصة WEEX الصفقة مع الستوب والهدف الواحد ليتم غلقها تلقائياً
                     order_params = {
                         'stopLossPrice': safe_sl,
-                        'takeProfitPrice': safe_tps[0] # 👈 هدف واحد فقط
+                        'takeProfitPrice': safe_tps[0] 
                     }
                     order_side = 'buy' if trade['side'] == 'LONG' else 'sell'
                     await self.exchange_weex.create_order(sym, 'market', order_side, position_size_coins, None, order_params)
@@ -361,7 +357,6 @@ class TradingSystem:
                     Log.print(f"⚠️ WEEX Order Failed: {e}", Log.RED)
                     order_success = False 
 
-                # رسالة التيليجرام بهدف واحد فقط
                 weex_status = "✅ WEEX Executed" if order_success else "⚠️ WEEX Execution Failed"
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
@@ -378,7 +373,7 @@ class TradingSystem:
                 msg_id = await self.tg.send(msg)
                 
                 if msg_id:
-                    trade['msg_id'] = msg_id; trade['step'] = 0; trade['last_sl_price'] = safe_sl
+                    trade['msg_id'] = msg_id
                     self.active_trades[sym] = trade
                     self.save_state() 
             except Exception: pass
@@ -422,7 +417,7 @@ class TradingSystem:
                     await asyncio.gather(*tasks)
                     await asyncio.sleep(1.5) 
                 
-                gc.collect() 
+                gc.collect() # 👈 تنظيف الذاكرة دورياً لضمان العمل 24/7 دون انهيار السيرفر
                 await asyncio.sleep(15) 
             except Exception: await asyncio.sleep(5)
 
@@ -437,6 +432,7 @@ class TradingSystem:
                     if not tickers: 
                         await asyncio.sleep(5); continue
 
+                # 👈 مسح آمن للصفقات المفتوحة وإزالتها عند الهدف أو الستوب
                 for sym, trade in list(self.active_trades.items()):
                     ticker = tickers.get(sym)
                     if not ticker or not ticker.get('last'): continue 
@@ -444,11 +440,12 @@ class TradingSystem:
                     side = trade['side']
                     current_price = ticker['last']
                     entry = trade['entry']
-                    current_sl = trade.get('last_sl_price', trade['sl'])
+                    current_sl = trade['sl'] # 👈 لا يوجد ستوب متحرك بعد الآن، ستوب ثابت فقط
                     pos_size = trade['position_size']
-                    margin = trade.get('margin', 1.0)
+                    margin = trade['margin']
                     target = trade['tps'][0] # 👈 هدف واحد فقط
                     
+                    # 🔴 عند ضرب الستوب لوس
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
                         pnl = (current_sl - entry) * pos_size if side == "LONG" else (entry - current_sl) * pos_size
                         display_roe = (pnl / margin) * 100
@@ -457,10 +454,11 @@ class TradingSystem:
                         async with self.trade_lock:
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
                             await self.tg.send(msg, trade['msg_id'])
-                            if sym in self.active_trades: del self.active_trades[sym]
+                            if sym in self.active_trades: del self.active_trades[sym] # 👈 مسح الصفقة فوراً لتوفير مساحة لصفقة جديدة
                             self.save_state()
                         continue
 
+                    # 🟢 عند ضرب الهدف الأول والأخير
                     if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
                         pnl = (target - entry) * pos_size if side == "LONG" else (entry - target) * pos_size
                         display_roe = (pnl / margin) * 100 
@@ -469,7 +467,7 @@ class TradingSystem:
                         
                         async with self.trade_lock:
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
-                            if sym in self.active_trades: del self.active_trades[sym]
+                            if sym in self.active_trades: del self.active_trades[sym] # 👈 مسح الصفقة فوراً لتوفير مساحة لصفقة جديدة
                             await self.tg.send(msg, trade['msg_id'])
                             self.save_state() 
                             
@@ -505,7 +503,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
 async def catch_all(path_name: str):
-    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1><p>Status: WEEX Execution Active</p></body></html>", status_code=200)
+    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1><p>Status: WEEX Sniper Execution Active</p></body></html>", status_code=200)
 
 async def run_bot_background():
     try:
