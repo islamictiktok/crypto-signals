@@ -1,254 +1,555 @@
-import ccxt
-import pandas as pd
-import pandas_ta as ta
-import numpy as np
-import time
-from datetime import datetime, timedelta
+import asyncio
+import os
+import json
 import warnings
+import traceback
+import gc  
+from datetime import datetime, timezone
+import pandas as pd
+import numpy as np
+import pandas_ta as ta
+import ccxt.async_support as ccxt
+import aiohttp
+from fastapi import FastAPI, Response
+from fastapi.responses import HTMLResponse
+import uvicorn
+from contextlib import asynccontextmanager
 
 warnings.filterwarnings("ignore")
 
 # ==========================================
-# 1. إعدادات الاختبار التاريخي (Backtest Config)
+# 1. الإعدادات المركزية (CONFIG)
 # ==========================================
-SYMBOL = 'BTC/USDT'
-TIMEFRAME = '15m'
-DAYS_TO_BACKTEST = 30  # عدد الأيام التي تريد اختبارها
-INITIAL_CAPITAL = 1000.0  # رأس المال الوهمي
-RISK_PER_TRADE = 2.0  # المخاطرة 2%
-LEVERAGE = 20  # الرافعة المالية الثابتة للاختبار
-
-# ==========================================
-# 2. أداة جلب البيانات (Data Fetcher)
-# ==========================================
-def fetch_historical_data(symbol, timeframe, days):
-    print(f"⏳ جلب بيانات {symbol} لآخر {days} يوماً... الرجاء الانتظار.")
-    exchange = ccxt.binance({'enableRateLimit': True})
-    since = exchange.parse8601((datetime.utcnow() - timedelta(days=days)).isoformat())
-    all_ohlcv = []
+class Config:
+    TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
+    CHAT_ID = "-1003653652451"
+    RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    while since < exchange.milliseconds():
+    TF_MACRO = '4h'  
+    TF_MICRO = '15m'
+    
+    CANDLES_LIMIT_MACRO = 200 
+    CANDLES_LIMIT_MICRO = 100 
+    
+    MAX_TRADES_AT_ONCE = 3  
+    MIN_24H_VOLUME_USDT = 500_000 
+    MAX_ALLOWED_SPREAD = 0.005 
+    
+    RISK_PER_TRADE_PCT = 2.0    
+    MIN_LEVERAGE = 10    
+    MAX_LEVERAGE_CAP = 100 
+    
+    COOLDOWN_SECONDS = 3600 
+    STATE_FILE = "bot_state.json"
+    VERSION = "V67000.0 - The Volumnacci Holy Grail (Clusters & Divergence)"
+
+class Log:
+    GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
+    @staticmethod
+    def print(msg, color=RESET):
+        ts = datetime.now().strftime("%H:%M:%S")
+        print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
+
+def format_price(price):
+    if price <= 0: return "0.0001" 
+    if price < 0.001: return f"{price:.7f}".rstrip('0').rstrip('.')
+    elif price < 1: return f"{price:.5f}".rstrip('0').rstrip('.')
+    return f"{price:.4f}".rstrip('0').rstrip('.')
+
+async def fetch_with_retry(coro, *args, retries=3, delay=1.5, **kwargs):
+    for i in range(retries):
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=1000)
-            if not ohlcv: break
-            since = ohlcv[-1][0] + 1
-            all_ohlcv.extend(ohlcv)
-            time.sleep(0.1)
+            return await coro(*args, **kwargs)
         except Exception as e:
-            print(f"Error fetching data: {e}")
-            break
-            
-    df = pd.DataFrame(all_ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-    df['time'] = pd.to_datetime(df['time'], unit='ms')
-    df.set_index('time', inplace=True)
-    
-    # إزالة التكرارات إن وجدت
-    df = df[~df.index.duplicated(keep='first')]
-    print(f"✅ تم جلب {len(df)} شمعة ({timeframe}).")
-    return df
+            if i == retries - 1: return None
+            await asyncio.sleep(delay)
+
+class TelegramNotifier:
+    def __init__(self):
+        self.base_url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
+        self.session = None
+
+    async def start(self): 
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+    async def stop(self): 
+        if self.session: await self.session.close()
+    async def send(self, text, reply_to=None):
+        if not self.session: return None
+        payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        if reply_to: payload["reply_to_message_id"] = reply_to
+        try:
+            async with self.session.post(self.base_url, json=payload) as resp:
+                data = await resp.json()
+                return data.get('result', {}).get('message_id') if resp.status == 200 else None
+        except Exception: return None
 
 # ==========================================
-# 3. محرك المحاكاة (The Backtester)
+# 3. محرك الاستراتيجية (The 100% Book Logic)
 # ==========================================
-def run_backtest(df_micro):
-    print(f"🚀 بدء تشغيل محاكاة استراتيجية الفوليوناتشي (الكتاب الأصلي)...")
-    
-    # 1. تجهيز الفريم الأكبر (4H) من بيانات الـ 15m
-    df_macro = df_micro.resample('4h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'vol': 'sum'})
-    df_macro.dropna(inplace=True)
-    
-    # 2. حساب المؤشرات للفريمين
-    df_macro['vol_sma'] = ta.sma(df_macro['vol'], length=40)
-    df_macro['spread'] = df_macro['high'] - df_macro['low']
-    df_macro['spread_sma'] = ta.sma(df_macro['spread'], length=40)
-    df_macro['kijun'] = (df_macro['high'].rolling(26).max() + df_macro['low'].rolling(26).min()) / 2
-    
-    df_micro['vol_sma'] = ta.sma(df_micro['vol'], length=20)
-    
-    # إعدادات المحفظة والنتائج
-    equity = INITIAL_CAPITAL
-    peak_equity = INITIAL_CAPITAL
-    max_drawdown = 0.0
-    
-    trades = []
-    active_trade = None
-    
-    FIB_EXT = [1.618, 2.618, 4.236]
-    
-    # 3. المرور على الشموع شمعة بشمعة (لمنع استراق النظر للمستقبل)
-    for i in range(50, len(df_micro)):
-        current_time = df_micro.index[i]
-        curr_m = df_micro.iloc[i]
-        prev_m = df_micro.iloc[i-1]
-        
-        # إدارة الصفقة المفتوحة
-        if active_trade:
-            side = active_trade['side']
-            entry = active_trade['entry']
-            pos_size = active_trade['pos_size']
-            sl = active_trade['sl']
-            tps = active_trade['tps']
-            step = active_trade['step']
+class StrategyEngine:
+    @staticmethod
+    def calc_actual_roe(entry, exit_price, side, lev):
+        if entry <= 0 or exit_price <= 0: return 0.0 
+        if side == "LONG": return float(((exit_price - entry) / entry) * 100.0 * lev)
+        else: return float(((entry - exit_price) / entry) * 100.0 * lev)
+
+    @staticmethod
+    def analyze_symbol(symbol, ohlcv_macro, ohlcv_micro):
+        try:
+            df_macro = pd.DataFrame(ohlcv_macro, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            if len(df_macro) < 60: return None
             
-            # ضرب الستوب لوس
-            if (side == "LONG" and curr_m['low'] <= sl) or (side == "SHORT" and curr_m['high'] >= sl):
-                exit_price = sl
-                pnl = (exit_price - entry) * pos_size if side == "LONG" else (entry - exit_price) * pos_size
-                equity += pnl
+            df_macro['vol_sma'] = ta.sma(df_macro['vol'], length=40)
+            df_macro['spread'] = df_macro['high'] - df_macro['low']
+            df_macro['spread_sma'] = ta.sma(df_macro['spread'], length=40)
+            df_macro['kijun'] = (df_macro['high'].rolling(26).max() + df_macro['low'].rolling(26).min()) / 2
+            df_macro.dropna(inplace=True)
+            
+            if len(df_macro) < 20: return None
+
+            anchors_found = []
+            FIB_EXT = [1.618, 2.618, 4.236, 6.854, 11.09] 
+            
+            # 👈 استخراج 12 نموذج VSA (تخزين كل الشموع المطابقة لاكتشاف الكلاستر)
+            for i in range(len(df_macro)-20, len(df_macro)-1):
+                anchor = df_macro.iloc[i]
+                conf = df_macro.iloc[i+1] 
                 
-                # تحديث التراجع
-                if equity > peak_equity: peak_equity = equity
-                dd = ((peak_equity - equity) / peak_equity) * 100
-                max_drawdown = max(max_drawdown, dd)
+                a_spread = anchor['spread']; a_vol = anchor['vol']
+                a_high = anchor['high']; a_low = anchor['low']
+                a_close = anchor['close']; a_open = anchor['open']
                 
-                status = "Break-Even" if sl == entry else "Loss"
-                trades.append({"time": current_time, "side": side, "entry": entry, "exit": exit_price, "pnl": pnl, "status": status, "strat": active_trade['strat']})
-                active_trade = None
-                continue
+                vol_avg = anchor['vol_sma']; spread_avg = anchor['spread_sma']
                 
-            # ضرب الأهداف
-            target = tps[step] if step < len(tps) else None
-            if target and ((side == "LONG" and curr_m['high'] >= target) or (side == "SHORT" and curr_m['low'] <= target)):
-                active_trade['step'] += 1
-                if active_trade['step'] == 1:
-                    active_trade['sl'] = entry # 👈 تأمين الدخول عند الهدف الأول (حجز)
+                is_ultra_vol = a_vol > (vol_avg * 2.5) 
+                is_high_vol = a_vol > (vol_avg * 1.5)  
+                is_low_vol = a_vol < (vol_avg * 0.8)
+                is_wide_spread = a_spread > (spread_avg * 1.5) 
+                is_narrow_spread = a_spread < (spread_avg * 0.8)
                 
-                if active_trade['step'] == len(tps): # ضرب الهدف الأخير
-                    exit_price = target
-                    pnl = (exit_price - entry) * pos_size if side == "LONG" else (entry - exit_price) * pos_size
-                    equity += pnl
+                body_middle = a_low + (a_spread / 2)
+                upper_third = a_high - (a_spread / 3)
+                lower_third = a_low + (a_spread / 3)
+                is_up = a_close > a_open; is_down = a_close < a_open
+
+                temp_type = None; temp_dir = None
+                
+                # 🟢 6 مظاهر قوة 
+                if is_high_vol and a_close > body_middle and (min(a_open, a_close) - a_low) > (a_spread * 0.5): temp_type, temp_dir = "Shake Out", "LONG"
+                elif is_up and is_high_vol and a_close > df_macro.iloc[i-1]['high'] and df_macro.iloc[i-1]['close'] < df_macro.iloc[i-1]['open']: temp_type, temp_dir = "Bottom Reversal", "LONG"
+                elif is_wide_spread and is_ultra_vol and a_close > lower_third: temp_type, temp_dir = "Selling Climax", "LONG"
+                elif not is_wide_spread and is_high_vol and lower_third <= a_close <= upper_third: temp_type, temp_dir = "Stopping Volume", "LONG"
+                elif is_down and is_narrow_spread and is_low_vol: temp_type, temp_dir = "No Supply", "LONG"
+                elif is_up and is_wide_spread and is_high_vol and a_close > upper_third: temp_type, temp_dir = "Effort to Rise", "LONG"
+
+                # 🔴 6 مظاهر ضعف 
+                if temp_type is None:
+                    if is_high_vol and a_close < body_middle and (a_high - max(a_open, a_close)) > (a_spread * 0.5): temp_type, temp_dir = "Up Thrust", "SHORT"
+                    elif is_down and is_high_vol and a_close < df_macro.iloc[i-1]['low'] and df_macro.iloc[i-1]['close'] > df_macro.iloc[i-1]['open']: temp_type, temp_dir = "Top Reversal", "SHORT"
+                    elif is_wide_spread and is_ultra_vol and a_close < upper_third: temp_type, temp_dir = "Buying Climax", "SHORT"
+                    elif is_narrow_spread and is_high_vol and a_close < body_middle: temp_type, temp_dir = "End of Rising Market", "SHORT"
+                    elif is_up and is_narrow_spread and is_low_vol: temp_type, temp_dir = "No Demand", "SHORT"
+                    elif is_down and is_wide_spread and is_high_vol and a_close < lower_third: temp_type, temp_dir = "Effort to Fall", "SHORT"
+
+                # تأكيد النموذج
+                if temp_type and temp_dir:
+                    conf_is_up = conf['close'] > conf['open']
+                    if (temp_dir == "LONG" and conf_is_up) or (temp_dir == "SHORT" and not conf_is_up):
+                        anchors_found.append({"type": temp_type, "dir": temp_dir, "high": a_high, "low": a_low, "range": a_high - a_low})
+
+            if not anchors_found: return None
+
+            # 👈 خوارزمية الكلاستر (Cluster Detection - ص 70)
+            primary_anchor = anchors_found[-1] # الشمعة الأحدث
+            cluster_msg = ""
+            
+            if len(anchors_found) >= 2:
+                prev_anchor = anchors_found[-2]
+                if primary_anchor['dir'] == prev_anchor['dir']:
+                    # هل توجد مستويات فيبوناتشي متطابقة بنسبة 99% بين الشمعتين؟
+                    for f1 in FIB_EXT:
+                        lvl1 = primary_anchor['low'] + (primary_anchor['range'] * f1) if primary_anchor['dir'] == "LONG" else primary_anchor['high'] - (primary_anchor['range'] * f1)
+                        for f2 in FIB_EXT:
+                            lvl2 = prev_anchor['low'] + (prev_anchor['range'] * f2) if prev_anchor['dir'] == "LONG" else prev_anchor['high'] - (prev_anchor['range'] * f2)
+                            if abs(lvl1 - lvl2) / lvl1 < 0.005: 
+                                cluster_msg = " [CLUSTER DETECTED 🎯]"
+                                break
+
+            df_micro = pd.DataFrame(ohlcv_micro, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            if len(df_micro) < 10: return None
+            df_micro['vol_sma'] = ta.sma(df_micro['vol'], length=20)
+            df_micro.dropna(inplace=True)
+            
+            curr_m = df_micro.iloc[-2] 
+            prev_m = df_micro.iloc[-3] 
+            macro_latest = df_macro.iloc[-1] 
+            
+            setup = None
+            is_effort_volume = curr_m['vol'] > prev_m['vol']
+            
+            # 👈 خوارزمية الدايفرجنس (Volume Divergence - ص 67)
+            # فحص إذا كان السعر يرتفع/ينخفض ولكن الفوليوم لا يدعمه
+            bullish_divergence = curr_m['low'] < prev_m['low'] and curr_m['vol_sma'] < prev_m['vol_sma']
+            bearish_divergence = curr_m['high'] > prev_m['high'] and curr_m['vol_sma'] < prev_m['vol_sma']
+
+            a_high = primary_anchor['high']
+            a_low = primary_anchor['low']
+            a_range = primary_anchor['range']
+            
+            if primary_anchor['dir'] == "LONG":
+                level_100 = a_high
+                level_0 = a_low
+                kijun_ok = macro_latest['close'] > macro_latest['kijun']
+                
+                is_breakout = prev_m['close'] <= level_100 and curr_m['close'] > level_100
+                is_retest = curr_m['low'] <= level_100 and curr_m['close'] > level_100 and prev_m['close'] > level_100
+                
+                # تأكيد الكسر بالفوليوم ومنع الكسر في حال وجود دايفرجنس بيعي يعاكسنا
+                if (is_breakout or is_retest) and is_effort_volume and curr_m['close'] > curr_m['open'] and kijun_ok and not bearish_divergence:
+                    entry = curr_m['close']
+                    sl = curr_m['low'] - (curr_m['high'] - curr_m['low']) * 0.1 
+                    risk = entry - sl
                     
-                    if equity > peak_equity: peak_equity = equity
-                    trades.append({"time": current_time, "side": side, "entry": entry, "exit": exit_price, "pnl": pnl, "status": "Win (Full TP)", "strat": active_trade['strat']})
-                    active_trade = None
-            continue # لا نبحث عن صفقات جديدة والصفقة الحالية مفتوحة
-            
-        # ===============================================
-        # البحث عن فرص جديدة
-        # ===============================================
-        # الحصول على بيانات الـ 4H المتوفرة حتى هذه اللحظة فقط
-        macro_history = df_macro[df_macro.index <= current_time]
-        if len(macro_history) < 20: continue
-        
-        macro_latest = macro_history.iloc[-1]
-        
-        anchors_found = []
-        # مسح آخر 20 شمعة 4H لاكتشاف الـ VSA
-        for j in range(len(macro_history)-15, len(macro_history)-1):
-            anchor = macro_history.iloc[j]
-            conf = macro_history.iloc[j+1]
-            
-            a_spread = anchor['spread']; a_vol = anchor['vol']
-            a_high = anchor['high']; a_low = anchor['low']
-            a_close = anchor['close']; a_open = anchor['open']
-            vol_avg = anchor['vol_sma']; spread_avg = anchor['spread_sma']
-            
-            is_ultra_vol = a_vol > (vol_avg * 2.5) 
-            is_high_vol = a_vol > (vol_avg * 1.5)  
-            is_low_vol = a_vol < (vol_avg * 0.8)
-            is_wide_spread = a_spread > (spread_avg * 1.5) 
-            is_narrow_spread = a_spread < (spread_avg * 0.8)
-            
-            body_middle = a_low + (a_spread / 2)
-            upper_third = a_high - (a_spread / 3)
-            lower_third = a_low + (a_spread / 3)
-            is_up = a_close > a_open; is_down = a_close < a_open
+                    if risk > 0 and (risk / entry * 100) <= 8.0:
+                        tps = [level_0 + (a_range * fib) for fib in FIB_EXT]
+                        setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}{cluster_msg}", "risk_distance": risk}
 
-            temp_type = None; temp_dir = None
-            
-            # مظاهر القوة والضعف المبسطة للباك تيست
-            if is_high_vol and a_close > body_middle and (min(a_open, a_close) - a_low) > (a_spread * 0.5): temp_type, temp_dir = "Shake Out", "LONG"
-            elif is_wide_spread and is_ultra_vol and a_close > lower_third: temp_type, temp_dir = "Selling Climax", "LONG"
-            elif is_up and is_wide_spread and is_high_vol and a_close > upper_third: temp_type, temp_dir = "Effort to Rise", "LONG"
-            elif is_high_vol and a_close < body_middle and (a_high - max(a_open, a_close)) > (a_spread * 0.5): temp_type, temp_dir = "Up Thrust", "SHORT"
-            elif is_wide_spread and is_ultra_vol and a_close < upper_third: temp_type, temp_dir = "Buying Climax", "SHORT"
-            elif is_down and is_wide_spread and is_high_vol and a_close < lower_third: temp_type, temp_dir = "Effort to Fall", "SHORT"
-
-            if temp_type and temp_dir:
-                conf_is_up = conf['close'] > conf['open']
-                if (temp_dir == "LONG" and conf_is_up) or (temp_dir == "SHORT" and not conf_is_up):
-                    anchors_found.append({"type": temp_type, "dir": temp_dir, "high": a_high, "low": a_low, "range": a_high - a_low})
-
-        if not anchors_found: continue
-        
-        primary_anchor = anchors_found[-1]
-        
-        is_effort_volume = curr_m['vol'] > prev_m['vol']
-        bullish_divergence = curr_m['low'] < prev_m['low'] and curr_m['vol_sma'] < prev_m['vol_sma']
-        bearish_divergence = curr_m['high'] > prev_m['high'] and curr_m['vol_sma'] < prev_m['vol_sma']
-
-        a_high = primary_anchor['high']
-        a_low = primary_anchor['low']
-        a_range = primary_anchor['range']
-        
-        # 🟢 التنفيذ الشراء
-        if primary_anchor['dir'] == "LONG":
-            kijun_ok = macro_latest['close'] > macro_latest['kijun']
-            is_breakout = prev_m['close'] <= a_high and curr_m['close'] > a_high
-            is_retest = curr_m['low'] <= a_high and curr_m['close'] > a_high and prev_m['close'] > a_high
-            
-            if (is_breakout or is_retest) and is_effort_volume and curr_m['close'] > curr_m['open'] and kijun_ok and not bearish_divergence:
-                entry = curr_m['close']
-                sl = curr_m['low'] - (curr_m['high'] - curr_m['low']) * 0.1 
-                risk = entry - sl
+            elif primary_anchor['dir'] == "SHORT":
+                level_100 = a_low
+                level_0 = a_high
+                kijun_ok = macro_latest['close'] < macro_latest['kijun']
                 
-                if risk > 0 and (risk / entry * 100) <= 8.0:
-                    tps = [a_low + (a_range * fib) for fib in FIB_EXT]
-                    risk_amount = equity * (RISK_PER_TRADE / 100.0)
-                    pos_size = (risk_amount / risk) * LEVERAGE
-                    
-                    active_trade = {"side": "LONG", "entry": entry, "sl": sl, "tps": tps, "step": 0, "pos_size": pos_size, "strat": primary_anchor['type']}
-
-        # 🔴 التنفيذ البيع
-        elif primary_anchor['dir'] == "SHORT":
-            kijun_ok = macro_latest['close'] < macro_latest['kijun']
-            is_breakout = prev_m['close'] >= a_low and curr_m['close'] < a_low
-            is_retest = curr_m['high'] >= a_low and curr_m['close'] < a_low and prev_m['close'] < a_low
-            
-            if (is_breakout or is_retest) and is_effort_volume and curr_m['close'] < curr_m['open'] and kijun_ok and not bullish_divergence:
-                entry = curr_m['close']
-                sl = curr_m['high'] + (curr_m['high'] - curr_m['low']) * 0.1
-                risk = sl - entry
+                is_breakout = prev_m['close'] >= level_100 and curr_m['close'] < level_100
+                is_retest = curr_m['high'] >= level_100 and curr_m['close'] < level_100 and prev_m['close'] < level_100
                 
-                if risk > 0 and (risk / entry * 100) <= 8.0:
-                    tps = [a_high - (a_range * fib) for fib in FIB_EXT]
-                    risk_amount = equity * (RISK_PER_TRADE / 100.0)
-                    pos_size = (risk_amount / risk) * LEVERAGE
+                if (is_breakout or is_retest) and is_effort_volume and curr_m['close'] < curr_m['open'] and kijun_ok and not bullish_divergence:
+                    entry = curr_m['close']
+                    sl = curr_m['high'] + (curr_m['high'] - curr_m['low']) * 0.1
+                    risk = sl - entry
                     
-                    active_trade = {"side": "SHORT", "entry": entry, "sl": sl, "tps": tps, "step": 0, "pos_size": pos_size, "strat": primary_anchor['type']}
+                    if risk > 0 and (risk / entry * 100) <= 8.0:
+                        tps = [level_0 - (a_range * fib) for fib in FIB_EXT]
+                        tps = [tp for tp in tps if tp > 0.000001]
+                        if len(tps) > 0:
+                            setup = {"side": "SHORT", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}{cluster_msg}", "risk_distance": risk}
+            
+            del df_macro, df_micro
+            if not setup: return None
 
-    # ==========================================
-    # 4. طباعة التقرير النهائي
-    # ==========================================
-    total_trades = len(trades)
-    wins = len([t for t in trades if "Win" in t['status']])
-    losses = len([t for t in trades if t['status'] == "Loss"])
-    bes = len([t for t in trades if t['status'] == "Break-Even"])
-    
-    win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
-    total_profit = equity - INITIAL_CAPITAL
-    profit_pct = (total_profit / INITIAL_CAPITAL) * 100
-    
-    print("\n" + "="*40)
-    print("📊 تقرير الاختبار التاريخي (الفوليوناتشي)")
-    print("="*40)
-    print(f"العملة: {SYMBOL} | المدة: {DAYS_TO_BACKTEST} يوم")
-    print(f"رأس المال المبدئي: ${INITIAL_CAPITAL:,.2f}")
-    print(f"رأس المال النهائي: ${equity:,.2f}")
-    print(f"صافي الربح: ${total_profit:,.2f} ({profit_pct:+.2f}%)")
-    print(f"أقصى تراجع (Max Drawdown): {max_drawdown:.2f}%")
-    print("-" * 40)
-    print(f"إجمالي الصفقات: {total_trades}")
-    print(f"✅ الأرباح الكاملة: {wins}")
-    print(f"🛡️ تأمين الدخول (BE): {bes}")
-    print(f"❌ الخسائر: {losses}")
-    print(f"🎯 معدل النجاح (Win Rate): {win_rate:.1f}%")
-    print("="*40)
+            return {
+                "symbol": symbol, 
+                "side": setup["side"], 
+                "entry": setup["entry"], 
+                "sl": setup["sl"],
+                "original_sl": setup["original_sl"], 
+                "tps": setup["tps"],
+                "strat": setup["strat"], 
+                "risk_distance": setup["risk_distance"]
+            }
+
+        except Exception: return None
 
 # ==========================================
-# التشغيل
+# 4. مدير البوت (Execution Engine - Immortal 24/7)
 # ==========================================
+class TradingSystem:
+    def __init__(self):
+        self.exchange = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+        self.tg = TelegramNotifier()
+        self.active_trades = {}
+        self.cooldown_list = {} 
+        self.cached_valid_coins = [] 
+        self.last_cache_time = 0
+        self.semaphore = asyncio.Semaphore(10) 
+        self.trade_lock = asyncio.Lock() 
+        
+        self.stats = {"virtual_equity": 100.0, "peak_equity": 100.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}} 
+        self.running = True
+
+    async def initialize(self):
+        await self.tg.start(); await self.exchange.load_markets(); self.load_state() 
+        Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nThe Book is 100% Implemented (Clusters, Divergence, 12 VSA, MTF) 📖🛡️")
+
+    async def shutdown(self):
+        self.running = False; self.save_state()
+        await self.tg.stop(); await self.exchange.close()
+
+    def save_state(self):
+        try:
+            with open(Config.STATE_FILE, "w") as f: json.dump({"version": Config.VERSION, "active_trades": self.active_trades, "cooldown_list": self.cooldown_list, "stats": self.stats}, f)
+        except Exception: pass
+
+    def load_state(self):
+        if os.path.exists(Config.STATE_FILE):
+            try:
+                with open(Config.STATE_FILE, "r") as f:
+                    state = json.load(f)
+                if state.get("version") == Config.VERSION:
+                    self.active_trades = state.get("active_trades", {}); self.cooldown_list = state.get("cooldown_list", {}); self.stats = state.get("stats", self.stats)
+            except Exception: pass
+
+    def _update_equity_and_drawdown(self, pnl):
+        self.stats['virtual_equity'] += pnl
+        if self.stats['virtual_equity'] > self.stats['peak_equity']: self.stats['peak_equity'] = self.stats['virtual_equity']
+        if self.stats['peak_equity'] > 0:
+            dd = ((self.stats['peak_equity'] - self.stats['virtual_equity']) / self.stats['peak_equity']) * 100
+            self.stats['max_drawdown_pct'] = max(self.stats['max_drawdown_pct'], dd)
+
+    def _log_trade_result(self, result_type, roe_val):
+        self.stats['all_time'][result_type] += 1; self.stats['daily'][result_type] += 1
+        self.stats['all_time']['total_roe'] += roe_val; self.stats['daily']['total_roe'] += roe_val
+
+    async def process_symbol(self, sym):
+        async with self.semaphore:
+            if sym in self.active_trades or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
+            try:
+                task_macro = fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=Config.CANDLES_LIMIT_MACRO)
+                task_micro = fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MICRO, limit=Config.CANDLES_LIMIT_MICRO)
+                
+                ohlcv_macro, ohlcv_micro = await asyncio.gather(task_macro, task_micro)
+                if not ohlcv_macro or not ohlcv_micro: return
+                
+                res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_macro, ohlcv_micro)
+                if res: await self.execute_trade(res)
+            except Exception: pass
+
+    async def execute_trade(self, trade):
+        async with self.trade_lock:
+            if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
+            try:
+                sym = trade['symbol']
+                ticker = await fetch_with_retry(self.exchange.fetch_ticker, sym)
+                if not ticker or 'last' not in ticker: return 
+                quote_volume = float(ticker.get('quoteVolume', 0))
+                if quote_volume < Config.MIN_24H_VOLUME_USDT: return
+                
+                safe_entry = float(self.exchange.price_to_precision(sym, trade['entry']))
+                safe_sl = float(self.exchange.price_to_precision(sym, trade['sl']))
+                safe_tps = [float(self.exchange.price_to_precision(sym, tp)) for tp in trade['tps']]
+
+                risk_distance = trade['risk_distance']
+                equity = self.stats['virtual_equity']
+                risk_amount = equity * (Config.RISK_PER_TRADE_PCT / 100.0) 
+                position_size_coins = risk_amount / risk_distance
+                
+                sl_distance_pct = (risk_distance / safe_entry) * 100
+                if sl_distance_pct > 0: raw_lev = 100.0 / (sl_distance_pct * 1.2) 
+                else: raw_lev = Config.MIN_LEVERAGE
+                    
+                dynamic_lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
+                margin_required = (position_size_coins * safe_entry) / dynamic_lev
+                if margin_required > (equity * 0.50): 
+                    margin_required = equity * 0.50
+                    position_size_coins = (margin_required * dynamic_lev) / safe_entry
+
+                trade['entry'] = safe_entry; trade['sl'] = safe_sl; trade['tps'] = safe_tps
+                trade['original_sl'] = trade['original_sl']; trade['position_size'] = position_size_coins
+                trade['margin'] = margin_required ; trade['leverage'] = dynamic_lev
+                
+                market_info = self.exchange.markets.get(sym, {})
+                base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
+                exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
+                icon = "🟢" if trade['side'] == "LONG" else "🔴"
+                
+                targets_msg = ""
+                for idx, tp in enumerate(safe_tps):
+                    tp_roe = StrategyEngine.calc_actual_roe(safe_entry, tp, trade['side'], dynamic_lev)
+                    targets_msg += f"🎯 <b>TP {idx+1}:</b> <code>{format_price(tp)}</code> (+{tp_roe:.1f}%)\n"
+
+                pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
+
+                # رسالة سرية بدون ذكر أي تفاصيل
+                msg = (
+                    f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
+                    f"────────────────\n"
+                    f"🛒 <b>Entry:</b> <code>{format_price(safe_entry)}</code>\n"
+                    f"⚖️ <b>Leverage:</b> <b>{dynamic_lev}x</b>\n"
+                    f"────────────────\n"
+                    f"{targets_msg}"
+                    f"────────────────\n"
+                    f"🛑 <b>Stop Loss:</b> <code>{format_price(safe_sl)}</code> ({pnl_sl_raw:.1f}% ROE)"
+                )
+                msg_id = await self.tg.send(msg)
+                if msg_id:
+                    trade['msg_id'] = msg_id; trade['step'] = 0; trade['last_sl_price'] = safe_sl
+                    self.active_trades[sym] = trade
+                    self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
+                    self.save_state() 
+            except Exception: pass
+
+    async def update_valid_coins_cache(self):
+        current_ts = int(datetime.now(timezone.utc).timestamp())
+        if current_ts - self.last_cache_time > 86400:
+            try: await self.exchange.load_markets(reload=True)
+            except Exception: pass
+
+        if current_ts - self.last_cache_time > 900 or not self.cached_valid_coins:
+            try:
+                tickers = await fetch_with_retry(self.exchange.fetch_tickers)
+                if not tickers: return
+                valid_coins_with_vol = []
+                for sym, d in tickers.items():
+                    if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
+                        vol = float(d.get('quoteVolume') or 0)
+                        if vol >= Config.MIN_24H_VOLUME_USDT:
+                            valid_coins_with_vol.append((sym, vol))
+                valid_coins_with_vol.sort(key=lambda x: x[1], reverse=True)
+                self.cached_valid_coins = [x[0] for x in valid_coins_with_vol]
+                if self.cached_valid_coins: self.last_cache_time = current_ts
+            except Exception: pass
+
+    async def scan_market(self):
+        while self.running:
+            try:
+                if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
+                    await asyncio.sleep(10); continue
+                await self.update_valid_coins_cache()
+                
+                current_time = int(datetime.now(timezone.utc).timestamp())
+                scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
+                
+                chunk_size = 8 
+                for i in range(0, len(scan_list), chunk_size):
+                    if not self.running or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break 
+                    chunk = scan_list[i:i+chunk_size]
+                    tasks = [self.process_symbol(sym) for sym in chunk]
+                    await asyncio.gather(*tasks)
+                    await asyncio.sleep(1.5) 
+                
+                gc.collect() 
+                await asyncio.sleep(15) 
+            except Exception: await asyncio.sleep(5)
+
+    async def monitor_open_trades(self):
+        while self.running:
+            try:
+                if self.stats.get('max_drawdown_pct', 0.0) > 20.0:
+                    await self.tg.send("⚠️ <b>SYSTEM HALTED</b>: Max Drawdown Exceeded 20%!"); self.running = False; break
+                if not self.active_trades: await asyncio.sleep(5); continue
+                
+                symbols_to_fetch = list(self.active_trades.keys())
+                if symbols_to_fetch:
+                    tickers = await fetch_with_retry(self.exchange.fetch_tickers, symbols_to_fetch)
+                    if not tickers: 
+                        await asyncio.sleep(5); continue
+
+                for sym, trade in list(self.active_trades.items()):
+                    ticker = tickers.get(sym)
+                    if not ticker or not ticker.get('last'): continue 
+                    
+                    side = trade['side']
+                    current_price = ticker['last']
+                    step = trade['step']
+                    entry = trade['entry']
+                    current_sl = trade.get('last_sl_price', trade['sl'])
+                    pos_size = trade['position_size']
+                    margin = trade.get('margin', 1.0)
+                    num_tps = len(trade['tps'])
+                    
+                    if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
+                        pnl = (current_sl - entry) * pos_size if side == "LONG" else (entry - current_sl) * pos_size
+                        display_roe = (pnl / margin) * 100
+                        if display_roe > 0.5: msg = f"🛡️ <b>Trade Secured in Profit</b> (+{display_roe:.1f}% ROE)"; self._log_trade_result('wins', display_roe)
+                        elif -0.5 <= display_roe <= 0.5: msg = f"⚖️ <b>Trade Closed at Break-Even</b> (0.0% ROE)"; self._log_trade_result('break_evens', display_roe)
+                        else: msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:.1f}% ROE)"; self._log_trade_result('losses', display_roe)
+
+                        async with self.trade_lock:
+                            self._update_equity_and_drawdown(pnl)
+                            self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
+                            await self.tg.send(msg, trade['msg_id'])
+                            if sym in self.active_trades: del self.active_trades[sym]
+                            self.save_state()
+                        continue
+
+                    target = trade['tps'][step] if step < num_tps else None 
+                    if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
+                        trade['step'] += 1
+                        new_step = trade['step']
+                        tp_roe = StrategyEngine.calc_actual_roe(entry, target, side, trade['leverage'])
+                        
+                        if new_step < num_tps:
+                            moved = False
+                            if new_step == 1:
+                                trade['last_sl_price'] = entry
+                                moved = True
+
+                            status_tag = "(Break-Even Secured)" if moved else ""
+                            update_msg = f"🛡️ <b>Update:</b> SL moved to Entry <code>{format_price(entry)}</code> {status_tag}" if moved else ""
+                            msg = f"✅ <b>TP {new_step} HIT! (+{tp_roe:.1f}% ROE)</b>\n{update_msg}" if update_msg else f"✅ <b>TP {new_step} HIT! (+{tp_roe:.1f}% ROE)</b>"
+                            await self.tg.send(msg, trade['msg_id'])
+                            self.save_state() 
+                        else:
+                            pnl = (target - entry) * pos_size if side == "LONG" else (entry - target) * pos_size
+                            display_roe = (pnl / margin) * 100 
+                            msg = f"🏆 <b>ALL TARGETS SMASHED!</b> 🏦\n💰 <b>Total Bagged:</b> +{display_roe:.1f}% ROE"
+                            self._log_trade_result('wins', display_roe)
+                            async with self.trade_lock:
+                                self._update_equity_and_drawdown(pnl)
+                                self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
+                                if sym in self.active_trades: del self.active_trades[sym]
+                                await self.tg.send(msg, trade['msg_id'])
+                                self.save_state() 
+                await asyncio.sleep(2)
+            except Exception: await asyncio.sleep(5)
+
+    async def daily_report(self):
+        while self.running:
+            try:
+                await asyncio.sleep(86400)
+                d_stats = self.stats['daily']
+                total_trades = d_stats['wins'] + d_stats['losses'] + d_stats['break_evens']
+                total_decisive = d_stats['wins'] + d_stats['losses']
+                wr = (d_stats['wins'] / total_decisive * 100) if total_decisive > 0 else 0
+                avg_roe = (d_stats['total_roe'] / total_trades) if total_trades > 0 else 0 
+                
+                msg = (
+                    f"📈 <b>VIP DAILY REPORT (24H)</b> 📉\n────────────────\n"
+                    f"🎯 <b>Total Signals:</b> {d_stats['signals']}\n✅ <b>Winning Trades:</b> {d_stats['wins']}\n"
+                    f"🛡️ <b>Break-Evens:</b> {d_stats['break_evens']}\n❌ <b>Losing Trades:</b> {d_stats['losses']}\n"
+                    f"📊 <b>Decisive Win Rate:</b> {wr:.1f}%\n────────────────\n"
+                    f"📉 <b>Max Drawdown:</b> {self.stats['max_drawdown_pct']:.2f}%\n"
+                    f"📐 <b>Average Net Profit:</b> {avg_roe:+.1f}% ROE\n"
+                    f"💵 <b>Simulated Equity:</b> ${self.stats['virtual_equity']:.2f}"
+                )
+                await self.tg.send(msg)
+                self.stats['daily'] = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}
+                self.save_state()
+            except Exception: await asyncio.sleep(5)
+
+    async def keep_alive(self):
+        while self.running:
+            try: 
+                async with aiohttp.ClientSession() as s: 
+                    await s.get(Config.RENDER_URL)
+            except Exception: pass
+            await asyncio.sleep(300) 
+
+bot = TradingSystem()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    main_task = asyncio.create_task(run_bot_background())
+    yield
+    await bot.shutdown()
+    main_task.cancel()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.api_route("/{path_name:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
+async def catch_all(path_name: str):
+    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1><p>Status: Immortal</p></body></html>", status_code=200)
+
+async def run_bot_background():
+    try:
+        await bot.initialize()
+        asyncio.create_task(bot.scan_market())
+        asyncio.create_task(bot.monitor_open_trades())
+        asyncio.create_task(bot.daily_report())
+        asyncio.create_task(bot.keep_alive())
+    except Exception as e: 
+        Log.print(f"⚠️ Critical Bot Startup Error: {e}", Log.RED)
+        traceback.print_exc()
+
 if __name__ == "__main__":
-    data = fetch_historical_data(SYMBOL, TIMEFRAME, DAYS_TO_BACKTEST)
-    if data is not None and not data.empty:
-        run_backtest(data)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
