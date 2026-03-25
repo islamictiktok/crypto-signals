@@ -29,10 +29,14 @@ class Config:
     CHAT_ID = "-1003653652451"
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    # 🔑 مفاتيح WEEX (المحرك المباشر)
+    # 🔑 مفاتيح WEEX
     WEEX_API_KEY = "weex_64531a2b79748e202623fe9cd96ff478"
     WEEX_SECRET_KEY = "263f6868f81b6d9dd4af394c6f07d8798b5d4ba220b42c1a598893acb95bbc12"
     WEEX_PASSPHRASE = "MOMOmax264"
+    
+    # 🌐 مسار سيرفر WEEX (تم تعديله لحل مشكلة Domain Not Found)
+    # إذا استمرت المشكلة، يمكنك تجربة: "https://api.weex.vip" أو "https://api.weexglobal.com"
+    WEEX_BASE_URL = "https://api.weex.exchange" 
     
     TF_MACRO = '4h'  
     TF_MICRO = '15m'
@@ -43,14 +47,14 @@ class Config:
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 500_000 
     
-    FIXED_MARGIN_USDT = 0.20  # 👈 الدخول بـ 20 سنت
+    FIXED_MARGIN_USDT = 0.20  
     
     MIN_LEVERAGE = 10    
     MAX_LEVERAGE_CAP = 100 
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V68000.0 - WEEX Raw Engine (Fixed 0.20$)"
+    VERSION = "V68000.1 - WEEX DNS Fix (Fixed 0.20$)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -81,11 +85,11 @@ class WeexExecutor:
         self.api_key = Config.WEEX_API_KEY
         self.secret_key = Config.WEEX_SECRET_KEY
         self.passphrase = Config.WEEX_PASSPHRASE
-        self.base_url = "https://api.weex.com" # السيرفر الأساسي لمنصة WEEX
+        self.base_url = Config.WEEX_BASE_URL # 👈 تم ربط الرابط الجديد هنا
         self.session = None
 
     async def start(self):
-        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) # زيادة وقت الانتظار قليلاً
 
     async def close(self):
         if self.session: await self.session.close()
@@ -127,7 +131,7 @@ class WeexExecutor:
             lev_payload = {"symbol": clean_symbol, "marginCoin": "USDT", "leverage": lev, "holdSide": "long" if side=="LONG" else "short"}
             await self.send_request("POST", "/api/v1/mix/account/setLeverage", lev_payload)
             
-            # 2. فتح الصفقة مع الستوب والهدف
+            # 2. فتح الصفقة
             order_payload = {
                 "symbol": clean_symbol,
                 "marginCoin": "USDT",
@@ -302,7 +306,7 @@ class StrategyEngine:
 class TradingSystem:
     def __init__(self):
         self.exchange_data = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
-        self.weex = WeexExecutor() # 👈 محركنا المباشر بدلاً من ccxt
+        self.weex = WeexExecutor() 
         self.tg = TelegramNotifier()
         self.active_trades = {}
         self.cooldown_list = {} 
@@ -385,7 +389,7 @@ class TradingSystem:
                 
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 
-                # 👈 التنفيذ عبر محرك WEEX المباشر
+                # التنفيذ عبر محرك WEEX المباشر
                 order_success = await self.weex.place_order(sym, trade['side'], position_size_coins, dynamic_lev, safe_sl, safe_tps[0])
 
                 weex_status = "✅ WEEX Executed" if order_success else "⚠️ WEEX Connection Error (Simulation Mode)"
