@@ -40,7 +40,6 @@ class Config:
     CANDLES_LIMIT_MICRO = 100 
     
     MAX_TRADES_AT_ONCE = 3  
-    
     FIXED_MARGIN_USDT = 0.20  
     
     MIN_LEVERAGE = 10    
@@ -48,7 +47,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V68000.7 - BTC Only Sniper"
+    VERSION = "V68000.8 - Diagnostic & Anti-Freeze Mode"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -68,7 +67,9 @@ async def fetch_with_retry(coro, *args, retries=3, delay=2.0, **kwargs):
         try:
             return await coro(*args, **kwargs)
         except Exception as e:
-            if i == retries - 1: return None
+            if i == retries - 1:
+                Log.print(f"⚠️ Fetch Error after {retries} retries: {e}", Log.RED)
+                return None
             await asyncio.sleep(delay)
 
 # ==========================================
@@ -83,7 +84,7 @@ class WeexExecutor:
         self.session = None
 
     async def start(self):
-        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
 
     async def close(self):
         if self.session: await self.session.close()
@@ -116,12 +117,11 @@ class WeexExecutor:
                 async with self.session.post(url, headers=headers, json=payload) as resp:
                     return await resp.json()
         except Exception as e:
-            Log.print(f"WEEX API Error: {e}", Log.RED)
+            Log.print(f"WEEX API Connection Error: {e}", Log.RED)
             return None
 
     async def place_order(self, symbol, side, size, lev, sl, tp):
         try:
-            # 👈 تأمين مسار اسم العملة ليتوافق بدقة مع WEEX (BTC/USDT:USDT -> BTCUSDT)
             clean_symbol = symbol.split(':')[0].replace('/', '') 
             unique_client_oid = f"VIP_{int(time.time() * 1000)}"
             
@@ -142,8 +142,11 @@ class WeexExecutor:
                 res = await self.send_request("POST", "/capi/v2/order/placeOrder", order_payload)
 
             if res and res.get('code') == '00000': return True
+            Log.print(f"WEEX Place Order Rejected: {res}", Log.YELLOW)
             return False
-        except Exception:
+        except Exception as e:
+            Log.print(f"WEEX Place Order Exception: {e}", Log.RED)
+            traceback.print_exc()
             return False
 
 class TelegramNotifier:
@@ -163,7 +166,9 @@ class TelegramNotifier:
             async with self.session.post(self.base_url, json=payload) as resp:
                 data = await resp.json()
                 return data.get('result', {}).get('message_id') if resp.status == 200 else None
-        except Exception: return None
+        except Exception as e:
+            Log.print(f"Telegram Send Error: {e}", Log.RED)
+            return None
 
 # ==========================================
 # 3. محرك الاستراتيجية 
@@ -223,7 +228,7 @@ class StrategyEngine:
 
                 if temp_type is None:
                     if is_high_vol and a_close < body_middle and (a_high - max(a_open, a_close)) > (a_spread * 0.5): temp_type, temp_dir = "Up Thrust", "SHORT"
-                    elif is_down and is_high_vol and a_close < df_macro.iloc[i-1]['low'] and df_macro.iloc[i-1]['close'] > df_macro.iloc[i-1]['open']: temp_type, temp_dir = "Top Reversal", "SHORT"
+                    elif is_down and is_high_vol and a_close < macro_history.iloc[j-1]['low'] and macro_history.iloc[j-1]['close'] > macro_history.iloc[j-1]['open']: temp_type, temp_dir = "Top Reversal", "SHORT"
                     elif is_wide_spread and is_ultra_vol and a_close < upper_third: temp_type, temp_dir = "Buying Climax", "SHORT"
                     elif is_narrow_spread and is_high_vol and a_close < body_middle: temp_type, temp_dir = "End of Rising Market", "SHORT"
                     elif is_up and is_narrow_spread and is_low_vol: temp_type, temp_dir = "No Demand", "SHORT"
@@ -237,18 +242,6 @@ class StrategyEngine:
             if not anchors_found: return None
 
             primary_anchor = anchors_found[-1] 
-            cluster_msg = ""
-            if len(anchors_found) >= 2:
-                prev_anchor = anchors_found[-2]
-                if primary_anchor['dir'] == prev_anchor['dir']:
-                    for f1 in FIB_EXT:
-                        lvl1 = primary_anchor['low'] + (primary_anchor['range'] * f1) if primary_anchor['dir'] == "LONG" else primary_anchor['high'] - (primary_anchor['range'] * f1)
-                        for f2 in FIB_EXT:
-                            lvl2 = prev_anchor['low'] + (prev_anchor['range'] * f2) if prev_anchor['dir'] == "LONG" else prev_anchor['high'] - (prev_anchor['range'] * f2)
-                            if abs(lvl1 - lvl2) / lvl1 < 0.005: 
-                                cluster_msg = " [CLUSTER DETECTED 🎯]"
-                                break
-
             df_micro = pd.DataFrame(ohlcv_micro, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_micro) < 10: return None
             df_micro['vol_sma'] = ta.sma(df_micro['vol'], length=20)
@@ -279,7 +272,7 @@ class StrategyEngine:
                     
                     if risk > 0 and (risk / entry * 100) <= 8.0:
                         tps = [level_0 + (a_range * fib) for fib in FIB_EXT] 
-                        setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}{cluster_msg}", "risk_distance": risk}
+                        setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}", "risk_distance": risk}
 
             elif primary_anchor['dir'] == "SHORT":
                 level_100 = a_low; level_0 = a_high
@@ -297,7 +290,7 @@ class StrategyEngine:
                         tps = [level_0 - (a_range * fib) for fib in FIB_EXT] 
                         tps = [tp for tp in tps if tp > 0.000001]
                         if len(tps) > 0:
-                            setup = {"side": "SHORT", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}{cluster_msg}", "risk_distance": risk}
+                            setup = {"side": "SHORT", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}", "risk_distance": risk}
             
             del df_macro, df_micro
             if not setup: return None
@@ -307,7 +300,10 @@ class StrategyEngine:
                 "sl": setup["sl"], "original_sl": setup["original_sl"], "tps": setup["tps"], 
                 "strat": setup["strat"], "risk_distance": setup["risk_distance"]
             }
-        except Exception: return None
+        except Exception as e:
+            Log.print(f"Strategy Engine Error: {e}", Log.RED)
+            traceback.print_exc()
+            return None
 
 # ==========================================
 # 4. مدير البوت (Execution Engine - Stable)
@@ -319,11 +315,9 @@ class TradingSystem:
         self.tg = TelegramNotifier()
         self.active_trades = {}
         self.cooldown_list = {} 
+        self.cached_valid_coins = ['BTC/USDT:USDT'] # 👈 بيتكوين فقط 
         
-        # 👈 تثبيت البيتكوين فقط كهدف حصري
-        self.cached_valid_coins = ['BTC/USDT:USDT'] 
-        
-        self.last_cache_time = 0
+        self.last_scan_time = "Not Scanned Yet" # لمراقبة عمل البوت
         self.semaphore = asyncio.Semaphore(10) 
         self.trade_lock = asyncio.Lock() 
         
@@ -331,12 +325,16 @@ class TradingSystem:
         self.running = True
 
     async def initialize(self):
-        await self.tg.start()
-        await self.weex.start()
-        await self.exchange_data.load_markets()
-        self.load_state() 
-        Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Mode: BTC Only Sniper Active! 🛡️")
+        try:
+            await self.tg.start()
+            await self.weex.start()
+            await self.exchange_data.load_markets()
+            self.load_state() 
+            Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
+            await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Mode: Diagnostic & BTC Sniper Active!")
+        except Exception as e:
+            Log.print(f"Initialization Error: {e}", Log.RED)
+            traceback.print_exc()
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -378,7 +376,9 @@ class TradingSystem:
                 
                 res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_macro, ohlcv_micro)
                 if res: await self.execute_trade(res)
-            except Exception: pass
+            except Exception as e:
+                Log.print(f"Error in process_symbol for {sym}: {e}", Log.RED)
+                traceback.print_exc()
 
     async def execute_trade(self, trade):
         async with self.trade_lock:
@@ -415,7 +415,7 @@ class TradingSystem:
                 
                 order_success = await self.weex.place_order(sym, trade['side'], position_size_coins, dynamic_lev, safe_sl, safe_tps[0])
 
-                weex_status = "✅ WEEX Executed" if order_success else "⚠️ WEEX Simulation Mode"
+                weex_status = "✅ WEEX Executed" if order_success else "⚠️ WEEX Failed (Simulation Only)"
                 
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
@@ -436,31 +436,31 @@ class TradingSystem:
                     self.active_trades[sym] = trade
                     self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
                     self.save_state() 
-            except Exception: pass
-
-    async def update_valid_coins_cache(self):
-        # 👈 تم إيقاف المسح الشامل للسوق والاعتماد على البيتكوين فقط
-        self.cached_valid_coins = ['BTC/USDT:USDT']
-        pass
+            except Exception as e:
+                Log.print(f"Error in execute_trade: {e}", Log.RED)
+                traceback.print_exc()
 
     async def scan_market(self):
         while self.running:
             try:
+                self.last_scan_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                 if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
                     await asyncio.sleep(10); continue
                 
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                # مسح سريع جداً لأن القائمة تحتوي على عملة واحدة فقط
                 for sym in scan_list:
                     if not self.running or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break 
                     await self.process_symbol(sym)
                     await asyncio.sleep(1.0) 
                 
                 gc.collect() 
-                await asyncio.sleep(15) # راحة قبل الدورة الجديدة
-            except Exception: await asyncio.sleep(5)
+                await asyncio.sleep(15) 
+            except Exception as e:
+                Log.print(f"Error in scan_market loop: {e}", Log.RED)
+                traceback.print_exc()
+                await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
         while self.running:
@@ -516,7 +516,10 @@ class TradingSystem:
                             self.save_state() 
                             
                 await asyncio.sleep(2)
-            except Exception: await asyncio.sleep(5)
+            except Exception as e:
+                Log.print(f"Error in monitor_open_trades: {e}", Log.RED)
+                traceback.print_exc()
+                await asyncio.sleep(5)
 
     async def daily_report(self):
         while self.running:
@@ -540,7 +543,10 @@ class TradingSystem:
                 await self.tg.send(msg)
                 self.stats['daily'] = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}
                 self.save_state()
-            except Exception: await asyncio.sleep(5)
+            except Exception as e:
+                Log.print(f"Error in daily_report: {e}", Log.RED)
+                traceback.print_exc()
+                await asyncio.sleep(5)
 
     async def keep_alive(self):
         while self.running:
@@ -561,9 +567,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# 👈 شاشة المراقبة الحية (اللوحة التي تظهر عند فتح رابط البوت)
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
 async def catch_all(path_name: str):
-    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1><p>Status: BTC Sniper Mode Active</p></body></html>", status_code=200)
+    html_content = f"""
+    <html>
+    <body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'>
+        <h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1>
+        <hr style="border: 1px solid #333;">
+        <h3>Live Diagnostics:</h3>
+        <p><b>Last Market Scan:</b> {bot.last_scan_time}</p>
+        <p><b>Active Trades in Memory:</b> {len(bot.active_trades)} / {Config.MAX_TRADES_AT_ONCE}</p>
+        <p><b>Virtual Equity:</b> ${bot.stats['virtual_equity']:.2f}</p>
+        <p><b>System Status:</b> RUNNING</p>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content, status_code=200)
 
 async def run_bot_background():
     try:
