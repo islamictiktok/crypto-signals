@@ -15,7 +15,7 @@ import pandas_ta as ta
 import ccxt.async_support as ccxt
 import aiohttp
 from fastapi import FastAPI, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 from contextlib import asynccontextmanager
 
@@ -38,16 +38,15 @@ class Config:
     
     CANDLES_LIMIT_MACRO = 200 
     CANDLES_LIMIT_MICRO = 100 
-    
     MAX_TRADES_AT_ONCE = 3  
-    FIXED_MARGIN_USDT = 0.20  
     
-    MIN_LEVERAGE = 10    
-    MAX_LEVERAGE_CAP = 100 
+    # 👈 تم التعديل إلى 0.20$ بناءً على طلبك
+    FIXED_MARGIN_USDT = 0.20  
+    FIXED_LEVERAGE = 50 
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V68000.8 - Diagnostic & Anti-Freeze Mode"
+    VERSION = "V68000.12 - Anti-Render Sleep Edition"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -67,13 +66,11 @@ async def fetch_with_retry(coro, *args, retries=3, delay=2.0, **kwargs):
         try:
             return await coro(*args, **kwargs)
         except Exception as e:
-            if i == retries - 1:
-                Log.print(f"⚠️ Fetch Error after {retries} retries: {e}", Log.RED)
-                return None
+            if i == retries - 1: return None
             await asyncio.sleep(delay)
 
 # ==========================================
-# 2. محرك WEEX للفيوتشر
+# 2. محرك WEEX للفيوتشر (V3)
 # ==========================================
 class WeexExecutor:
     def __init__(self):
@@ -110,44 +107,47 @@ class WeexExecutor:
         
         try:
             url = self.base_url + path
-            if method == "GET":
-                async with self.session.get(url, headers=headers) as resp:
-                    return await resp.json()
-            else:
-                async with self.session.post(url, headers=headers, json=payload) as resp:
-                    return await resp.json()
+            async with self.session.post(url, headers=headers, json=payload) as resp:
+                return await resp.json()
         except Exception as e:
-            Log.print(f"WEEX API Connection Error: {e}", Log.RED)
+            Log.print(f"WEEX API Error: {e}", Log.RED)
             return None
 
-    async def place_order(self, symbol, side, size, lev, sl, tp):
-        try:
-            clean_symbol = symbol.split(':')[0].replace('/', '') 
-            unique_client_oid = f"VIP_{int(time.time() * 1000)}"
-            
-            order_payload = {
-                "symbol": clean_symbol,
-                "side": "BUY" if side == "LONG" else "SELL",
-                "positionSide": "LONG" if side == "LONG" else "SHORT",
-                "type": "MARKET",
-                "quantity": str(size),
-                "slTriggerPrice": str(sl),
-                "tpTriggerPrice": str(tp),
-                "client_oid": unique_client_oid 
-            }
-            
-            res = await self.send_request("POST", "/capi/v3/placeOrder", order_payload)
-            if not res or res.get('code') != '00000':
-                order_payload["clientOid"] = unique_client_oid
-                res = await self.send_request("POST", "/capi/v2/order/placeOrder", order_payload)
+    async def set_leverage(self, symbol, leverage, side):
+        clean_symbol = symbol.split(':')[0].replace('/', '')
+        payload = {"symbol": clean_symbol, "marginCoin": "USDT", "leverage": str(leverage), "holdSide": "long" if side == "LONG" else "short"}
+        await self.send_request("POST", "/api/v1/mix/account/setLeverage", payload)
 
-            if res and res.get('code') == '00000': return True
-            Log.print(f"WEEX Place Order Rejected: {res}", Log.YELLOW)
-            return False
-        except Exception as e:
-            Log.print(f"WEEX Place Order Exception: {e}", Log.RED)
-            traceback.print_exc()
-            return False
+    async def open_market_order(self, symbol, side, size):
+        clean_symbol = symbol.split(':')[0].replace('/', '') 
+        unique_id = f"VIP_O_{int(time.time() * 1000)}"
+        payload = {
+            "symbol": clean_symbol,
+            "side": "BUY" if side == "LONG" else "SELL",
+            "positionSide": "LONG" if side == "LONG" else "SHORT",
+            "type": "MARKET",
+            "quantity": str(size),
+            "newClientOrderId": unique_id
+        }
+        res = await self.send_request("POST", "/capi/v3/order", payload)
+        if res and res.get('success') == True: return True
+        Log.print(f"WEEX Open Order Failed: {res}", Log.RED)
+        return False
+
+    async def close_market_order(self, symbol, side, size):
+        clean_symbol = symbol.split(':')[0].replace('/', '') 
+        unique_id = f"VIP_C_{int(time.time() * 1000)}"
+        payload = {
+            "symbol": clean_symbol,
+            "side": "SELL" if side == "LONG" else "BUY",
+            "positionSide": "LONG" if side == "LONG" else "SHORT",
+            "type": "MARKET",
+            "quantity": str(size),
+            "newClientOrderId": unique_id
+        }
+        res = await self.send_request("POST", "/capi/v3/order", payload)
+        if res and res.get('success') == True: return True
+        return False
 
 class TelegramNotifier:
     def __init__(self):
@@ -166,9 +166,7 @@ class TelegramNotifier:
             async with self.session.post(self.base_url, json=payload) as resp:
                 data = await resp.json()
                 return data.get('result', {}).get('message_id') if resp.status == 200 else None
-        except Exception as e:
-            Log.print(f"Telegram Send Error: {e}", Log.RED)
-            return None
+        except Exception: return None
 
 # ==========================================
 # 3. محرك الاستراتيجية 
@@ -206,15 +204,10 @@ class StrategyEngine:
                 a_close = anchor['close']; a_open = anchor['open']
                 vol_avg = anchor['vol_sma']; spread_avg = anchor['spread_sma']
                 
-                is_ultra_vol = a_vol > (vol_avg * 2.5) 
-                is_high_vol = a_vol > (vol_avg * 1.5)  
-                is_low_vol = a_vol < (vol_avg * 0.8)
-                is_wide_spread = a_spread > (spread_avg * 1.5) 
-                is_narrow_spread = a_spread < (spread_avg * 0.8)
-                
+                is_ultra_vol = a_vol > (vol_avg * 2.5); is_high_vol = a_vol > (vol_avg * 1.5); is_low_vol = a_vol < (vol_avg * 0.8)
+                is_wide_spread = a_spread > (spread_avg * 1.5); is_narrow_spread = a_spread < (spread_avg * 0.8)
                 body_middle = a_low + (a_spread / 2)
-                upper_third = a_high - (a_spread / 3)
-                lower_third = a_low + (a_spread / 3)
+                upper_third = a_high - (a_spread / 3); lower_third = a_low + (a_spread / 3)
                 is_up = a_close > a_open; is_down = a_close < a_open
 
                 temp_type = None; temp_dir = None
@@ -228,7 +221,7 @@ class StrategyEngine:
 
                 if temp_type is None:
                     if is_high_vol and a_close < body_middle and (a_high - max(a_open, a_close)) > (a_spread * 0.5): temp_type, temp_dir = "Up Thrust", "SHORT"
-                    elif is_down and is_high_vol and a_close < macro_history.iloc[j-1]['low'] and macro_history.iloc[j-1]['close'] > macro_history.iloc[j-1]['open']: temp_type, temp_dir = "Top Reversal", "SHORT"
+                    elif is_down and is_high_vol and a_close < df_macro.iloc[i-1]['low'] and df_macro.iloc[i-1]['close'] > df_macro.iloc[i-1]['open']: temp_type, temp_dir = "Top Reversal", "SHORT"
                     elif is_wide_spread and is_ultra_vol and a_close < upper_third: temp_type, temp_dir = "Buying Climax", "SHORT"
                     elif is_narrow_spread and is_high_vol and a_close < body_middle: temp_type, temp_dir = "End of Rising Market", "SHORT"
                     elif is_up and is_narrow_spread and is_low_vol: temp_type, temp_dir = "No Demand", "SHORT"
@@ -242,6 +235,7 @@ class StrategyEngine:
             if not anchors_found: return None
 
             primary_anchor = anchors_found[-1] 
+
             df_micro = pd.DataFrame(ohlcv_micro, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_micro) < 10: return None
             df_micro['vol_sma'] = ta.sma(df_micro['vol'], length=20)
@@ -261,7 +255,6 @@ class StrategyEngine:
             if primary_anchor['dir'] == "LONG":
                 level_100 = a_high; level_0 = a_low
                 kijun_ok = macro_latest['close'] > macro_latest['kijun']
-                
                 is_breakout = prev_m['close'] <= level_100 and curr_m['close'] > level_100
                 is_retest = curr_m['low'] <= level_100 and curr_m['close'] > level_100 and prev_m['close'] > level_100
                 
@@ -269,7 +262,6 @@ class StrategyEngine:
                     entry = curr_m['close']
                     sl = curr_m['low'] - (curr_m['high'] - curr_m['low']) * 0.1 
                     risk = entry - sl
-                    
                     if risk > 0 and (risk / entry * 100) <= 8.0:
                         tps = [level_0 + (a_range * fib) for fib in FIB_EXT] 
                         setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}", "risk_distance": risk}
@@ -277,7 +269,6 @@ class StrategyEngine:
             elif primary_anchor['dir'] == "SHORT":
                 level_100 = a_low; level_0 = a_high
                 kijun_ok = macro_latest['close'] < macro_latest['kijun']
-                
                 is_breakout = prev_m['close'] >= level_100 and curr_m['close'] < level_100
                 is_retest = curr_m['high'] >= level_100 and curr_m['close'] < level_100 and prev_m['close'] < level_100
                 
@@ -285,7 +276,6 @@ class StrategyEngine:
                     entry = curr_m['close']
                     sl = curr_m['high'] + (curr_m['high'] - curr_m['low']) * 0.1
                     risk = sl - entry
-                    
                     if risk > 0 and (risk / entry * 100) <= 8.0:
                         tps = [level_0 - (a_range * fib) for fib in FIB_EXT] 
                         tps = [tp for tp in tps if tp > 0.000001]
@@ -295,18 +285,11 @@ class StrategyEngine:
             del df_macro, df_micro
             if not setup: return None
 
-            return {
-                "symbol": symbol, "side": setup["side"], "entry": setup["entry"], 
-                "sl": setup["sl"], "original_sl": setup["original_sl"], "tps": setup["tps"], 
-                "strat": setup["strat"], "risk_distance": setup["risk_distance"]
-            }
-        except Exception as e:
-            Log.print(f"Strategy Engine Error: {e}", Log.RED)
-            traceback.print_exc()
-            return None
+            return {"symbol": symbol, "side": setup["side"], "entry": setup["entry"], "sl": setup["sl"], "original_sl": setup["original_sl"], "tps": setup["tps"], "strat": setup["strat"], "risk_distance": setup["risk_distance"]}
+        except Exception as e: return None
 
 # ==========================================
-# 4. مدير البوت (Execution Engine - Stable)
+# 4. مدير البوت (Execution Engine)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -315,26 +298,20 @@ class TradingSystem:
         self.tg = TelegramNotifier()
         self.active_trades = {}
         self.cooldown_list = {} 
-        self.cached_valid_coins = ['BTC/USDT:USDT'] # 👈 بيتكوين فقط 
-        
-        self.last_scan_time = "Not Scanned Yet" # لمراقبة عمل البوت
+        self.cached_valid_coins = ['BTC/USDT:USDT', 'SOL/USDT:USDT', 'ADA/USDT:USDT', 'RIVER/USDT:USDT', 'TAO/USDT:USDT'] 
+        self.last_scan_time = "Not Scanned Yet"
         self.semaphore = asyncio.Semaphore(10) 
         self.trade_lock = asyncio.Lock() 
-        
         self.stats = {"virtual_equity": 100.0, "peak_equity": 100.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}} 
         self.running = True
 
     async def initialize(self):
-        try:
-            await self.tg.start()
-            await self.weex.start()
-            await self.exchange_data.load_markets()
-            self.load_state() 
-            Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-            await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Mode: Diagnostic & BTC Sniper Active!")
-        except Exception as e:
-            Log.print(f"Initialization Error: {e}", Log.RED)
-            traceback.print_exc()
+        await self.tg.start()
+        await self.weex.start()
+        await self.exchange_data.load_markets()
+        self.load_state() 
+        Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Mode: 0.20$ Sniper | Anti-Sleep Guard Active 🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -370,15 +347,11 @@ class TradingSystem:
             try:
                 task_macro = fetch_with_retry(self.exchange_data.fetch_ohlcv, sym, Config.TF_MACRO, limit=Config.CANDLES_LIMIT_MACRO)
                 task_micro = fetch_with_retry(self.exchange_data.fetch_ohlcv, sym, Config.TF_MICRO, limit=Config.CANDLES_LIMIT_MICRO)
-                
                 ohlcv_macro, ohlcv_micro = await asyncio.gather(task_macro, task_micro)
                 if not ohlcv_macro or not ohlcv_micro: return
-                
                 res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_macro, ohlcv_micro)
                 if res: await self.execute_trade(res)
-            except Exception as e:
-                Log.print(f"Error in process_symbol for {sym}: {e}", Log.RED)
-                traceback.print_exc()
+            except Exception: pass
 
     async def execute_trade(self, trade):
         async with self.trade_lock:
@@ -392,12 +365,7 @@ class TradingSystem:
                 safe_sl = float(self.exchange_data.price_to_precision(sym, trade['sl']))
                 safe_tps = [float(self.exchange_data.price_to_precision(sym, tp)) for tp in trade['tps']]
 
-                risk_distance = trade['risk_distance']
-                sl_distance_pct = (risk_distance / safe_entry) * 100
-                if sl_distance_pct > 0: raw_lev = 100.0 / (sl_distance_pct * 1.2) 
-                else: raw_lev = Config.MIN_LEVERAGE
-                    
-                dynamic_lev = int(round(max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, raw_lev))))
+                dynamic_lev = Config.FIXED_LEVERAGE
                 margin_required = Config.FIXED_MARGIN_USDT 
                 position_size_coins = (margin_required * dynamic_lev) / safe_entry
                 position_size_coins = float(self.exchange_data.amount_to_precision(sym, position_size_coins))
@@ -413,9 +381,10 @@ class TradingSystem:
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
                 
-                order_success = await self.weex.place_order(sym, trade['side'], position_size_coins, dynamic_lev, safe_sl, safe_tps[0])
+                await self.weex.set_leverage(sym, dynamic_lev, trade['side'])
+                order_success = await self.weex.open_market_order(sym, trade['side'], position_size_coins)
 
-                weex_status = "✅ WEEX Executed" if order_success else "⚠️ WEEX Failed (Simulation Only)"
+                weex_status = "✅ WEEX Trade Opened" if order_success else "⚠️ WEEX Margin Error (Simulated)"
                 
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
@@ -436,9 +405,7 @@ class TradingSystem:
                     self.active_trades[sym] = trade
                     self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
                     self.save_state() 
-            except Exception as e:
-                Log.print(f"Error in execute_trade: {e}", Log.RED)
-                traceback.print_exc()
+            except Exception: pass
 
     async def scan_market(self):
         while self.running:
@@ -457,18 +424,12 @@ class TradingSystem:
                 
                 gc.collect() 
                 await asyncio.sleep(15) 
-            except Exception as e:
-                Log.print(f"Error in scan_market loop: {e}", Log.RED)
-                traceback.print_exc()
-                await asyncio.sleep(5)
+            except Exception: await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
         while self.running:
             try:
-                if self.stats.get('max_drawdown_pct', 0.0) > 40.0:
-                    await self.tg.send("⚠️ <b>SYSTEM HALTED</b>: Max Drawdown Exceeded 40%!"); self.running = False; break
                 if not self.active_trades: await asyncio.sleep(5); continue
-                
                 symbols_to_fetch = list(self.active_trades.keys())
                 if symbols_to_fetch:
                     tickers = await fetch_with_retry(self.exchange_data.fetch_tickers, symbols_to_fetch)
@@ -488,6 +449,7 @@ class TradingSystem:
                     target = trade['tps'][0] 
                     
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
+                        await self.weex.close_market_order(sym, side, pos_size) 
                         pnl = (current_sl - entry) * pos_size if side == "LONG" else (entry - current_sl) * pos_size
                         display_roe = (pnl / margin) * 100
                         msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:.1f}% ROE)"
@@ -502,9 +464,9 @@ class TradingSystem:
                         continue
 
                     if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
+                        await self.weex.close_market_order(sym, side, pos_size) 
                         pnl = (target - entry) * pos_size if side == "LONG" else (entry - target) * pos_size
                         display_roe = (pnl / margin) * 100 
-                        
                         msg = f"🏆 <b>SNIPER HIT! (Target Secured)</b> 🏦\n💰 <b>Net Profit:</b> +{display_roe:.1f}% ROE"
                         self._log_trade_result('wins', display_roe)
                         
@@ -516,10 +478,7 @@ class TradingSystem:
                             self.save_state() 
                             
                 await asyncio.sleep(2)
-            except Exception as e:
-                Log.print(f"Error in monitor_open_trades: {e}", Log.RED)
-                traceback.print_exc()
-                await asyncio.sleep(5)
+            except Exception: await asyncio.sleep(5)
 
     async def daily_report(self):
         while self.running:
@@ -543,18 +502,7 @@ class TradingSystem:
                 await self.tg.send(msg)
                 self.stats['daily'] = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}
                 self.save_state()
-            except Exception as e:
-                Log.print(f"Error in daily_report: {e}", Log.RED)
-                traceback.print_exc()
-                await asyncio.sleep(5)
-
-    async def keep_alive(self):
-        while self.running:
-            try: 
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s: 
-                    await s.get(Config.RENDER_URL)
-            except Exception: pass
-            await asyncio.sleep(300) 
+            except Exception: await asyncio.sleep(5)
 
 bot = TradingSystem()
 
@@ -567,7 +515,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# 👈 شاشة المراقبة الحية (اللوحة التي تظهر عند فتح رابط البوت)
+# 👈 المسار المخصص لخداع UptimeRobot (ضعه في إعدادات الموقع)
+@app.get("/ping")
+async def ping():
+    return JSONResponse(content={"status": "alive", "timestamp": time.time()})
+
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
 async def catch_all(path_name: str):
     html_content = f"""
@@ -576,10 +528,10 @@ async def catch_all(path_name: str):
         <h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1>
         <hr style="border: 1px solid #333;">
         <h3>Live Diagnostics:</h3>
+        <p><b>Target Coins:</b> BTC, SOL, ADA, RIVER, TAO</p>
+        <p><b>Margin per Trade:</b> ${Config.FIXED_MARGIN_USDT} | <b>Lev:</b> {Config.FIXED_LEVERAGE}x</p>
         <p><b>Last Market Scan:</b> {bot.last_scan_time}</p>
-        <p><b>Active Trades in Memory:</b> {len(bot.active_trades)} / {Config.MAX_TRADES_AT_ONCE}</p>
-        <p><b>Virtual Equity:</b> ${bot.stats['virtual_equity']:.2f}</p>
-        <p><b>System Status:</b> RUNNING</p>
+        <p><b>System Status:</b> RUNNING (Anti-Sleep Guard Active)</p>
     </body>
     </html>
     """
@@ -591,7 +543,6 @@ async def run_bot_background():
         asyncio.create_task(bot.scan_market())
         asyncio.create_task(bot.monitor_open_trades())
         asyncio.create_task(bot.daily_report())
-        asyncio.create_task(bot.keep_alive())
     except Exception as e: 
         Log.print(f"⚠️ Critical Bot Startup Error: {e}", Log.RED)
         traceback.print_exc()
