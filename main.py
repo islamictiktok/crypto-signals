@@ -40,15 +40,14 @@ class Config:
     CANDLES_LIMIT_MICRO = 100 
     MAX_TRADES_AT_ONCE = 3  
     
-    # 👈 تم تعيين الحد الأدنى للسيولة إلى 1 مليون دولار
     MIN_24H_VOLUME_USDT = 1_000_000 
     
-    FIXED_MARGIN_USDT = 0.20  
-    FIXED_LEVERAGE = 50 
+    FIXED_MARGIN_USDT = 0.15  # 👈 الدخول الصارم بـ 0.15$
+    FIXED_LEVERAGE = 50       # 👈 الرافعة المحاسبية (يفضل ضبطها يدوياً بالتطبيق)
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V68000.13 - Full Market Scanner (>1M Vol)"
+    VERSION = "V68000.17 - The Final Apex (Fast Algo TP/SL)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -72,7 +71,7 @@ async def fetch_with_retry(coro, *args, retries=3, delay=2.0, **kwargs):
             await asyncio.sleep(delay)
 
 # ==========================================
-# 2. محرك WEEX للفيوتشر (V3)
+# 2. محرك WEEX السريع (بدون مسار الرافعة الميت)
 # ==========================================
 class WeexExecutor:
     def __init__(self):
@@ -115,11 +114,6 @@ class WeexExecutor:
             Log.print(f"WEEX API Error: {e}", Log.RED)
             return None
 
-    async def set_leverage(self, symbol, leverage, side):
-        clean_symbol = symbol.split(':')[0].replace('/', '')
-        payload = {"symbol": clean_symbol, "marginCoin": "USDT", "leverage": str(leverage), "holdSide": "long" if side == "LONG" else "short"}
-        await self.send_request("POST", "/api/v1/mix/account/setLeverage", payload)
-
     async def open_market_order(self, symbol, side, size):
         clean_symbol = symbol.split(':')[0].replace('/', '') 
         unique_id = f"VIP_O_{int(time.time() * 1000)}"
@@ -133,23 +127,37 @@ class WeexExecutor:
         }
         res = await self.send_request("POST", "/capi/v3/order", payload)
         if res and res.get('success') == True: return True
-        Log.print(f"WEEX Open Order Failed: {res}", Log.RED)
         return False
 
-    async def close_market_order(self, symbol, side, size):
+    async def place_algo_tpsl(self, symbol, side, size, sl_price, tp_price):
         clean_symbol = symbol.split(':')[0].replace('/', '') 
-        unique_id = f"VIP_C_{int(time.time() * 1000)}"
-        payload = {
+        algo_side = "SELL" if side == "LONG" else "BUY"
+        pos_side = "LONG" if side == "LONG" else "SHORT"
+        
+        # 1. أمر وقف الخسارة
+        sl_payload = {
             "symbol": clean_symbol,
-            "side": "SELL" if side == "LONG" else "BUY",
-            "positionSide": "LONG" if side == "LONG" else "SHORT",
-            "type": "MARKET",
+            "side": algo_side,
+            "positionSide": pos_side,
+            "type": "STOP_MARKET",
+            "triggerPrice": str(sl_price),
             "quantity": str(size),
-            "newClientOrderId": unique_id
+            "clientAlgoId": f"SL_{int(time.time() * 1000)}"
         }
-        res = await self.send_request("POST", "/capi/v3/order", payload)
-        if res and res.get('success') == True: return True
-        return False
+        await self.send_request("POST", "/capi/v3/algoOrder", sl_payload)
+        
+        # 2. أمر أخذ الربح
+        tp_payload = {
+            "symbol": clean_symbol,
+            "side": algo_side,
+            "positionSide": pos_side,
+            "type": "TAKE_PROFIT_MARKET",
+            "triggerPrice": str(tp_price),
+            "quantity": str(size),
+            "clientAlgoId": f"TP_{int(time.time() * 1000)}"
+        }
+        await self.send_request("POST", "/capi/v3/algoOrder", tp_payload)
+        return True
 
 class TelegramNotifier:
     def __init__(self):
@@ -300,10 +308,8 @@ class TradingSystem:
         self.tg = TelegramNotifier()
         self.active_trades = {}
         self.cooldown_list = {} 
-        
-        self.cached_valid_coins = [] # 👈 قائمة فارغة لتمتلئ تلقائياً بعملات الـ 1M+
+        self.cached_valid_coins = [] 
         self.last_cache_time = 0
-        
         self.last_scan_time = "Not Scanned Yet"
         self.semaphore = asyncio.Semaphore(10) 
         self.trade_lock = asyncio.Lock() 
@@ -316,7 +322,7 @@ class TradingSystem:
         await self.exchange_data.load_markets()
         self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Scanner: All Coins > $1M Volume 🛡️")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Margin: ${Config.FIXED_MARGIN_USDT} | Coins > $1M Vol")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -346,7 +352,6 @@ class TradingSystem:
         self.stats['all_time'][result_type] += 1; self.stats['daily'][result_type] += 1
         self.stats['all_time']['total_roe'] += roe_val; self.stats['daily']['total_roe'] += roe_val
 
-    # 👈 دالة تحديث العملات المليونية
     async def update_valid_coins_cache(self):
         current_ts = int(datetime.now(timezone.utc).timestamp())
         if current_ts - self.last_cache_time > 86400:
@@ -394,11 +399,12 @@ class TradingSystem:
 
                 dynamic_lev = Config.FIXED_LEVERAGE
                 margin_required = Config.FIXED_MARGIN_USDT 
-                position_size_coins = (margin_required * dynamic_lev) / safe_entry
-                position_size_coins = float(self.exchange_data.amount_to_precision(sym, position_size_coins))
+                
+                raw_size = (margin_required * dynamic_lev) / safe_entry
+                position_size_str = self.exchange_data.amount_to_precision(sym, raw_size)
 
                 trade['entry'] = safe_entry; trade['sl'] = safe_sl; trade['tps'] = safe_tps
-                trade['position_size'] = position_size_coins; trade['margin'] = margin_required ; trade['leverage'] = dynamic_lev
+                trade['position_size'] = position_size_str; trade['margin'] = margin_required ; trade['leverage'] = dynamic_lev
                 
                 market_info = self.exchange_data.markets.get(sym, {})
                 base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
@@ -408,16 +414,20 @@ class TradingSystem:
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
                 
-                await self.weex.set_leverage(sym, dynamic_lev, trade['side'])
-                order_success = await self.weex.open_market_order(sym, trade['side'], position_size_coins)
+                # 🚀 النظام الجديد النظيف
+                order_success = await self.weex.open_market_order(sym, trade['side'], position_size_str)
 
-                weex_status = "✅ WEEX Trade Opened" if order_success else "⚠️ WEEX API Blocked (Simulated)"
+                weex_status = "⚠️ WEEX Execution Failed (Check Balance/Margin)"
+                if order_success:
+                    await asyncio.sleep(1.5) 
+                    algo_success = await self.weex.place_algo_tpsl(sym, trade['side'], position_size_str, safe_sl, safe_tps[0])
+                    weex_status = "✅ Trade Opened + Algo TP/SL Active 🛡️" if algo_success else "✅ Trade Opened (Algo TP/SL Failed)"
                 
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
                     f"────────────────\n"
                     f"🛒 <b>Entry:</b> <code>{format_price(safe_entry)}</code>\n"
-                    f"⚖️ <b>Leverage:</b> <b>{dynamic_lev}x</b>\n"
+                    f"⚖️ <b>Calc Leverage:</b> <b>{dynamic_lev}x</b>\n"
                     f"💵 <b>Margin:</b> <b>${margin_required}</b>\n"
                     f"────────────────\n"
                     f"🎯 <b>Sniper TP:</b> <code>{format_price(safe_tps[0])}</code> (+{tp_roe:.1f}%)\n"
@@ -427,7 +437,7 @@ class TradingSystem:
                 )
                 msg_id = await self.tg.send(msg)
                 
-                if msg_id:
+                if msg_id and order_success:
                     trade['msg_id'] = msg_id
                     self.active_trades[sym] = trade
                     self.stats['all_time']['signals'] += 1; self.stats['daily']['signals'] += 1
@@ -441,19 +451,18 @@ class TradingSystem:
                 if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
                     await asyncio.sleep(10); continue
                 
-                await self.update_valid_coins_cache() # 👈 استدعاء التحديث الدوري للعملات المليونية
+                await self.update_valid_coins_cache()
                 
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                # 👈 معالجة 3 عملات فقط كل مرة لحماية الرام من الانهيار
                 chunk_size = 3 
                 for i in range(0, len(scan_list), chunk_size):
                     if not self.running or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break 
                     chunk = scan_list[i:i+chunk_size]
                     tasks = [self.process_symbol(sym) for sym in chunk]
                     await asyncio.gather(*tasks)
-                    await asyncio.sleep(2.0) # راحة إجبارية للسيرفر
+                    await asyncio.sleep(2.0) 
                 
                 gc.collect() 
                 await asyncio.sleep(15) 
@@ -479,12 +488,12 @@ class TradingSystem:
                     current_price = ticker['last']
                     entry = trade['entry']
                     current_sl = trade['sl'] 
-                    pos_size = trade['position_size']
+                    pos_size = float(trade['position_size'])
                     margin = trade['margin']
                     target = trade['tps'][0] 
                     
+                    # البوت الآن يراقب السعر لحساب الأرباح وإفراغ الذاكرة فقط (المنصة تتكفل بالإغلاق الفعلي)
                     if (side == "LONG" and current_price <= current_sl) or (side == "SHORT" and current_price >= current_sl):
-                        await self.weex.close_market_order(sym, side, pos_size) 
                         pnl = (current_sl - entry) * pos_size if side == "LONG" else (entry - current_sl) * pos_size
                         display_roe = (pnl / margin) * 100
                         msg = f"🛑 <b>Trade Closed at SL</b> ({display_roe:.1f}% ROE)"
@@ -499,7 +508,6 @@ class TradingSystem:
                         continue
 
                     if target and ((side == "LONG" and current_price >= target) or (side == "SHORT" and current_price <= target)):
-                        await self.weex.close_market_order(sym, side, pos_size) 
                         pnl = (target - entry) * pos_size if side == "LONG" else (entry - target) * pos_size
                         display_roe = (pnl / margin) * 100 
                         msg = f"🏆 <b>SNIPER HIT! (Target Secured)</b> 🏦\n💰 <b>Net Profit:</b> +{display_roe:.1f}% ROE"
@@ -563,9 +571,9 @@ async def catch_all(path_name: str):
         <hr style="border: 1px solid #333;">
         <h3>Live Diagnostics:</h3>
         <p><b>Target Coins:</b> ALL Coins > $1M Volume</p>
-        <p><b>Margin per Trade:</b> ${Config.FIXED_MARGIN_USDT} | <b>Lev:</b> {Config.FIXED_LEVERAGE}x</p>
+        <p><b>Margin per Trade:</b> ${Config.FIXED_MARGIN_USDT}</p>
         <p><b>Last Market Scan:</b> {bot.last_scan_time}</p>
-        <p><b>System Status:</b> RUNNING (Anti-Sleep Guard Active)</p>
+        <p><b>System Status:</b> RUNNING (Anti-Sleep Guard + Algo Shield Active)</p>
     </body>
     </html>
     """
