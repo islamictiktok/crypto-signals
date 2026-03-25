@@ -34,10 +34,6 @@ class Config:
     WEEX_SECRET_KEY = "263f6868f81b6d9dd4af394c6f07d8798b5d4ba220b42c1a598893acb95bbc12"
     WEEX_PASSPHRASE = "MOMOmax264"
     
-    # 🌐 مسار سيرفر WEEX (تم تعديله لحل مشكلة Domain Not Found)
-    # إذا استمرت المشكلة، يمكنك تجربة: "https://api.weex.vip" أو "https://api.weexglobal.com"
-    WEEX_BASE_URL = "https://api.weex.exchange" 
-    
     TF_MACRO = '4h'  
     TF_MICRO = '15m'
     
@@ -54,7 +50,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V68000.1 - WEEX DNS Fix (Fixed 0.20$)"
+    VERSION = "V68000.3 - WEEX Official V3 Futures Engine"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -78,25 +74,27 @@ async def fetch_with_retry(coro, *args, retries=3, delay=1.5, **kwargs):
             await asyncio.sleep(delay)
 
 # ==========================================
-# 2. محرك WEEX المباشر (Custom API Client)
+# 2. محرك WEEX للفيوتشر (مطابق للوثائق الرسمية V3)
 # ==========================================
 class WeexExecutor:
     def __init__(self):
         self.api_key = Config.WEEX_API_KEY
         self.secret_key = Config.WEEX_SECRET_KEY
         self.passphrase = Config.WEEX_PASSPHRASE
-        self.base_url = Config.WEEX_BASE_URL # 👈 تم ربط الرابط الجديد هنا
+        # 🌐 الرابط الرسمي للفيوتشر وليس السبوت
+        self.base_url = "https://api-contract.weex.com" 
         self.session = None
 
     async def start(self):
-        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) # زيادة وقت الانتظار قليلاً
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
 
     async def close(self):
         if self.session: await self.session.close()
 
-    def get_signature(self, timestamp, method, request_path, body_str):
-        message = str(timestamp) + method.upper() + request_path + body_str
-        mac = hmac.new(bytes(self.secret_key, encoding='utf8'), bytes(message, encoding='utf-8'), digestmod=hashlib.sha256)
+    def get_signature(self, timestamp, method, path, body_str):
+        # 🔐 التشفير بنظام Base64 كما تطلب المنصة
+        message = str(timestamp) + method.upper() + path + body_str
+        mac = hmac.new(bytes(self.secret_key, 'utf8'), bytes(message, 'utf-8'), digestmod=hashlib.sha256)
         return base64.b64encode(mac.digest()).decode('utf-8')
 
     async def send_request(self, method, path, payload=None):
@@ -104,14 +102,17 @@ class WeexExecutor:
         timestamp = str(int(time.time() * 1000))
         body_str = json.dumps(payload) if payload else ""
         
-        sign = self.get_signature(timestamp, method, path, body_str)
+        signature = self.get_signature(timestamp, method, path, body_str)
+        
+        # 📋 الترويسة الصحيحة بالشرطات (-) مع الـ Passphrase
         headers = {
             "Content-Type": "application/json",
             "ACCESS-KEY": self.api_key,
-            "ACCESS-SIGN": sign,
+            "ACCESS-SIGN": signature,
             "ACCESS-TIMESTAMP": timestamp,
             "ACCESS-PASSPHRASE": self.passphrase
         }
+        
         try:
             url = self.base_url + path
             if method == "GET":
@@ -126,23 +127,26 @@ class WeexExecutor:
 
     async def place_order(self, symbol, side, size, lev, sl, tp):
         try:
-            clean_symbol = symbol.replace("/", "").replace(":", "")
-            # 1. ضبط الرافعة
-            lev_payload = {"symbol": clean_symbol, "marginCoin": "USDT", "leverage": lev, "holdSide": "long" if side=="LONG" else "short"}
-            await self.send_request("POST", "/api/v1/mix/account/setLeverage", lev_payload)
+            clean_symbol = symbol.replace("/", "").replace(":", "") # تحويل BTC/USDT إلى BTCUSDT
             
-            # 2. فتح الصفقة
+            # 1. فتح الصفقة مع الهدف والستوب (حسب وثائق V3/V2)
             order_payload = {
                 "symbol": clean_symbol,
-                "marginCoin": "USDT",
-                "side": "open_long" if side == "LONG" else "open_short",
-                "orderType": "market",
-                "size": str(size),
-                "presetStopLossPrice": str(sl),
-                "presetTakeProfitPrice": str(tp)
+                "side": "BUY" if side == "LONG" else "SELL",
+                "positionSide": "LONG" if side == "LONG" else "SHORT",
+                "type": "MARKET",
+                "quantity": str(size),
+                "slTriggerPrice": str(sl),
+                "tpTriggerPrice": str(tp)
             }
-            res = await self.send_request("POST", "/api/v1/mix/order/placeOrder", order_payload)
-            if res and res.get('code') == '00000': return True
+            
+            # نحاول أولاً مسار V3، وإذا فشل نستخدم مسار V2 للفيوتشر
+            res = await self.send_request("POST", "/capi/v3/placeOrder", order_payload)
+            if not res or res.get('code') != '00000':
+                res = await self.send_request("POST", "/capi/v2/order/placeOrder", order_payload)
+
+            if res and res.get('code') == '00000': 
+                return True
             else: 
                 Log.print(f"WEEX Order Error: {res}", Log.RED)
                 return False
@@ -170,7 +174,7 @@ class TelegramNotifier:
         except Exception: return None
 
 # ==========================================
-# 3. محرك الاستراتيجية 
+# 3. محرك الاستراتيجية (The 100% Book Logic)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -194,7 +198,7 @@ class StrategyEngine:
             if len(df_macro) < 20: return None
 
             anchors_found = []
-            FIB_EXT = [1.618] # هدف واحد
+            FIB_EXT = [1.618] # هدف واحد فقط
             
             for i in range(len(df_macro)-20, len(df_macro)-1):
                 anchor = df_macro.iloc[i]
@@ -271,7 +275,7 @@ class StrategyEngine:
                     
                     if risk > 0 and (risk / entry * 100) <= 8.0:
                         tps = [level_0 + (a_range * fib) for fib in FIB_EXT] 
-                        setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}", "risk_distance": risk}
+                        setup = {"side": "LONG", "entry": entry, "sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}", "risk_distance": risk}
 
             elif primary_anchor['dir'] == "SHORT":
                 level_100 = a_low; level_0 = a_high
@@ -289,7 +293,7 @@ class StrategyEngine:
                         tps = [level_0 - (a_range * fib) for fib in FIB_EXT] 
                         tps = [tp for tp in tps if tp > 0.000001]
                         if len(tps) > 0:
-                            setup = {"side": "SHORT", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}", "risk_distance": risk}
+                            setup = {"side": "SHORT", "entry": entry, "sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}", "risk_distance": risk}
             
             del df_macro, df_micro
             if not setup: return None
@@ -322,7 +326,7 @@ class TradingSystem:
         await self.exchange_data.load_markets()
         self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nCustom WEEX Raw Engine (Fixed Margin: ${Config.FIXED_MARGIN_USDT} - Single TP) 🤖💸")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\nWEEX Official Futures API (Fixed Margin: ${Config.FIXED_MARGIN_USDT} - Single TP) 🤖💸")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -389,7 +393,7 @@ class TradingSystem:
                 
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 
-                # التنفيذ عبر محرك WEEX المباشر
+                # 👈 التنفيذ عبر محرك WEEX الجديد المطابق لـ V3
                 order_success = await self.weex.place_order(sym, trade['side'], position_size_coins, dynamic_lev, safe_sl, safe_tps[0])
 
                 weex_status = "✅ WEEX Executed" if order_success else "⚠️ WEEX Connection Error (Simulation Mode)"
@@ -510,7 +514,7 @@ class TradingSystem:
         while self.running:
             try:
                 await asyncio.sleep(86400)
-                msg = f"📈 <b>VIP DAILY REPORT (24H)</b> 📉\n🤖 Bot is running smoothly on WEEX Custom Engine.\n🟢 Active Trades: {len(self.active_trades)}"
+                msg = f"📈 <b>VIP DAILY REPORT (24H)</b> 📉\n🤖 Bot is running smoothly on WEEX Official Engine.\n🟢 Active Trades: {len(self.active_trades)}"
                 await self.tg.send(msg)
             except Exception: await asyncio.sleep(5)
 
@@ -535,7 +539,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE"])
 async def catch_all(path_name: str):
-    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1><p>Status: WEEX Custom Engine Active</p></body></html>", status_code=200)
+    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1><p>Status: WEEX Official Engine Active</p></body></html>", status_code=200)
 
 async def run_bot_background():
     try:
