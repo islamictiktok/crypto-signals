@@ -40,13 +40,15 @@ class Config:
     CANDLES_LIMIT_MICRO = 100 
     MAX_TRADES_AT_ONCE = 3  
     
-    # 👈 تم التعديل إلى 0.20$ بناءً على طلبك
+    # 👈 تم تعيين الحد الأدنى للسيولة إلى 1 مليون دولار
+    MIN_24H_VOLUME_USDT = 1_000_000 
+    
     FIXED_MARGIN_USDT = 0.20  
     FIXED_LEVERAGE = 50 
     
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V68000.12 - Anti-Render Sleep Edition"
+    VERSION = "V68000.13 - Full Market Scanner (>1M Vol)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -298,7 +300,10 @@ class TradingSystem:
         self.tg = TelegramNotifier()
         self.active_trades = {}
         self.cooldown_list = {} 
-        self.cached_valid_coins = ['BTC/USDT:USDT', 'SOL/USDT:USDT', 'ADA/USDT:USDT', 'RIVER/USDT:USDT', 'TAO/USDT:USDT'] 
+        
+        self.cached_valid_coins = [] # 👈 قائمة فارغة لتمتلئ تلقائياً بعملات الـ 1M+
+        self.last_cache_time = 0
+        
         self.last_scan_time = "Not Scanned Yet"
         self.semaphore = asyncio.Semaphore(10) 
         self.trade_lock = asyncio.Lock() 
@@ -311,7 +316,7 @@ class TradingSystem:
         await self.exchange_data.load_markets()
         self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Mode: 0.20$ Sniper | Anti-Sleep Guard Active 🛡️")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Scanner: All Coins > $1M Volume 🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -340,6 +345,28 @@ class TradingSystem:
     def _log_trade_result(self, result_type, roe_val):
         self.stats['all_time'][result_type] += 1; self.stats['daily'][result_type] += 1
         self.stats['all_time']['total_roe'] += roe_val; self.stats['daily']['total_roe'] += roe_val
+
+    # 👈 دالة تحديث العملات المليونية
+    async def update_valid_coins_cache(self):
+        current_ts = int(datetime.now(timezone.utc).timestamp())
+        if current_ts - self.last_cache_time > 86400:
+            try: await self.exchange_data.load_markets(reload=True)
+            except Exception: pass
+
+        if current_ts - self.last_cache_time > 900 or not self.cached_valid_coins:
+            try:
+                tickers = await fetch_with_retry(self.exchange_data.fetch_tickers)
+                if not tickers: return
+                valid_coins_with_vol = []
+                for sym, d in tickers.items():
+                    if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
+                        vol = float(d.get('quoteVolume') or 0)
+                        if vol >= Config.MIN_24H_VOLUME_USDT:
+                            valid_coins_with_vol.append((sym, vol))
+                valid_coins_with_vol.sort(key=lambda x: x[1], reverse=True)
+                self.cached_valid_coins = [x[0] for x in valid_coins_with_vol]
+                if self.cached_valid_coins: self.last_cache_time = current_ts
+            except Exception: pass
 
     async def process_symbol(self, sym):
         async with self.semaphore:
@@ -384,7 +411,7 @@ class TradingSystem:
                 await self.weex.set_leverage(sym, dynamic_lev, trade['side'])
                 order_success = await self.weex.open_market_order(sym, trade['side'], position_size_coins)
 
-                weex_status = "✅ WEEX Trade Opened" if order_success else "⚠️ WEEX Margin Error (Simulated)"
+                weex_status = "✅ WEEX Trade Opened" if order_success else "⚠️ WEEX API Blocked (Simulated)"
                 
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
@@ -414,17 +441,25 @@ class TradingSystem:
                 if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
                     await asyncio.sleep(10); continue
                 
+                await self.update_valid_coins_cache() # 👈 استدعاء التحديث الدوري للعملات المليونية
+                
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                for sym in scan_list:
+                # 👈 معالجة 3 عملات فقط كل مرة لحماية الرام من الانهيار
+                chunk_size = 3 
+                for i in range(0, len(scan_list), chunk_size):
                     if not self.running or len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break 
-                    await self.process_symbol(sym)
-                    await asyncio.sleep(1.0) 
+                    chunk = scan_list[i:i+chunk_size]
+                    tasks = [self.process_symbol(sym) for sym in chunk]
+                    await asyncio.gather(*tasks)
+                    await asyncio.sleep(2.0) # راحة إجبارية للسيرفر
                 
                 gc.collect() 
                 await asyncio.sleep(15) 
-            except Exception: await asyncio.sleep(5)
+            except Exception as e: 
+                Log.print(f"Error in scan_market loop: {e}", Log.RED)
+                await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
         while self.running:
@@ -515,7 +550,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# 👈 المسار المخصص لخداع UptimeRobot (ضعه في إعدادات الموقع)
 @app.get("/ping")
 async def ping():
     return JSONResponse(content={"status": "alive", "timestamp": time.time()})
@@ -528,7 +562,7 @@ async def catch_all(path_name: str):
         <h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1>
         <hr style="border: 1px solid #333;">
         <h3>Live Diagnostics:</h3>
-        <p><b>Target Coins:</b> BTC, SOL, ADA, RIVER, TAO</p>
+        <p><b>Target Coins:</b> ALL Coins > $1M Volume</p>
         <p><b>Margin per Trade:</b> ${Config.FIXED_MARGIN_USDT} | <b>Lev:</b> {Config.FIXED_LEVERAGE}x</p>
         <p><b>Last Market Scan:</b> {bot.last_scan_time}</p>
         <p><b>System Status:</b> RUNNING (Anti-Sleep Guard Active)</p>
