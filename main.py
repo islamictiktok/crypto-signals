@@ -40,13 +40,18 @@ class Config:
     CANDLES_LIMIT_MICRO = 100 
     MAX_TRADES_AT_ONCE = 3  
     
-    # 👈 قائمة النخبة الموسعة (20 عملة قوية جداً + TAO و RIVER)
+    # 👈 القائمة النخبوية الموسعة (50 عملة قوية)
     TARGET_COINS = [
-        'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'BNB/USDT:USDT', 
-        'XRP/USDT:USDT', 'ADA/USDT:USDT', 'AVAX/USDT:USDT', 'LINK/USDT:USDT',
-        'DOGE/USDT:USDT', 'DOT/USDT:USDT', 'NEAR/USDT:USDT', 'INJ/USDT:USDT',
-        'OP/USDT:USDT', 'ARB/USDT:USDT', 'FET/USDT:USDT', 'RNDR/USDT:USDT',
-        'SUI/USDT:USDT', 'APT/USDT:USDT', 'TAO/USDT:USDT', 'RIVER/USDT:USDT'
+        'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'BNB/USDT:USDT', 'XRP/USDT:USDT', 
+        'ADA/USDT:USDT', 'AVAX/USDT:USDT', 'LINK/USDT:USDT', 'DOGE/USDT:USDT', 'DOT/USDT:USDT', 
+        'NEAR/USDT:USDT', 'INJ/USDT:USDT', 'OP/USDT:USDT', 'ARB/USDT:USDT', 'FET/USDT:USDT', 
+        'WIF/USDT:USDT', 'SUI/USDT:USDT', 'APT/USDT:USDT', 'TAO/USDT:USDT', 'RIVER/USDT:USDT',
+        'SHIB/USDT:USDT', 'TRX/USDT:USDT', 'LTC/USDT:USDT', 'BCH/USDT:USDT', 'ETC/USDT:USDT', 
+        'FIL/USDT:USDT', 'LDO/USDT:USDT', 'RUNE/USDT:USDT', 'KAS/USDT:USDT', 'TIA/USDT:USDT', 
+        'SEI/USDT:USDT', 'AR/USDT:USDT', 'STX/USDT:USDT', 'PEPE/USDT:USDT', 'FLOKI/USDT:USDT', 
+        'BONK/USDT:USDT', 'ORDI/USDT:USDT', 'JUP/USDT:USDT', 'PYTH/USDT:USDT', 'JTO/USDT:USDT', 
+        'GALA/USDT:USDT', 'SAND/USDT:USDT', 'MANA/USDT:USDT', 'APE/USDT:USDT', 'GRT/USDT:USDT', 
+        'MKR/USDT:USDT', 'AAVE/USDT:USDT', 'SNX/USDT:USDT', 'POL/USDT:USDT', 'DYDX/USDT:USDT'
     ]
     
     FIXED_MARGIN_USDT = 0.15  
@@ -54,7 +59,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600   
     STATE_FILE = "bot_state.json"
-    VERSION = "V68000.19 - Radar & Diagnostics"
+    VERSION = "V68000.21 - 50 Elite Coins & Deep Logs"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -75,8 +80,7 @@ async def fetch_with_retry(coro, *args, retries=3, delay=2.0, **kwargs):
             return await coro(*args, **kwargs)
         except Exception as e:
             if i == retries - 1:
-                # 👈 طباعة الخطأ الفني في حال الفشل المتكرر
-                Log.print(f"⚠️ Network/Fetch Error after {retries} retries: {str(e)}", Log.YELLOW)
+                Log.print(f"⚠️ Fetch Error ({args}): {str(e)}", Log.YELLOW)
                 return None
             await asyncio.sleep(delay)
 
@@ -120,12 +124,11 @@ class WeexExecutor:
             url = self.base_url + path
             async with self.session.post(url, headers=headers, json=payload) as resp:
                 data = await resp.json()
-                # 👈 فاحص أخطاء المنصة: يطبع الرد إذا كان يحتوي على خطأ
                 if data and not data.get('success') and data.get('code') != '00000':
-                    Log.print(f"❌ WEEX API Warning -> Path: {path} | Msg: {data}", Log.RED)
+                    Log.print(f"❌ WEEX Response Warning: {data}", Log.RED)
                 return data
         except Exception as e:
-            Log.print(f"❌ WEEX API Critical Error: {str(e)}", Log.RED)
+            Log.print(f"❌ WEEX Connection Error: {str(e)}", Log.RED)
             traceback.print_exc()
             return None
 
@@ -149,7 +152,6 @@ class WeexExecutor:
         algo_side = "SELL" if side == "LONG" else "BUY"
         pos_side = "LONG" if side == "LONG" else "SHORT"
         
-        # 1. أمر وقف الخسارة
         sl_payload = {
             "symbol": clean_symbol,
             "side": algo_side,
@@ -161,7 +163,6 @@ class WeexExecutor:
         }
         await self.send_request("POST", "/capi/v3/algoOrder", sl_payload)
         
-        # 2. أمر أخذ الربح
         tp_payload = {
             "symbol": clean_symbol,
             "side": algo_side,
@@ -192,11 +193,12 @@ class TelegramNotifier:
                 data = await resp.json()
                 return data.get('result', {}).get('message_id') if resp.status == 200 else None
         except Exception as e: 
-            Log.print(f"⚠️ Telegram API Error: {str(e)}", Log.YELLOW)
+            Log.print(f"⚠️ Telegram Error: {str(e)}", Log.YELLOW)
+            traceback.print_exc()
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجية 
+# 3. محرك الاستراتيجية (مطابق للباك تيست 100%)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -280,42 +282,40 @@ class StrategyEngine:
             a_high = primary_anchor['high']; a_low = primary_anchor['low']; a_range = primary_anchor['range']
             
             if primary_anchor['dir'] == "LONG":
-                level_100 = a_high; level_0 = a_low
                 kijun_ok = macro_latest['close'] > macro_latest['kijun']
-                is_breakout = prev_m['close'] <= level_100 and curr_m['close'] > level_100
-                is_retest = curr_m['low'] <= level_100 and curr_m['close'] > level_100 and prev_m['close'] > level_100
+                is_breakout = prev_m['close'] <= a_high and curr_m['close'] > a_high
+                is_retest = curr_m['low'] <= a_high and curr_m['close'] > a_high and prev_m['close'] > a_high
                 
                 if (is_breakout or is_retest) and is_effort_volume and curr_m['close'] > curr_m['open'] and kijun_ok and not bearish_divergence:
                     entry = curr_m['close']
                     sl = curr_m['low'] - (curr_m['high'] - curr_m['low']) * 0.1 
                     risk = entry - sl
                     if risk > 0 and (risk / entry * 100) <= 8.0:
-                        tps = [level_0 + (a_range * fib) for fib in FIB_EXT] 
-                        setup = {"side": "LONG", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}", "risk_distance": risk}
+                        tps = [a_low + (a_range * fib) for fib in FIB_EXT] 
+                        setup = {"side": "LONG", "entry": entry, "sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}"}
 
             elif primary_anchor['dir'] == "SHORT":
-                level_100 = a_low; level_0 = a_high
                 kijun_ok = macro_latest['close'] < macro_latest['kijun']
-                is_breakout = prev_m['close'] >= level_100 and curr_m['close'] < level_100
-                is_retest = curr_m['high'] >= level_100 and curr_m['close'] < level_100 and prev_m['close'] < level_100
+                is_breakout = prev_m['close'] >= a_low and curr_m['close'] < a_low
+                is_retest = curr_m['high'] >= a_low and curr_m['close'] < a_low and prev_m['close'] < a_low
                 
                 if (is_breakout or is_retest) and is_effort_volume and curr_m['close'] < curr_m['open'] and kijun_ok and not bullish_divergence:
                     entry = curr_m['close']
                     sl = curr_m['high'] + (curr_m['high'] - curr_m['low']) * 0.1
                     risk = sl - entry
                     if risk > 0 and (risk / entry * 100) <= 8.0:
-                        tps = [level_0 - (a_range * fib) for fib in FIB_EXT] 
+                        tps = [a_high - (a_range * fib) for fib in FIB_EXT] 
                         tps = [tp for tp in tps if tp > 0.000001]
                         if len(tps) > 0:
-                            setup = {"side": "SHORT", "entry": entry, "sl": sl, "original_sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}", "risk_distance": risk}
+                            setup = {"side": "SHORT", "entry": entry, "sl": sl, "tps": tps, "strat": f"VSA: {primary_anchor['type']}"}
             
             del df_macro, df_micro
             if not setup: return None
 
-            return {"symbol": symbol, "side": setup["side"], "entry": setup["entry"], "sl": setup["sl"], "original_sl": setup["original_sl"], "tps": setup["tps"], "strat": setup["strat"], "risk_distance": setup["risk_distance"]}
+            return {"symbol": symbol, "side": setup["side"], "entry": setup["entry"], "sl": setup["sl"], "tps": setup["tps"], "strat": setup["strat"]}
         except Exception as e: 
-            # 👈 فاحص أخطاء الاستراتيجية (مثل أخطاء الباندا أو الحسابات)
             Log.print(f"❌ Strategy Error for {symbol}: {str(e)}", Log.RED)
+            traceback.print_exc()
             return None
 
 # ==========================================
@@ -340,7 +340,7 @@ class TradingSystem:
         await self.exchange_data.load_markets()
         self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Coins: 20 Elite Assets | Diagnostics: Active 🔍")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Coins: 50 Elite Assets | Diagnostics: Deep Traceback Active 🔍")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -351,6 +351,7 @@ class TradingSystem:
             with open(Config.STATE_FILE, "w") as f: json.dump({"version": Config.VERSION, "active_trades": self.active_trades, "cooldown_list": self.cooldown_list, "stats": self.stats}, f)
         except Exception as e: 
             Log.print(f"⚠️ State Save Error: {str(e)}", Log.YELLOW)
+            traceback.print_exc()
 
     def load_state(self):
         if os.path.exists(Config.STATE_FILE):
@@ -360,6 +361,7 @@ class TradingSystem:
                     self.active_trades = state.get("active_trades", {}); self.cooldown_list = state.get("cooldown_list", {}); self.stats = state.get("stats", self.stats)
             except Exception as e: 
                 Log.print(f"⚠️ State Load Error: {str(e)}", Log.YELLOW)
+                traceback.print_exc()
 
     def _update_equity_and_drawdown(self, pnl):
         self.stats['virtual_equity'] += pnl
@@ -383,7 +385,8 @@ class TradingSystem:
                 res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_macro, ohlcv_micro)
                 if res: await self.execute_trade(res)
             except Exception as e: 
-                Log.print(f"❌ Process Symbol Error for {sym}: {str(e)}", Log.RED)
+                Log.print(f"❌ Process Error for {sym}: {str(e)}", Log.RED)
+                traceback.print_exc()
 
     async def execute_trade(self, trade):
         async with self.trade_lock:
@@ -391,7 +394,7 @@ class TradingSystem:
             try:
                 sym = trade['symbol']
                 
-                # 🛑 التبريد الفوري لمنع الإزعاج والتكرار (ساعة كاملة)
+                # تبريد فوري لمنع الإزعاج والتكرار (ساعة)
                 self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                 self.save_state()
 
@@ -419,7 +422,6 @@ class TradingSystem:
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
                 
-                # إرسال أمر الماركت
                 order_success = await self.weex.open_market_order(sym, trade['side'], position_size_str)
 
                 weex_status = "⚠️ WEEX Execution Failed (Check Balance/Margin)"
@@ -447,7 +449,6 @@ class TradingSystem:
                     self.active_trades[sym] = trade
                     self.save_state() 
             except Exception as e: 
-                # 👈 فاحص أخطاء التنفيذ: في حال فشل الأوامر أو التيليجرام
                 Log.print(f"❌ Execution Error for {trade.get('symbol', 'Unknown')}: {str(e)}", Log.RED)
                 traceback.print_exc()
 
@@ -472,8 +473,7 @@ class TradingSystem:
                 gc.collect() 
                 await asyncio.sleep(15) 
             except Exception as e: 
-                # 👈 فاحص أخطاء اللوب الرئيسي
-                Log.print(f"❌ Critical Error in scan_market loop: {str(e)}", Log.RED)
+                Log.print(f"❌ Scan Loop Error: {str(e)}", Log.RED)
                 traceback.print_exc()
                 await asyncio.sleep(5)
 
@@ -529,6 +529,7 @@ class TradingSystem:
                 await asyncio.sleep(2)
             except Exception as e: 
                 Log.print(f"❌ Monitor Error: {str(e)}", Log.RED)
+                traceback.print_exc()
                 await asyncio.sleep(5)
 
     async def daily_report(self):
@@ -553,7 +554,10 @@ class TradingSystem:
                 await self.tg.send(msg)
                 self.stats['daily'] = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}
                 self.save_state()
-            except Exception: await asyncio.sleep(5)
+            except Exception as e:
+                Log.print(f"❌ Daily Report Error: {str(e)}", Log.RED)
+                traceback.print_exc()
+                await asyncio.sleep(5)
 
 bot = TradingSystem()
 
@@ -578,10 +582,10 @@ async def catch_all(path_name: str):
         <h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1>
         <hr style="border: 1px solid #333;">
         <h3>Live Diagnostics:</h3>
-        <p><b>Target Coins:</b> Elite 20 Coins List</p>
+        <p><b>Target Coins:</b> 50 Elite Coins List</p>
         <p><b>Margin per Trade:</b> ${Config.FIXED_MARGIN_USDT} | <b>Lev:</b> {Config.FIXED_LEVERAGE}x</p>
         <p><b>Last Market Scan:</b> {bot.last_scan_time}</p>
-        <p><b>System Status:</b> RUNNING (Anti-Spam Elite Shield Active)</p>
+        <p><b>System Status:</b> RUNNING (Traceback Diagnostics Active)</p>
     </body>
     </html>
     """
