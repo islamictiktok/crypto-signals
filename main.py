@@ -38,7 +38,7 @@ class Config:
     
     MAX_TRADES_AT_ONCE = 3  
     
-    # ⛔ الهامش الصارم (الحد الأقصى 0.2)
+    # ⛔ الهامش الصارم (الحد الأقصى 0.2) سيعمل في الكواليس للحماية
     FIXED_MARGIN_USDT = 0.2  
     FIXED_LEVERAGE = 50       
     
@@ -58,7 +58,7 @@ class Config:
         "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
     ]
     
-    VERSION = "V68000.55 - Ultra Light RAM"
+    VERSION = "V68000.56 - Resilient MEXC & Clean UI"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -73,7 +73,7 @@ def format_price(price):
     return f"{price:.4f}"
 
 # ==========================================
-# 2. محرك WEEX (مع المصحح الصارم للكمية)
+# 2. محرك WEEX
 # ==========================================
 class WeexExecutor:
     def __init__(self):
@@ -134,7 +134,7 @@ class WeexExecutor:
 
         actual_margin = (float(size) * entry_price) / Config.FIXED_LEVERAGE
 
-        # 🧠 المصحح الذكي (الصارم - Strict Floor)
+        # المصحح الذكي
         if order_res and order_res.get('code') == -1054:
             msg_str = order_res.get('msg', '')
             match = re.search(r"stepSize '([0-9.]+)' requirement", msg_str)
@@ -142,7 +142,6 @@ class WeexExecutor:
                 step_size = float(match.group(1))
                 original_size = float(size)
                 
-                # التقريب للأسفل فقط لضمان عدم تجاوز الهامش (0.2)
                 new_size = math.floor(original_size / step_size) * step_size
                 
                 if new_size <= 0:
@@ -201,7 +200,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 4. محرك الاستراتيجية (تفريغ الرام فوراً)
+# 4. محرك الاستراتيجية 
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -224,13 +223,12 @@ class StrategyEngine:
         except: 
             pass
         finally:
-            # 🧹 تفريغ الـ DataFrame من الرام فوراً بعد انتهاء التحليل
             if 'df' in locals():
                 del df
         return setup
 
 # ==========================================
-# 5. المدير التنفيذي (إدارة الرام بذكاء)
+# 5. المدير التنفيذي
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -238,17 +236,24 @@ class TradingSystem:
         self.weex = WeexExecutor(); self.tg = TelegramNotifier()
         self.active_trades = {}; self.cooldown = {}; self.stats = {"signals": 0, "wins": 0, "losses": 0, "roe": 0.0, "equity": 100.0}
         self.running = True
-        self.mexc_symbols = [] # القائمة المصغرة لتخفيف الرام
+        self.mexc_symbols = [] 
 
     async def initialize(self):
         await self.tg.start(); await self.weex.start(); await self.mexc.load_markets()
         
-        # تحضير قائمة العملات بصيغة MEXC المحددة فقط (لتجنب جلب آلاف العملات)
+        # 🧠 التحقق المسبق من وجود العملة في MEXC لتجنب الأخطاء
         for sym in Config.WHITELIST:
-            base = sym[:-4] # إزالة كلمة USDT
-            self.mexc_symbols.append(f"{base}/USDT:USDT")
-            
+            base = sym[:-4] 
+            mexc_sym = f"{base}/USDT:USDT"
+            if mexc_sym in self.mexc.markets:
+                self.mexc_symbols.append(mexc_sym)
+            else:
+                Log.print(f"⚠️ العملة {sym} غير موجودة في MEXC، سيتم تخطيها بأمان.", Log.YELLOW)
+                
         Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
+        
+        # 🟢 إعادة رسالة التليجرام الافتتاحية
+        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Verified Coins\n🧠 <b>AI:</b> Strict Limit Active\n🛡️ <b>Status:</b> All Systems Go")
 
     def save_state(self):
         try:
@@ -280,17 +285,20 @@ class TradingSystem:
         
         if success:
             icon = "🟢" if setup['side'] == "LONG" else "🔴"
+            # 🧹 رسالة تليجرام نظيفة، قابلة للنسخ، وبدون هامش، مع خط فاصل
             msg = (
-                f"{icon} <b>NEW SIGNAL: #{clean_name}</b>\n"
+                f"{icon} <b>NEW SIGNAL</b>\n"
                 f"━━━━━━━━━━━━━━━\n"
+                f"🪙 <b>Coin:</b> <code>{clean_name}</code>\n"
                 f"⚡ <b>Side:</b> {setup['side']}\n"
                 f"🛒 <b>Entry:</b> <code>{clean_entry_str}</code>\n"
-                f"⚖️ <b>Lev:</b> {Config.FIXED_LEVERAGE}x | <b>Margin:</b> ${actual_margin:.2f}\n"
+                f"⚖️ <b>Lev:</b> {Config.FIXED_LEVERAGE}x\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🎯 <b>Target:</b> <code>{clean_tp_str}</code>\n"
+                f"━━━━━━━━━━━━━━━\n"
                 f"🛑 <b>Stop:</b> <code>{clean_sl_str}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🛡️ <i>API: Strict Margin (Max $0.2)</i>"
+                f"🛡️ <i>API: Order Placed Successfully</i>"
             )
             msg_id = await self.tg.send(msg)
             if msg_id:
@@ -320,13 +328,11 @@ class TradingSystem:
     async def main_loop(self):
         while self.running:
             try:
-                # 📉 طلب بيانات الـ 72 عملة فقط بدلاً من 3000 عملة لتقليل استهلاك الرام
                 tickers = await self.mexc.fetch_tickers(self.mexc_symbols)
                 
                 valid = [s for s, d in tickers.items() 
                          if s not in self.active_trades and (time.time() - self.cooldown.get(s, 0)) > Config.COOLDOWN_SECONDS]
                 
-                # مسح القاموس الكبير من الرام فوراً
                 del tickers 
 
                 if valid: Log.print(f"📊 جاري تحليل {len(valid)} عملة مسموحة وجاهزة...")
@@ -334,16 +340,13 @@ class TradingSystem:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     ohlcv = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=50)
                     setup = StrategyEngine.analyze(ohlcv)
-                    del ohlcv # تفريغ الرام
+                    del ohlcv 
                     
                     if setup: await self.execute_trade(sym, setup)
-                    
-                    # 🧘‍♂️ استراحة قصيرة جداً للمعالج بعد كل عملة
                     await asyncio.sleep(0.5) 
                 
-                # 🧹 تنظيف الذاكرة العشوائية إجبارياً بعد كل دورة
                 gc.collect() 
-                await asyncio.sleep(30) # زيادة فترة الانتظار ليرتاح السيرفر
+                await asyncio.sleep(30) 
             except Exception as e: 
                 Log.print(f"❌ Main Loop Error: {str(e)}", Log.RED)
                 await asyncio.sleep(10)
