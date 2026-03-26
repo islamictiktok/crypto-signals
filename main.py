@@ -38,16 +38,21 @@ class Config:
     
     CANDLES_LIMIT_MACRO = 200 
     CANDLES_LIMIT_MICRO = 100 
+    
+    # 👈 الحد الأقصى للصفقات المتزامنة مؤكد بـ 3
     MAX_TRADES_AT_ONCE = 3  
     
-    MIN_24H_VOLUME_USDT = 600_000 
+    MIN_24H_VOLUME_USDT = 1_000_000 
     
     FIXED_MARGIN_USDT = 0.15  
     FIXED_LEVERAGE = 50       
     
     COOLDOWN_SECONDS = 3600   
     STATE_FILE = "bot_state.json"
-    VERSION = "V68000.23 - Self-Healing AI & Bypass"
+    
+    HARD_RESET_ON_START = True 
+    
+    VERSION = "V68000.28 - Exact Name Fix"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -73,7 +78,7 @@ async def fetch_with_retry(coro, *args, retries=3, delay=2.0, **kwargs):
             await asyncio.sleep(delay)
 
 # ==========================================
-# 2. محرك WEEX للفيوتشر (Algo Orders)
+# 2. محرك WEEX (محدث للتعامل مع exact_app_name)
 # ==========================================
 class WeexExecutor:
     def __init__(self):
@@ -113,52 +118,60 @@ class WeexExecutor:
             async with self.session.post(url, headers=headers, json=payload) as resp:
                 data = await resp.json()
                 if data and not data.get('success') and data.get('code') != '00000' and str(data.get('code')) != '-1058':
-                    Log.print(f"❌ WEEX Response Warning: {data}", Log.RED)
+                    Log.print(f"❌ WEEX API Warning [{path}]: {data}", Log.RED)
                 return data
         except Exception as e:
             Log.print(f"❌ WEEX Connection Error: {str(e)}", Log.RED)
             return None
 
-    async def open_market_order(self, symbol, side, size):
-        clean_symbol = symbol.split(':')[0].replace('/', '') 
+    # الدوال هنا تقبل exact_app_name جاهزاً من دالة execute_trade
+    async def set_leverage(self, exact_symbol, leverage):
+        payload = {
+            "symbol": exact_symbol,
+            "marginType": "ISOLATED",
+            "isolatedLongLeverage": str(leverage),
+            "isolatedShortLeverage": str(leverage)
+        }
+        return await self.send_request("POST", "/capi/v3/account/leverage", payload)
+
+    async def open_market_order(self, exact_symbol, side, size):
         unique_id = f"VIP_O_{int(time.time() * 1000)}"
         payload = {
-            "symbol": clean_symbol,
+            "symbol": exact_symbol,
             "side": "BUY" if side == "LONG" else "SELL",
             "positionSide": "LONG" if side == "LONG" else "SHORT",
             "type": "MARKET",
             "quantity": str(size),
             "newClientOrderId": unique_id
         }
-        res = await self.send_request("POST", "/capi/v3/order", payload)
-        return res  # نرجع القاموس بالكامل لنفحصه في المحرك
+        return await self.send_request("POST", "/capi/v3/order", payload)
 
-    async def place_algo_tpsl(self, symbol, side, size, sl_price, tp_price):
-        clean_symbol = symbol.split(':')[0].replace('/', '') 
-        algo_side = "SELL" if side == "LONG" else "BUY"
+    async def place_algo_tpsl(self, exact_symbol, side, size, sl_price, tp_price):
         pos_side = "LONG" if side == "LONG" else "SHORT"
         
-        sl_payload = {
-            "symbol": clean_symbol,
-            "side": algo_side,
-            "positionSide": pos_side,
-            "type": "STOP_MARKET",
-            "triggerPrice": str(sl_price),
-            "quantity": str(size),
-            "clientAlgoId": f"SL_{int(time.time() * 1000)}"
-        }
-        await self.send_request("POST", "/capi/v3/algoOrder", sl_payload)
-        
         tp_payload = {
-            "symbol": clean_symbol,
-            "side": algo_side,
-            "positionSide": pos_side,
-            "type": "TAKE_PROFIT_MARKET",
-            "triggerPrice": str(tp_price),
-            "quantity": str(size),
-            "clientAlgoId": f"TP_{int(time.time() * 1000)}"
+             "symbol": exact_symbol,
+             "clientAlgoId": f"TP_{int(time.time() * 1000)}",
+             "planType": "TAKE_PROFIT",
+             "triggerPrice": str(tp_price),
+             "executePrice": str(tp_price),
+             "quantity": str(size),
+             "positionSide": pos_side,
+             "triggerPriceType": "MARK_PRICE"
         }
-        await self.send_request("POST", "/capi/v3/algoOrder", tp_payload)
+        await self.send_request("POST", "/capi/v3/placeTpSlOrder", tp_payload)
+        
+        sl_payload = {
+             "symbol": exact_symbol,
+             "clientAlgoId": f"SL_{int(time.time() * 1000)}",
+             "planType": "STOP_LOSS",
+             "triggerPrice": str(sl_price),
+             "executePrice": str(sl_price),
+             "quantity": str(size),
+             "positionSide": pos_side,
+             "triggerPriceType": "MARK_PRICE"
+        }
+        await self.send_request("POST", "/capi/v3/placeTpSlOrder", sl_payload)
         return True
 
 class TelegramNotifier:
@@ -309,7 +322,7 @@ class TradingSystem:
         self.tg = TelegramNotifier()
         self.active_trades = {}
         self.cooldown_list = {} 
-        self.blacklisted_coins = set() # 👈 القائمة السوداء ذاتية التعلم
+        self.blacklisted_coins = set() 
         self.cached_valid_coins = [] 
         self.last_cache_time = 0
         self.last_scan_time = "Not Scanned Yet"
@@ -324,7 +337,7 @@ class TradingSystem:
         await self.exchange_data.load_markets()
         self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Scanner: >$600k | Self-Healing AI Active 🛡️")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Exact Name Fix | Max 3 Trades | Wipe Active 🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -335,12 +348,22 @@ class TradingSystem:
             state_data = {
                 "version": Config.VERSION, "active_trades": self.active_trades, 
                 "cooldown_list": self.cooldown_list, "stats": self.stats,
-                "blacklisted_coins": list(self.blacklisted_coins) # حفظ القائمة السوداء
+                "blacklisted_coins": list(self.blacklisted_coins) 
             }
             with open(Config.STATE_FILE, "w") as f: json.dump(state_data, f)
         except Exception: pass
 
     def load_state(self):
+        if Config.HARD_RESET_ON_START:
+            Log.print("☢️ [HARD RESET] تم مسح الصفقات والإحصائيات والقائمة السوداء وتفريغ الرام بالكامل!", Log.YELLOW)
+            self.active_trades = {}
+            self.cooldown_list = {}
+            self.blacklisted_coins = set()
+            self.stats = {"virtual_equity": 100.0, "peak_equity": 100.0, "max_drawdown_pct": 0.0, "all_time": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}, "daily": {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}}
+            gc.collect()
+            self.save_state()
+            return
+
         if os.path.exists(Config.STATE_FILE):
             try:
                 with open(Config.STATE_FILE, "r") as f: state = json.load(f)
@@ -394,7 +417,7 @@ class TradingSystem:
                 if not ohlcv_macro or not ohlcv_micro: return
                 res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_macro, ohlcv_micro)
                 if res: await self.execute_trade(res)
-            except Exception as e: pass
+            except Exception: pass
 
     async def execute_trade(self, trade):
         async with self.trade_lock:
@@ -416,7 +439,6 @@ class TradingSystem:
                 margin_required = Config.FIXED_MARGIN_USDT 
                 raw_size = (margin_required * dynamic_lev) / safe_entry
                 
-                # 👈 صمام التجاوز لمشكلة (مكتبة CCXT مع AAVE وأخواتها)
                 try:
                     position_size_str = self.exchange_data.amount_to_precision(sym, raw_size)
                 except Exception:
@@ -427,13 +449,18 @@ class TradingSystem:
                 
                 market_info = self.exchange_data.markets.get(sym, {})
                 base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
+                
+                # 👈 هنا استخراج exact_app_name وتمريره لباقي الدوال بدلاً من clean_symbol
                 exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
                 icon = "🟢" if trade['side'] == "LONG" else "🔴"
                 
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
                 
-                weex_res = await self.weex.open_market_order(sym, trade['side'], position_size_str)
+                # 👈 إرسال exact_app_name الصافي لـ API WEEX
+                await self.weex.set_leverage(exact_app_name, dynamic_lev)
+                
+                weex_res = await self.weex.open_market_order(exact_app_name, trade['side'], position_size_str)
 
                 order_success = False
                 weex_status = "⚠️ WEEX Execution Failed"
@@ -443,17 +470,17 @@ class TradingSystem:
                         order_success = True
                     else:
                         code = str(weex_res.get('code'))
-                        # 👈 القائمة السوداء ذاتية التعلم (استبعاد العملات غير الموجودة في WEEX)
                         if code == '-1058':
                             self.blacklisted_coins.add(sym)
-                            Log.print(f"🚫 تم وضع {sym} في القائمة السوداء (غير مدعومة في WEEX Futures)", Log.YELLOW)
+                            Log.print(f"🚫 تم وضع {sym} في القائمة السوداء", Log.YELLOW)
                             self.save_state()
                         weex_status = f"⚠️ WEEX Error: {weex_res.get('msg', 'API Rejected')}"
 
                 if order_success:
                     await asyncio.sleep(1.5) 
-                    algo_success = await self.weex.place_algo_tpsl(sym, trade['side'], position_size_str, safe_sl, safe_tps[0])
-                    weex_status = "✅ Trade Opened + Algo TP/SL Active 🛡️" if algo_success else "✅ Trade Opened (Algo TP/SL Failed)"
+                    # 👈 إرسال exact_app_name للـ TP/SL
+                    algo_success = await self.weex.place_algo_tpsl(exact_app_name, trade['side'], position_size_str, safe_sl, safe_tps[0])
+                    weex_status = "✅ Trade Opened + V3 TP/SL Active 🛡️" if algo_success else "✅ Trade Opened (V3 TP/SL Failed)"
                 
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
@@ -487,7 +514,6 @@ class TradingSystem:
                 await self.update_valid_coins_cache() 
                 
                 current_time = int(datetime.now(timezone.utc).timestamp())
-                # 👈 مسح القائمة باستثناء العملات الموضوعة في القائمة السوداء
                 scan_list = [c for c in self.cached_valid_coins 
                              if c not in self.blacklisted_coins and 
                              (c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS)]
@@ -504,7 +530,6 @@ class TradingSystem:
                 await asyncio.sleep(15) 
             except Exception as e: 
                 Log.print(f"❌ Scan Loop Error: {str(e)}", Log.RED)
-                traceback.print_exc()
                 await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
@@ -608,10 +633,10 @@ async def catch_all(path_name: str):
         <h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1>
         <hr style="border: 1px solid #333;">
         <h3>Live Diagnostics:</h3>
-        <p><b>Target Coins:</b> All Coins > $600k Volume</p>
+        <p><b>Target Coins:</b> All Coins > $1M Volume</p>
         <p><b>Margin per Trade:</b> ${Config.FIXED_MARGIN_USDT} | <b>Lev:</b> {Config.FIXED_LEVERAGE}x</p>
         <p><b>Blacklisted Coins:</b> {len(bot.blacklisted_coins)}</p>
-        <p><b>System Status:</b> RUNNING (Self-Healing AI Active)</p>
+        <p><b>System Status:</b> RUNNING (Nuclear Wipe Active)</p>
     </body>
     </html>
     """
