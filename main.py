@@ -40,8 +40,6 @@ class Config:
     CANDLES_LIMIT_MICRO = 100 
     
     MAX_TRADES_AT_ONCE = 3  
-    
-    # 👈 تم تعديل السيولة إلى 600 ألف دولار
     MIN_24H_VOLUME_USDT = 600_000 
     
     FIXED_MARGIN_USDT = 0.15  
@@ -50,10 +48,33 @@ class Config:
     COOLDOWN_SECONDS = 3600   
     STATE_FILE = "bot_state.json"
     
-    # 👈 المسح الشامل مفعل: سيمسح كل شيء عند التشغيل
     HARD_RESET_ON_START = True 
     
-    VERSION = "V68000.30 - Final Polish (600k Vol)"
+    # 👑 القائمة البيضاء الضخمة (أقوى مشاريع السوق استبعاداً للميمز)
+    WHITELIST = [
+        # العملات القيادية والطبقة الأولى والثانية (L1 & L2)
+        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "AVAXUSDT", 
+        "DOTUSDT", "LINKUSDT", "MATICUSDT", "POLUSDT", "NEARUSDT", "APTUSDT", "SUIUSDT", 
+        "SEIUSDT", "TIAUSDT", "ARBUSDT", "OPUSDT", "FTMUSDT", "KASUSDT", "TONUSDT", "INJUSDT",
+        "STXUSDT", "ATOMUSDT", "ETCUSDT", "ICPUSDT", "FILUSDT", "LTCUSDT", "BCHUSDT",
+
+        # الذكاء الاصطناعي والبنية التحتية (AI & DePIN)
+        "TAOUSDT", "RENDERUSDT", "FETUSDT", "WLDUSDT", "ARUSDT", "GRTUSDT", "AKTUSDT", "IOUSDT",
+        "AGIXUSDT", "OCEANUSDT", "THETAUSDT", "ROSEUSDT", "PHBUSDT",
+
+        # مشاريع جديدة ذات تذبذب عالي جداً وسيولة ضخمة
+        "ONDOUSDT", "ZETAUSDT", "DYMUSDT", "STRKUSDT", "ALTUSDT", "MANTAUSDT", "ETHFIUSDT",
+        "ENAUSDT", "PENDLEUSDT", "WUSDT", "TNSRUSDT", "ZKUSDT", "ZROUSDT", "PYTHUSDT", "JUPUSDT",
+
+        # التمويل اللامركزي، الألعاب، والأوراكل (DeFi, Gaming & Oracles)
+        "RUNEUSDT", "SNXUSDT", "MKRUSDT", "AAVEUSDT", "CRVUSDT", "LDOUSDT", "CHZUSDT", "UNIUSDT",
+        "GALAUSDT", "SANDUSDT", "MANAUSDT", "IMXUSDT", "APEUSDT", "AXSUSDT", 
+
+        # العملات المطلوبة بشكل خاص
+        "RIVERUSDT"
+    ]
+    
+    VERSION = "V68000.38 - Massive Whitelist Edition"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -79,7 +100,7 @@ async def fetch_with_retry(coro, *args, retries=3, delay=2.0, **kwargs):
             await asyncio.sleep(delay)
 
 # ==========================================
-# 2. محرك WEEX (يستقبل exact_symbol فقط)
+# 2. محرك WEEX 
 # ==========================================
 class WeexExecutor:
     def __init__(self):
@@ -125,19 +146,19 @@ class WeexExecutor:
             Log.print(f"❌ WEEX Connection Error: {str(e)}", Log.RED)
             return None
 
-    async def set_leverage(self, exact_symbol, leverage):
+    async def set_leverage(self, exact_name, leverage):
         payload = {
-            "symbol": exact_symbol,
+            "symbol": exact_name,
             "marginType": "ISOLATED",
             "isolatedLongLeverage": str(leverage),
             "isolatedShortLeverage": str(leverage)
         }
         return await self.send_request("POST", "/capi/v3/account/leverage", payload)
 
-    async def open_market_order(self, exact_symbol, side, size):
+    async def open_market_order(self, exact_name, side, size):
         unique_id = f"VIP_O_{int(time.time() * 1000)}"
         payload = {
-            "symbol": exact_symbol,
+            "symbol": exact_name,
             "side": "BUY" if side == "LONG" else "SELL",
             "positionSide": "LONG" if side == "LONG" else "SHORT",
             "type": "MARKET",
@@ -146,11 +167,11 @@ class WeexExecutor:
         }
         return await self.send_request("POST", "/capi/v3/order", payload)
 
-    async def place_algo_tpsl(self, exact_symbol, side, size, sl_price, tp_price):
+    async def place_algo_tpsl(self, exact_name, side, size, sl_price, tp_price):
         pos_side = "LONG" if side == "LONG" else "SHORT"
         
         tp_payload = {
-             "symbol": exact_symbol,
+             "symbol": exact_name,
              "clientAlgoId": f"TP_{int(time.time() * 1000)}",
              "planType": "TAKE_PROFIT",
              "triggerPrice": str(tp_price),
@@ -162,7 +183,7 @@ class WeexExecutor:
         await self.send_request("POST", "/capi/v3/placeTpSlOrder", tp_payload)
         
         sl_payload = {
-             "symbol": exact_symbol,
+             "symbol": exact_name,
              "clientAlgoId": f"SL_{int(time.time() * 1000)}",
              "planType": "STOP_LOSS",
              "triggerPrice": str(sl_price),
@@ -337,7 +358,7 @@ class TradingSystem:
         await self.exchange_data.load_markets()
         self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Vol: 600k | Max 3 Trades | Exact Name | Wipe Active 🛡️")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Massive Whitelist | Auto-Blacklist Active 🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -385,6 +406,7 @@ class TradingSystem:
         self.stats['all_time'][result_type] += 1; self.stats['daily'][result_type] += 1
         self.stats['all_time']['total_roe'] += roe_val; self.stats['daily']['total_roe'] += roe_val
 
+    # دالة جلب العملات تقوم بالفلترة بناءً على القائمة البيضاء + السيولة العالية
     async def update_valid_coins_cache(self):
         current_ts = int(datetime.now(timezone.utc).timestamp())
         if current_ts - self.last_cache_time > 86400:
@@ -400,7 +422,15 @@ class TradingSystem:
                     if 'USDT' in sym and ':' in sym and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
                         vol = float(d.get('quoteVolume') or 0)
                         if vol >= Config.MIN_24H_VOLUME_USDT:
-                            valid_coins_with_vol.append((sym, vol))
+                            
+                            # استخراج الاسم للتحقق من وجوده في القائمة البيضاء
+                            market_info = self.exchange_data.markets.get(sym, {})
+                            base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
+                            exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
+                            
+                            if exact_app_name in Config.WHITELIST:
+                                valid_coins_with_vol.append((sym, vol))
+                                
                 valid_coins_with_vol.sort(key=lambda x: x[1], reverse=True)
                 self.cached_valid_coins = [x[0] for x in valid_coins_with_vol]
                 if self.cached_valid_coins: self.last_cache_time = current_ts
@@ -447,17 +477,17 @@ class TradingSystem:
                 trade['entry'] = safe_entry; trade['sl'] = safe_sl; trade['tps'] = safe_tps
                 trade['position_size'] = position_size_str; trade['margin'] = margin_required ; trade['leverage'] = dynamic_lev
                 
+                # استخدام baseCoinName المعتمد والمتفق عليه
                 market_info = self.exchange_data.markets.get(sym, {})
                 base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
-                
-                # 👈 يتم استخراج التسمية الصحيحة 100% وإرسالها لكل أوامر الـ API
                 exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
+                
                 icon = "🟢" if trade['side'] == "LONG" else "🔴"
                 
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
                 
-                # 👈 إرسال الاسم الصافي exact_app_name
+                # إرسال نفس المتغير exact_app_name للـ API
                 await self.weex.set_leverage(exact_app_name, dynamic_lev)
                 weex_res = await self.weex.open_market_order(exact_app_name, trade['side'], position_size_str)
 
@@ -470,17 +500,17 @@ class TradingSystem:
                     else:
                         code = str(weex_res.get('code'))
                         if code == '-1058':
-                            self.blacklisted_coins.add(sym) # نحتفظ بـ sym في قائمتنا الداخلية للمقاطعة
+                            self.blacklisted_coins.add(sym)
                             Log.print(f"🚫 تم وضع {exact_app_name} في القائمة السوداء", Log.YELLOW)
                             self.save_state()
                         weex_status = f"⚠️ WEEX Error: {weex_res.get('msg', 'API Rejected')}"
 
                 if order_success:
                     await asyncio.sleep(1.5) 
-                    # 👈 إرسال الاسم الصافي exact_app_name
                     algo_success = await self.weex.place_algo_tpsl(exact_app_name, trade['side'], position_size_str, safe_sl, safe_tps[0])
                     weex_status = "✅ Trade Opened + V3 TP/SL Active 🛡️" if algo_success else "✅ Trade Opened (V3 TP/SL Failed)"
                 
+                # طباعة المتغير نفسه في رسالة التليجرام
                 msg = (
                     f"{icon} <b><code>{exact_app_name}</code></b> ({trade['side']})\n"
                     f"────────────────\n"
@@ -632,10 +662,10 @@ async def catch_all(path_name: str):
         <h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1>
         <hr style="border: 1px solid #333;">
         <h3>Live Diagnostics:</h3>
-        <p><b>Target Coins:</b> All Coins > $600k Volume</p>
+        <p><b>Target Coins:</b> Elite Whitelist (> 600k Vol)</p>
         <p><b>Margin per Trade:</b> ${Config.FIXED_MARGIN_USDT} | <b>Lev:</b> {Config.FIXED_LEVERAGE}x</p>
         <p><b>Blacklisted Coins:</b> {len(bot.blacklisted_coins)}</p>
-        <p><b>System Status:</b> RUNNING (Nuclear Wipe Active)</p>
+        <p><b>System Status:</b> RUNNING (Massive List & Auto-Blacklist Active)</p>
     </body>
     </html>
     """
