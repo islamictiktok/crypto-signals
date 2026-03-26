@@ -58,7 +58,7 @@ class Config:
         "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
     ]
     
-    VERSION = "V68000.50 - Bulletproof Edition"
+    VERSION = "V68000.51 - The Precision Sniper"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -67,13 +67,8 @@ class Log:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
 
-def format_price(price):
-    if price < 0.001: return f"{price:.7f}"
-    elif price < 1: return f"{price:.5f}"
-    return f"{price:.4f}"
-
 # ==========================================
-# 2. محرك WEEX (مع مصحح الكميات الذكي)
+# 2. محرك WEEX (تطابق تام مع كود الاختبار)
 # ==========================================
 class WeexExecutor:
     def __init__(self):
@@ -111,18 +106,18 @@ class WeexExecutor:
             Log.print(f"❌ API Connection Error ({path}): {str(e)}", Log.RED)
             return None
 
-    async def execute_full_flow(self, symbol, side, size, sl_price, tp_price):
+    async def execute_full_flow(self, symbol, side, size, sl_price_str, tp_price_str):
         Log.print(f"=========================================", Log.BLUE)
         Log.print(f"🚀 بدء تنفيذ طلبات API لعملة {symbol} (الاتجاه: {side})", Log.BLUE)
         
-        # 1. تعديل الرافعة (مع حل crossLeverage)
+        # 1. تعديل الرافعة
         Log.print(f"⚙️ 1. جاري تعديل الرافعة إلى {Config.FIXED_LEVERAGE}x...")
         leverage_payload = {
             "symbol": symbol,
             "marginType": "ISOLATED",
             "isolatedLongLeverage": str(Config.FIXED_LEVERAGE),
             "isolatedShortLeverage": str(Config.FIXED_LEVERAGE),
-            "crossLeverage": str(Config.FIXED_LEVERAGE) # تم دمجها هنا
+            "crossLeverage": str(Config.FIXED_LEVERAGE)
         }
         lev_res = await self.send_request("POST", "/capi/v3/account/leverage", leverage_payload)
         Log.print(f"📡 رد السيرفر (الرافعة): {lev_res}")
@@ -141,7 +136,7 @@ class WeexExecutor:
         order_res = await self.send_request("POST", "/capi/v3/order", order_payload)
         Log.print(f"📡 رد السيرفر (فتح الصفقة): {order_res}")
 
-        # 🧠 نظام تصحيح الـ Step Size الذكي
+        # 🧠 المصحح الذكي للكمية
         if order_res and order_res.get('code') == -1054:
             msg_str = order_res.get('msg', '')
             match = re.search(r"stepSize '([0-9.]+)' requirement", msg_str)
@@ -149,38 +144,31 @@ class WeexExecutor:
                 step_size = float(match.group(1))
                 original_size = float(size)
                 new_size = math.floor(original_size / step_size) * step_size
-                
                 if new_size <= 0:
-                    Log.print(f"❌ الهامش (${Config.FIXED_MARGIN_USDT}) غير كافٍ لشراء الحد الأدنى من عقود {symbol}. تم الإلغاء بأمان.", Log.YELLOW)
+                    Log.print(f"❌ الهامش غير كافٍ. تم الإلغاء.", Log.YELLOW)
                     return False, order_res, size
-
-                # تنسيق الرقم الجديد
-                if step_size.is_integer() or step_size >= 1:
-                    new_size_str = str(int(new_size))
-                else:
-                    decimals = len(str(step_size).split('.')[1])
-                    new_size_str = f"{new_size:.{decimals}f}"
-
-                Log.print(f"♻️ المصحح الذكي: تعديل الكمية إلى {new_size_str} وإعادة الإرسال...", Log.YELLOW)
+                
+                new_size_str = str(int(new_size)) if step_size.is_integer() or step_size >= 1 else f"{new_size:.{len(str(step_size).split('.')[1])}f}"
+                Log.print(f"♻️ تعديل الكمية إلى {new_size_str} وإعادة الإرسال...", Log.YELLOW)
                 order_payload['quantity'] = new_size_str
                 order_res = await self.send_request("POST", "/capi/v3/order", order_payload)
                 Log.print(f"📡 رد السيرفر (التصحيح): {order_res}")
-                size = new_size_str # تحديث الحجم للاستخدام في أوامر الهدف
+                size = new_size_str 
         
         if not order_res or (not order_res.get('success') and order_res.get('code') != '00000'):
-            Log.print(f"❌ فشل فتح الصفقة لعملة {symbol}. إيقاف العملية.", Log.RED)
+            Log.print(f"❌ فشل فتح الصفقة. إيقاف العملية.", Log.RED)
             return False, order_res, size
 
         await asyncio.sleep(1.5)
 
-        # 3. وضع أمر أخذ الربح TP
-        Log.print(f"🎯 3. جاري وضع الهدف (TP) عند سعر {tp_price}...")
+        # 3. وضع أمر أخذ الربح TP (مطابق لكودك تماماً وبسعر نظيف)
+        Log.print(f"🎯 3. جاري وضع الهدف (TP) عند سعر {tp_price_str}...")
         tp_payload = {
             "symbol": symbol,
             "clientAlgoId": f"TP_{int(time.time()*1000)}",
             "planType": "TAKE_PROFIT",
-            "triggerPrice": str(tp_price),
-            "executePrice": str(tp_price),
+            "triggerPrice": tp_price_str,
+            "executePrice": tp_price_str,
             "quantity": str(size),
             "positionSide": side,
             "triggerPriceType": "MARK_PRICE"
@@ -189,14 +177,14 @@ class WeexExecutor:
         Log.print(f"📡 رد السيرفر (الهدف): {tp_res}")
         await asyncio.sleep(0.5)
 
-        # 4. وضع أمر وقف الخسارة SL
-        Log.print(f"🛑 4. جاري وضع الستوب لوس (SL) عند سعر {sl_price}...")
+        # 4. وضع أمر وقف الخسارة SL (مطابق لكودك تماماً وبسعر نظيف)
+        Log.print(f"🛑 4. جاري وضع الستوب لوس (SL) عند سعر {sl_price_str}...")
         sl_payload = {
             "symbol": symbol,
             "clientAlgoId": f"SL_{int(time.time()*1000)}",
             "planType": "STOP_LOSS",
-            "triggerPrice": str(sl_price),
-            "executePrice": str(sl_price),
+            "triggerPrice": sl_price_str,
+            "executePrice": sl_price_str,
             "quantity": str(size),
             "positionSide": side,
             "triggerPriceType": "MARK_PRICE"
@@ -250,7 +238,7 @@ class StrategyEngine:
         except: return None
 
 # ==========================================
-# 5. المدير التنفيذي و Pinger
+# 5. المدير التنفيذي
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -262,7 +250,6 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.weex.start(); await self.mexc.load_markets()
         Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
-        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> 72 Diamonds\n🧠 <b>AI:</b> Smart Step-Size Corrector Active\n🛡️ <b>Pinger:</b> Online (3-Min Heartbeat)")
 
     def save_state(self):
         try:
@@ -278,8 +265,18 @@ class TradingSystem:
         try: size = self.mexc.amount_to_precision(symbol, raw_size)
         except: size = f"{raw_size:.4f}"
         
+        # 🟢 استخدام MEXC لضمان قص الأرقام بشكل نظيف جداً قبل إرسالها للـ API
+        try:
+            clean_tp_str = self.mexc.price_to_precision(symbol, setup['tp'])
+            clean_sl_str = self.mexc.price_to_precision(symbol, setup['sl'])
+            clean_entry_str = self.mexc.price_to_precision(symbol, setup['entry'])
+        except:
+            clean_tp_str = f"{setup['tp']:.4f}".rstrip('0').rstrip('.')
+            clean_sl_str = f"{setup['sl']:.4f}".rstrip('0').rstrip('.')
+            clean_entry_str = f"{setup['entry']:.4f}".rstrip('0').rstrip('.')
+        
         success, response, final_size = await self.weex.execute_full_flow(
-            symbol=clean_name, side=setup['side'], size=size, sl_price=setup['sl'], tp_price=setup['tp']
+            symbol=clean_name, side=setup['side'], size=size, sl_price_str=clean_sl_str, tp_price_str=clean_tp_str
         )
         
         if success:
@@ -288,13 +285,13 @@ class TradingSystem:
                 f"{icon} <b>NEW SIGNAL: #{clean_name}</b>\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"⚡ <b>Side:</b> {setup['side']}\n"
-                f"🛒 <b>Entry:</b> <code>{format_price(setup['entry'])}</code>\n"
+                f"🛒 <b>Entry:</b> <code>{clean_entry_str}</code>\n"
                 f"⚖️ <b>Lev:</b> {Config.FIXED_LEVERAGE}x | <b>Margin:</b> ${Config.FIXED_MARGIN_USDT}\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🎯 <b>Target:</b> <code>{format_price(setup['tp'])}</code>\n"
-                f"🛑 <b>Stop:</b> <code>{format_price(setup['sl'])}</code>\n"
+                f"🎯 <b>Target:</b> <code>{clean_tp_str}</code>\n"
+                f"🛑 <b>Stop:</b> <code>{clean_sl_str}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🛡️ <i>API: Executed Successfully</i>"
+                f"🛡️ <i>API: Order & TP/SL Successfully Placed</i>"
             )
             msg_id = await self.tg.send(msg)
             if msg_id:
@@ -312,7 +309,6 @@ class TradingSystem:
                     win = (t['side'] == "LONG" and curr >= t['tp']) or (t['side'] == "SHORT" and curr <= t['tp'])
                     loss = (t['side'] == "LONG" and curr <= t['sl']) or (t['side'] == "SHORT" and curr >= t['sl'])
                     if win or loss:
-                        Log.print(f"🔔 إغلاق صفقة {sym} {'بربح 🏆' if win else 'بخسارة 🛑'}", Log.YELLOW)
                         pnl = (curr - t['entry']) * float(t['size']) if t['side'] == "LONG" else (t['entry'] - curr) * float(t['size'])
                         roe = (pnl / Config.FIXED_MARGIN_USDT) * 100
                         status_text = "🏆 <b>TARGET HIT!</b> 🏦" if win else "🛑 <b>STOP LOSS HIT</b>"
@@ -368,12 +364,10 @@ async def lifespan(app: FastAPI):
     bot.running = False
 app = FastAPI(lifespan=lifespan)
 
-# رابط البينج
 @app.get("/ping")
 async def ping(): 
     return JSONResponse(content={"status": "online", "message": "PONG", "time": time.time()})
 
-# صائد كافة الروابط الأخرى ليعطي 200 OK
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
 async def catch_all(path_name: str):
     html_content = f"<html><body style='background:#0d1117;color:#00ff00;padding:50px;font-family:monospace;'><h1>VIP FORTS {Config.VERSION}</h1><p>Status: All Systems Operational (200 OK)</p><p>Path requested: /{path_name}</p></body></html>"
