@@ -39,10 +39,10 @@ class Config:
     CANDLES_LIMIT_MACRO = 200 
     CANDLES_LIMIT_MICRO = 100 
     
-    # 👈 الحد الأقصى للصفقات المتزامنة مؤكد بـ 3
     MAX_TRADES_AT_ONCE = 3  
     
-    MIN_24H_VOLUME_USDT = 1_000_000 
+    # 👈 تم تعديل السيولة إلى 600 ألف دولار
+    MIN_24H_VOLUME_USDT = 600_000 
     
     FIXED_MARGIN_USDT = 0.15  
     FIXED_LEVERAGE = 50       
@@ -50,9 +50,10 @@ class Config:
     COOLDOWN_SECONDS = 3600   
     STATE_FILE = "bot_state.json"
     
+    # 👈 المسح الشامل مفعل: سيمسح كل شيء عند التشغيل
     HARD_RESET_ON_START = True 
     
-    VERSION = "V68000.28 - Exact Name Fix"
+    VERSION = "V68000.30 - Final Polish (600k Vol)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -78,7 +79,7 @@ async def fetch_with_retry(coro, *args, retries=3, delay=2.0, **kwargs):
             await asyncio.sleep(delay)
 
 # ==========================================
-# 2. محرك WEEX (محدث للتعامل مع exact_app_name)
+# 2. محرك WEEX (يستقبل exact_symbol فقط)
 # ==========================================
 class WeexExecutor:
     def __init__(self):
@@ -124,7 +125,6 @@ class WeexExecutor:
             Log.print(f"❌ WEEX Connection Error: {str(e)}", Log.RED)
             return None
 
-    # الدوال هنا تقبل exact_app_name جاهزاً من دالة execute_trade
     async def set_leverage(self, exact_symbol, leverage):
         payload = {
             "symbol": exact_symbol,
@@ -337,7 +337,7 @@ class TradingSystem:
         await self.exchange_data.load_markets()
         self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Exact Name Fix | Max 3 Trades | Wipe Active 🛡️")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Vol: 600k | Max 3 Trades | Exact Name | Wipe Active 🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -450,16 +450,15 @@ class TradingSystem:
                 market_info = self.exchange_data.markets.get(sym, {})
                 base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
                 
-                # 👈 هنا استخراج exact_app_name وتمريره لباقي الدوال بدلاً من clean_symbol
+                # 👈 يتم استخراج التسمية الصحيحة 100% وإرسالها لكل أوامر الـ API
                 exact_app_name = f"{base_coin_name}USDT" if base_coin_name else sym.split(':')[0].replace('/', '')
                 icon = "🟢" if trade['side'] == "LONG" else "🔴"
                 
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
                 
-                # 👈 إرسال exact_app_name الصافي لـ API WEEX
+                # 👈 إرسال الاسم الصافي exact_app_name
                 await self.weex.set_leverage(exact_app_name, dynamic_lev)
-                
                 weex_res = await self.weex.open_market_order(exact_app_name, trade['side'], position_size_str)
 
                 order_success = False
@@ -471,14 +470,14 @@ class TradingSystem:
                     else:
                         code = str(weex_res.get('code'))
                         if code == '-1058':
-                            self.blacklisted_coins.add(sym)
-                            Log.print(f"🚫 تم وضع {sym} في القائمة السوداء", Log.YELLOW)
+                            self.blacklisted_coins.add(sym) # نحتفظ بـ sym في قائمتنا الداخلية للمقاطعة
+                            Log.print(f"🚫 تم وضع {exact_app_name} في القائمة السوداء", Log.YELLOW)
                             self.save_state()
                         weex_status = f"⚠️ WEEX Error: {weex_res.get('msg', 'API Rejected')}"
 
                 if order_success:
                     await asyncio.sleep(1.5) 
-                    # 👈 إرسال exact_app_name للـ TP/SL
+                    # 👈 إرسال الاسم الصافي exact_app_name
                     algo_success = await self.weex.place_algo_tpsl(exact_app_name, trade['side'], position_size_str, safe_sl, safe_tps[0])
                     weex_status = "✅ Trade Opened + V3 TP/SL Active 🛡️" if algo_success else "✅ Trade Opened (V3 TP/SL Failed)"
                 
@@ -633,7 +632,7 @@ async def catch_all(path_name: str):
         <h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1>
         <hr style="border: 1px solid #333;">
         <h3>Live Diagnostics:</h3>
-        <p><b>Target Coins:</b> All Coins > $1M Volume</p>
+        <p><b>Target Coins:</b> All Coins > $600k Volume</p>
         <p><b>Margin per Trade:</b> ${Config.FIXED_MARGIN_USDT} | <b>Lev:</b> {Config.FIXED_LEVERAGE}x</p>
         <p><b>Blacklisted Coins:</b> {len(bot.blacklisted_coins)}</p>
         <p><b>System Status:</b> RUNNING (Nuclear Wipe Active)</p>
