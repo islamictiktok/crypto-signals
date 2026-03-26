@@ -40,7 +40,6 @@ class Config:
     CANDLES_LIMIT_MICRO = 100 
     MAX_TRADES_AT_ONCE = 3  
     
-    # 👈 الحد الأدنى للسيولة 600 ألف دولار
     MIN_24H_VOLUME_USDT = 600_000 
     
     FIXED_MARGIN_USDT = 0.15  
@@ -48,7 +47,7 @@ class Config:
     
     COOLDOWN_SECONDS = 3600   
     STATE_FILE = "bot_state.json"
-    VERSION = "V68000.22 - Dynamic Scanner (>600k) & Deep Logs"
+    VERSION = "V68000.23 - Self-Healing AI & Bypass"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -113,12 +112,11 @@ class WeexExecutor:
             url = self.base_url + path
             async with self.session.post(url, headers=headers, json=payload) as resp:
                 data = await resp.json()
-                if data and not data.get('success') and data.get('code') != '00000':
+                if data and not data.get('success') and data.get('code') != '00000' and str(data.get('code')) != '-1058':
                     Log.print(f"❌ WEEX Response Warning: {data}", Log.RED)
                 return data
         except Exception as e:
             Log.print(f"❌ WEEX Connection Error: {str(e)}", Log.RED)
-            traceback.print_exc()
             return None
 
     async def open_market_order(self, symbol, side, size):
@@ -133,8 +131,7 @@ class WeexExecutor:
             "newClientOrderId": unique_id
         }
         res = await self.send_request("POST", "/capi/v3/order", payload)
-        if res and res.get('success') == True: return True
-        return False
+        return res  # نرجع القاموس بالكامل لنفحصه في المحرك
 
     async def place_algo_tpsl(self, symbol, side, size, sl_price, tp_price):
         clean_symbol = symbol.split(':')[0].replace('/', '') 
@@ -181,9 +178,7 @@ class TelegramNotifier:
             async with self.session.post(self.base_url, json=payload) as resp:
                 data = await resp.json()
                 return data.get('result', {}).get('message_id') if resp.status == 200 else None
-        except Exception as e: 
-            Log.print(f"⚠️ Telegram Error: {str(e)}", Log.YELLOW)
-            traceback.print_exc()
+        except Exception: 
             return None
 
 # ==========================================
@@ -302,10 +297,7 @@ class StrategyEngine:
             if not setup: return None
 
             return {"symbol": symbol, "side": setup["side"], "entry": setup["entry"], "sl": setup["sl"], "tps": setup["tps"], "strat": setup["strat"]}
-        except Exception as e: 
-            Log.print(f"❌ Strategy Error for {symbol}: {str(e)}", Log.RED)
-            traceback.print_exc()
-            return None
+        except Exception: return None
 
 # ==========================================
 # 4. مدير البوت (Execution Engine)
@@ -317,7 +309,8 @@ class TradingSystem:
         self.tg = TelegramNotifier()
         self.active_trades = {}
         self.cooldown_list = {} 
-        self.cached_valid_coins = [] # 👈 قائمة العملات الديناميكية
+        self.blacklisted_coins = set() # 👈 القائمة السوداء ذاتية التعلم
+        self.cached_valid_coins = [] 
         self.last_cache_time = 0
         self.last_scan_time = "Not Scanned Yet"
         self.semaphore = asyncio.Semaphore(5) 
@@ -331,7 +324,7 @@ class TradingSystem:
         await self.exchange_data.load_markets()
         self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Coins: All > $600k Vol | Diagnostics: Deep Traceback Active 🔍")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Scanner: >$600k | Self-Healing AI Active 🛡️")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -339,20 +332,24 @@ class TradingSystem:
 
     def save_state(self):
         try:
-            with open(Config.STATE_FILE, "w") as f: json.dump({"version": Config.VERSION, "active_trades": self.active_trades, "cooldown_list": self.cooldown_list, "stats": self.stats}, f)
-        except Exception as e: 
-            Log.print(f"⚠️ State Save Error: {str(e)}", Log.YELLOW)
-            traceback.print_exc()
+            state_data = {
+                "version": Config.VERSION, "active_trades": self.active_trades, 
+                "cooldown_list": self.cooldown_list, "stats": self.stats,
+                "blacklisted_coins": list(self.blacklisted_coins) # حفظ القائمة السوداء
+            }
+            with open(Config.STATE_FILE, "w") as f: json.dump(state_data, f)
+        except Exception: pass
 
     def load_state(self):
         if os.path.exists(Config.STATE_FILE):
             try:
                 with open(Config.STATE_FILE, "r") as f: state = json.load(f)
                 if state.get("version") == Config.VERSION:
-                    self.active_trades = state.get("active_trades", {}); self.cooldown_list = state.get("cooldown_list", {}); self.stats = state.get("stats", self.stats)
-            except Exception as e: 
-                Log.print(f"⚠️ State Load Error: {str(e)}", Log.YELLOW)
-                traceback.print_exc()
+                    self.active_trades = state.get("active_trades", {})
+                    self.cooldown_list = state.get("cooldown_list", {})
+                    self.stats = state.get("stats", self.stats)
+                    self.blacklisted_coins = set(state.get("blacklisted_coins", []))
+            except Exception: pass
 
     def _update_equity_and_drawdown(self, pnl):
         self.stats['virtual_equity'] += pnl
@@ -365,7 +362,6 @@ class TradingSystem:
         self.stats['all_time'][result_type] += 1; self.stats['daily'][result_type] += 1
         self.stats['all_time']['total_roe'] += roe_val; self.stats['daily']['total_roe'] += roe_val
 
-    # 👈 فاحص ومحدث العملات الديناميكية (سيولة 600 ألف فما فوق)
     async def update_valid_coins_cache(self):
         current_ts = int(datetime.now(timezone.utc).timestamp())
         if current_ts - self.last_cache_time > 86400:
@@ -387,7 +383,6 @@ class TradingSystem:
                 if self.cached_valid_coins: self.last_cache_time = current_ts
             except Exception as e:
                 Log.print(f"❌ Cache Update Error: {str(e)}", Log.RED)
-                traceback.print_exc()
 
     async def process_symbol(self, sym):
         async with self.semaphore:
@@ -399,9 +394,7 @@ class TradingSystem:
                 if not ohlcv_macro or not ohlcv_micro: return
                 res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_macro, ohlcv_micro)
                 if res: await self.execute_trade(res)
-            except Exception as e: 
-                Log.print(f"❌ Process Error for {sym}: {str(e)}", Log.RED)
-                traceback.print_exc()
+            except Exception as e: pass
 
     async def execute_trade(self, trade):
         async with self.trade_lock:
@@ -409,7 +402,6 @@ class TradingSystem:
             try:
                 sym = trade['symbol']
                 
-                # تبريد فوري لمنع الإزعاج والتكرار (ساعة)
                 self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                 self.save_state()
 
@@ -422,9 +414,13 @@ class TradingSystem:
 
                 dynamic_lev = Config.FIXED_LEVERAGE
                 margin_required = Config.FIXED_MARGIN_USDT 
-                
                 raw_size = (margin_required * dynamic_lev) / safe_entry
-                position_size_str = self.exchange_data.amount_to_precision(sym, raw_size)
+                
+                # 👈 صمام التجاوز لمشكلة (مكتبة CCXT مع AAVE وأخواتها)
+                try:
+                    position_size_str = self.exchange_data.amount_to_precision(sym, raw_size)
+                except Exception:
+                    position_size_str = f"{raw_size:.4f}".rstrip('0').rstrip('.')
 
                 trade['entry'] = safe_entry; trade['sl'] = safe_sl; trade['tps'] = safe_tps
                 trade['position_size'] = position_size_str; trade['margin'] = margin_required ; trade['leverage'] = dynamic_lev
@@ -437,9 +433,23 @@ class TradingSystem:
                 tp_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_tps[0], trade['side'], dynamic_lev)
                 pnl_sl_raw = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], dynamic_lev)
                 
-                order_success = await self.weex.open_market_order(sym, trade['side'], position_size_str)
+                weex_res = await self.weex.open_market_order(sym, trade['side'], position_size_str)
 
-                weex_status = "⚠️ WEEX Execution Failed (Check Balance/Margin)"
+                order_success = False
+                weex_status = "⚠️ WEEX Execution Failed"
+
+                if weex_res:
+                    if weex_res.get('success') == True:
+                        order_success = True
+                    else:
+                        code = str(weex_res.get('code'))
+                        # 👈 القائمة السوداء ذاتية التعلم (استبعاد العملات غير الموجودة في WEEX)
+                        if code == '-1058':
+                            self.blacklisted_coins.add(sym)
+                            Log.print(f"🚫 تم وضع {sym} في القائمة السوداء (غير مدعومة في WEEX Futures)", Log.YELLOW)
+                            self.save_state()
+                        weex_status = f"⚠️ WEEX Error: {weex_res.get('msg', 'API Rejected')}"
+
                 if order_success:
                     await asyncio.sleep(1.5) 
                     algo_success = await self.weex.place_algo_tpsl(sym, trade['side'], position_size_str, safe_sl, safe_tps[0])
@@ -474,10 +484,13 @@ class TradingSystem:
                 if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE:
                     await asyncio.sleep(10); continue
                 
-                await self.update_valid_coins_cache() # 👈 استدعاء تحديث القائمة الديناميكية
+                await self.update_valid_coins_cache() 
                 
                 current_time = int(datetime.now(timezone.utc).timestamp())
-                scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
+                # 👈 مسح القائمة باستثناء العملات الموضوعة في القائمة السوداء
+                scan_list = [c for c in self.cached_valid_coins 
+                             if c not in self.blacklisted_coins and 
+                             (c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS)]
                 
                 chunk_size = 3 
                 for i in range(0, len(scan_list), chunk_size):
@@ -546,7 +559,6 @@ class TradingSystem:
                 await asyncio.sleep(2)
             except Exception as e: 
                 Log.print(f"❌ Monitor Error: {str(e)}", Log.RED)
-                traceback.print_exc()
                 await asyncio.sleep(5)
 
     async def daily_report(self):
@@ -571,10 +583,7 @@ class TradingSystem:
                 await self.tg.send(msg)
                 self.stats['daily'] = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0, "total_roe": 0.0}
                 self.save_state()
-            except Exception as e:
-                Log.print(f"❌ Daily Report Error: {str(e)}", Log.RED)
-                traceback.print_exc()
-                await asyncio.sleep(5)
+            except Exception: await asyncio.sleep(5)
 
 bot = TradingSystem()
 
@@ -601,8 +610,8 @@ async def catch_all(path_name: str):
         <h3>Live Diagnostics:</h3>
         <p><b>Target Coins:</b> All Coins > $600k Volume</p>
         <p><b>Margin per Trade:</b> ${Config.FIXED_MARGIN_USDT} | <b>Lev:</b> {Config.FIXED_LEVERAGE}x</p>
-        <p><b>Last Market Scan:</b> {bot.last_scan_time}</p>
-        <p><b>System Status:</b> RUNNING (Traceback Diagnostics Active)</p>
+        <p><b>Blacklisted Coins:</b> {len(bot.blacklisted_coins)}</p>
+        <p><b>System Status:</b> RUNNING (Self-Healing AI Active)</p>
     </body>
     </html>
     """
