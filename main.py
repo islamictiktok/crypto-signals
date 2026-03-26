@@ -40,19 +40,21 @@ class Config:
     CANDLES_LIMIT_MICRO = 100 
     MAX_TRADES_AT_ONCE = 3  
     
-    # 👈 القائمة النخبوية: العملات الرئيسية + TAO و RIVER
+    # 👈 قائمة النخبة الموسعة (20 عملة قوية جداً + TAO و RIVER)
     TARGET_COINS = [
-        'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 
-        'BNB/USDT:USDT', 'XRP/USDT:USDT', 'ADA/USDT:USDT', 
-        'TAO/USDT:USDT', 'RIVER/USDT:USDT'
+        'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'BNB/USDT:USDT', 
+        'XRP/USDT:USDT', 'ADA/USDT:USDT', 'AVAX/USDT:USDT', 'LINK/USDT:USDT',
+        'DOGE/USDT:USDT', 'DOT/USDT:USDT', 'NEAR/USDT:USDT', 'INJ/USDT:USDT',
+        'OP/USDT:USDT', 'ARB/USDT:USDT', 'FET/USDT:USDT', 'RNDR/USDT:USDT',
+        'SUI/USDT:USDT', 'APT/USDT:USDT', 'TAO/USDT:USDT', 'RIVER/USDT:USDT'
     ]
     
-    FIXED_MARGIN_USDT = 0.15  # 👈 الدخول الصارم بـ 0.15$
+    FIXED_MARGIN_USDT = 0.15  
     FIXED_LEVERAGE = 50       
     
-    COOLDOWN_SECONDS = 3600   # 👈 فترة التبريد الإجبارية لمنع التكرار (ساعة كاملة)
+    COOLDOWN_SECONDS = 3600   
     STATE_FILE = "bot_state.json"
-    VERSION = "V68000.18 - The Silent Elite Sniper"
+    VERSION = "V68000.19 - Radar & Diagnostics"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -72,7 +74,10 @@ async def fetch_with_retry(coro, *args, retries=3, delay=2.0, **kwargs):
         try:
             return await coro(*args, **kwargs)
         except Exception as e:
-            if i == retries - 1: return None
+            if i == retries - 1:
+                # 👈 طباعة الخطأ الفني في حال الفشل المتكرر
+                Log.print(f"⚠️ Network/Fetch Error after {retries} retries: {str(e)}", Log.YELLOW)
+                return None
             await asyncio.sleep(delay)
 
 # ==========================================
@@ -114,9 +119,14 @@ class WeexExecutor:
         try:
             url = self.base_url + path
             async with self.session.post(url, headers=headers, json=payload) as resp:
-                return await resp.json()
+                data = await resp.json()
+                # 👈 فاحص أخطاء المنصة: يطبع الرد إذا كان يحتوي على خطأ
+                if data and not data.get('success') and data.get('code') != '00000':
+                    Log.print(f"❌ WEEX API Warning -> Path: {path} | Msg: {data}", Log.RED)
+                return data
         except Exception as e:
-            Log.print(f"WEEX API Error: {e}", Log.RED)
+            Log.print(f"❌ WEEX API Critical Error: {str(e)}", Log.RED)
+            traceback.print_exc()
             return None
 
     async def open_market_order(self, symbol, side, size):
@@ -181,7 +191,9 @@ class TelegramNotifier:
             async with self.session.post(self.base_url, json=payload) as resp:
                 data = await resp.json()
                 return data.get('result', {}).get('message_id') if resp.status == 200 else None
-        except Exception: return None
+        except Exception as e: 
+            Log.print(f"⚠️ Telegram API Error: {str(e)}", Log.YELLOW)
+            return None
 
 # ==========================================
 # 3. محرك الاستراتيجية 
@@ -301,7 +313,10 @@ class StrategyEngine:
             if not setup: return None
 
             return {"symbol": symbol, "side": setup["side"], "entry": setup["entry"], "sl": setup["sl"], "original_sl": setup["original_sl"], "tps": setup["tps"], "strat": setup["strat"], "risk_distance": setup["risk_distance"]}
-        except Exception as e: return None
+        except Exception as e: 
+            # 👈 فاحص أخطاء الاستراتيجية (مثل أخطاء الباندا أو الحسابات)
+            Log.print(f"❌ Strategy Error for {symbol}: {str(e)}", Log.RED)
+            return None
 
 # ==========================================
 # 4. مدير البوت (Execution Engine)
@@ -325,7 +340,7 @@ class TradingSystem:
         await self.exchange_data.load_markets()
         self.load_state() 
         Log.print(f"🚀 VIP MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Coins: Elite List | Anti-Spam Active 🛡️")
+        await self.tg.send(f"🟢 <b>VIP Fortress {Config.VERSION} Online.</b>\n🎯 Coins: 20 Elite Assets | Diagnostics: Active 🔍")
 
     async def shutdown(self):
         self.running = False; self.save_state()
@@ -334,7 +349,8 @@ class TradingSystem:
     def save_state(self):
         try:
             with open(Config.STATE_FILE, "w") as f: json.dump({"version": Config.VERSION, "active_trades": self.active_trades, "cooldown_list": self.cooldown_list, "stats": self.stats}, f)
-        except Exception: pass
+        except Exception as e: 
+            Log.print(f"⚠️ State Save Error: {str(e)}", Log.YELLOW)
 
     def load_state(self):
         if os.path.exists(Config.STATE_FILE):
@@ -342,7 +358,8 @@ class TradingSystem:
                 with open(Config.STATE_FILE, "r") as f: state = json.load(f)
                 if state.get("version") == Config.VERSION:
                     self.active_trades = state.get("active_trades", {}); self.cooldown_list = state.get("cooldown_list", {}); self.stats = state.get("stats", self.stats)
-            except Exception: pass
+            except Exception as e: 
+                Log.print(f"⚠️ State Load Error: {str(e)}", Log.YELLOW)
 
     def _update_equity_and_drawdown(self, pnl):
         self.stats['virtual_equity'] += pnl
@@ -365,7 +382,8 @@ class TradingSystem:
                 if not ohlcv_macro or not ohlcv_micro: return
                 res = await asyncio.to_thread(StrategyEngine.analyze_symbol, sym, ohlcv_macro, ohlcv_micro)
                 if res: await self.execute_trade(res)
-            except Exception: pass
+            except Exception as e: 
+                Log.print(f"❌ Process Symbol Error for {sym}: {str(e)}", Log.RED)
 
     async def execute_trade(self, trade):
         async with self.trade_lock:
@@ -373,7 +391,7 @@ class TradingSystem:
             try:
                 sym = trade['symbol']
                 
-                # 🛑 التبريد الفوري: مجرد محاولة الدخول تعطي العملة حظر تبريد لمنع التكرار نهائياً
+                # 🛑 التبريد الفوري لمنع الإزعاج والتكرار (ساعة كاملة)
                 self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                 self.save_state()
 
@@ -428,7 +446,10 @@ class TradingSystem:
                     trade['msg_id'] = msg_id
                     self.active_trades[sym] = trade
                     self.save_state() 
-            except Exception: pass
+            except Exception as e: 
+                # 👈 فاحص أخطاء التنفيذ: في حال فشل الأوامر أو التيليجرام
+                Log.print(f"❌ Execution Error for {trade.get('symbol', 'Unknown')}: {str(e)}", Log.RED)
+                traceback.print_exc()
 
     async def scan_market(self):
         while self.running:
@@ -438,7 +459,6 @@ class TradingSystem:
                     await asyncio.sleep(10); continue
                 
                 current_time = int(datetime.now(timezone.utc).timestamp())
-                # 👈 مسح القائمة النخبوية فقط (بدون رادار معقد)
                 scan_list = [c for c in Config.TARGET_COINS if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
                 chunk_size = 3 
@@ -452,7 +472,9 @@ class TradingSystem:
                 gc.collect() 
                 await asyncio.sleep(15) 
             except Exception as e: 
-                Log.print(f"Error in scan_market loop: {e}", Log.RED)
+                # 👈 فاحص أخطاء اللوب الرئيسي
+                Log.print(f"❌ Critical Error in scan_market loop: {str(e)}", Log.RED)
+                traceback.print_exc()
                 await asyncio.sleep(5)
 
     async def monitor_open_trades(self):
@@ -485,7 +507,6 @@ class TradingSystem:
 
                         async with self.trade_lock:
                             self._update_equity_and_drawdown(pnl)
-                            # تجديد الحظر عند الإغلاق أيضاً للتأكيد
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
                             await self.tg.send(msg, trade['msg_id'])
                             if sym in self.active_trades: del self.active_trades[sym]
@@ -506,7 +527,9 @@ class TradingSystem:
                             self.save_state() 
                             
                 await asyncio.sleep(2)
-            except Exception: await asyncio.sleep(5)
+            except Exception as e: 
+                Log.print(f"❌ Monitor Error: {str(e)}", Log.RED)
+                await asyncio.sleep(5)
 
     async def daily_report(self):
         while self.running:
@@ -555,7 +578,7 @@ async def catch_all(path_name: str):
         <h1>⚡ VIP ENGINE {Config.VERSION} ONLINE</h1>
         <hr style="border: 1px solid #333;">
         <h3>Live Diagnostics:</h3>
-        <p><b>Target Coins:</b> Elite List (BTC, ETH, SOL, BNB, XRP, ADA, TAO, RIVER)</p>
+        <p><b>Target Coins:</b> Elite 20 Coins List</p>
         <p><b>Margin per Trade:</b> ${Config.FIXED_MARGIN_USDT} | <b>Lev:</b> {Config.FIXED_LEVERAGE}x</p>
         <p><b>Last Market Scan:</b> {bot.last_scan_time}</p>
         <p><b>System Status:</b> RUNNING (Anti-Spam Elite Shield Active)</p>
