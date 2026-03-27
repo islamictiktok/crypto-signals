@@ -38,7 +38,6 @@ class Config:
     
     MAX_TRADES_AT_ONCE = 3  
     
-    # ⛔ الهامش الصارم (الحد الأقصى 0.2)
     FIXED_MARGIN_USDT = 0.2  
     FIXED_LEVERAGE = 50       
     
@@ -58,7 +57,7 @@ class Config:
         "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
     ]
     
-    VERSION = "V68000.70 - Volunacci Prime"
+    VERSION = "V68000.75 - Anti-Crash Volunacci"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -67,13 +66,8 @@ class Log:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
 
-def format_price(price):
-    if price < 0.001: return f"{price:.7f}"
-    elif price < 1: return f"{price:.5f}"
-    return f"{price:.4f}"
-
 # ==========================================
-# 2. محرك WEEX المنيع
+# 2. محرك WEEX 
 # ==========================================
 class WeexExecutor:
     def __init__(self):
@@ -140,7 +134,6 @@ class WeexExecutor:
             if match:
                 step_size = float(match.group(1))
                 original_size = float(size)
-                
                 new_size = math.floor(original_size / step_size) * step_size
                 
                 if new_size <= 0:
@@ -149,12 +142,7 @@ class WeexExecutor:
                     return False, order_res, size, actual_margin
 
                 actual_margin = (new_size * entry_price) / Config.FIXED_LEVERAGE
-
-                if step_size.is_integer() or step_size >= 1:
-                    new_size_str = str(int(new_size))
-                else:
-                    decimals = len(str(step_size).split('.')[1])
-                    new_size_str = f"{new_size:.{decimals}f}"
+                new_size_str = str(int(new_size)) if step_size.is_integer() or step_size >= 1 else f"{new_size:.{len(str(step_size).split('.')[1])}f}"
 
                 Log.print(f"♻️ تم التعديل الصارم إلى {new_size_str}...", Log.YELLOW)
                 order_payload['quantity'] = new_size_str
@@ -211,18 +199,15 @@ class StrategyEngine:
             
             if len(df_macro) < 30 or len(df_micro) < 3: return None
             
-            # حسابات الماكرو
             df_macro['vol_sma'] = ta.sma(df_macro['vol'], length=40)
             df_macro['spread'] = df_macro['high'] - df_macro['low']
             df_macro['spread_sma'] = ta.sma(df_macro['spread'], length=40)
             df_macro['kijun'] = (df_macro['high'].rolling(26).max() + df_macro['low'].rolling(26).min()) / 2
-            
-            # حسابات المايكرو
             df_micro['vol_sma'] = ta.sma(df_micro['vol'], length=20)
             
             macro_latest = df_macro.iloc[-1]
-            
             anchors_found = []
+            
             for j in range(len(df_macro)-20, len(df_macro)-1):
                 anchor = df_macro.iloc[j]
                 conf = df_macro.iloc[j+1]
@@ -245,7 +230,6 @@ class StrategyEngine:
 
                 temp_type = None; temp_dir = None
                 
-                # مظاهر القوة (LONG)
                 if is_high_vol and a_close > body_middle and (min(a_open, a_close) - a_low) > (a_spread * 0.5): temp_type, temp_dir = "Shake Out", "LONG"
                 elif is_up and is_high_vol and a_close > df_macro.iloc[j-1]['high'] and df_macro.iloc[j-1]['close'] < df_macro.iloc[j-1]['open']: temp_type, temp_dir = "Bottom Reversal", "LONG"
                 elif is_wide_spread and is_ultra_vol and a_close > lower_third: temp_type, temp_dir = "Selling Climax", "LONG"
@@ -253,7 +237,6 @@ class StrategyEngine:
                 elif is_down and is_narrow_spread and is_low_vol: temp_type, temp_dir = "No Supply", "LONG"
                 elif is_up and is_wide_spread and is_high_vol and a_close > upper_third: temp_type, temp_dir = "Effort to Rise", "LONG"
 
-                # مظاهر الضعف (SHORT)
                 if temp_type is None:
                     if is_high_vol and a_close < body_middle and (a_high - max(a_open, a_close)) > (a_spread * 0.5): temp_type, temp_dir = "Up Thrust", "SHORT"
                     elif is_down and is_high_vol and a_close < df_macro.iloc[j-1]['low'] and df_macro.iloc[j-1]['close'] > df_macro.iloc[j-1]['open']: temp_type, temp_dir = "Top Reversal", "SHORT"
@@ -270,10 +253,7 @@ class StrategyEngine:
             if not anchors_found: return None
             
             primary_anchor = anchors_found[-1]
-            
-            # نأخذ آخر شمعتين مغلقات للتحليل المايكرو
-            curr_m = df_micro.iloc[-2]
-            prev_m = df_micro.iloc[-3]
+            curr_m = df_micro.iloc[-2]; prev_m = df_micro.iloc[-3]
             
             is_effort_volume = curr_m['vol'] > prev_m['vol']
             bullish_divergence = curr_m['low'] < prev_m['low'] and curr_m['vol_sma'] < prev_m['vol_sma']
@@ -281,39 +261,34 @@ class StrategyEngine:
 
             a_high = primary_anchor['high']; a_low = primary_anchor['low']; a_range = primary_anchor['range']
             
-            # 🟢 التنفيذ الشراء
             if primary_anchor['dir'] == "LONG":
                 kijun_ok = macro_latest['close'] > macro_latest['kijun']
                 is_breakout = prev_m['close'] <= a_high and curr_m['close'] > a_high
                 is_retest = curr_m['low'] <= a_high and curr_m['close'] > a_high and prev_m['close'] > a_high
                 
                 if (is_breakout or is_retest) and is_effort_volume and curr_m['close'] > curr_m['open'] and kijun_ok and not bearish_divergence:
-                    entry = curr_m['close']
-                    sl = curr_m['low'] - (curr_m['high'] - curr_m['low']) * 0.1 
-                    tp = a_low + (a_range * 1.618) # الفيبوناتشي 1.618
+                    entry = curr_m['close']; sl = curr_m['low'] - (curr_m['high'] - curr_m['low']) * 0.1 
+                    tp = a_low + (a_range * 1.618)
                     setup = {"side": "LONG", "entry": entry, "sl": sl, "tp": tp}
 
-            # 🔴 التنفيذ البيع
             elif primary_anchor['dir'] == "SHORT":
                 kijun_ok = macro_latest['close'] < macro_latest['kijun']
                 is_breakout = prev_m['close'] >= a_low and curr_m['close'] < a_low
                 is_retest = curr_m['high'] >= a_low and curr_m['close'] < a_low and prev_m['close'] < a_low
                 
                 if (is_breakout or is_retest) and is_effort_volume and curr_m['close'] < curr_m['open'] and kijun_ok and not bullish_divergence:
-                    entry = curr_m['close']
-                    sl = curr_m['high'] + (curr_m['high'] - curr_m['low']) * 0.1
-                    tp = a_high - (a_range * 1.618) # الفيبوناتشي 1.618
+                    entry = curr_m['close']; sl = curr_m['high'] + (curr_m['high'] - curr_m['low']) * 0.1
+                    tp = a_high - (a_range * 1.618)
                     setup = {"side": "SHORT", "entry": entry, "sl": sl, "tp": tp}
 
-        except Exception as e:
-            pass
+        except Exception as e: pass
         finally:
             if 'df_macro' in locals(): del df_macro
             if 'df_micro' in locals(): del df_micro
         return setup
 
 # ==========================================
-# 5. المدير التنفيذي
+# 5. المدير التنفيذي (Anti-Crash System)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -333,8 +308,7 @@ class TradingSystem:
                 self.mexc_symbols.append(mexc_sym)
                 
         Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
-        
-        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Verified Coins\n🧠 <b>AI:</b> Volunacci Engine (1.618 Fib)\n🛡️ <b>Status:</b> All Systems Go")
+        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Coins\n🧠 <b>AI:</b> Volunacci Engine\n🛡️ <b>System:</b> Anti-Crash Protection Active")
 
     def save_state(self):
         try:
@@ -343,7 +317,6 @@ class TradingSystem:
 
     async def execute_trade(self, symbol, setup):
         if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
-        Log.print(f"💡 إشارة {setup['side']} على {symbol}!", Log.GREEN)
         clean_name = symbol.split(':')[0].replace('/', '')
         
         raw_size = (Config.FIXED_MARGIN_USDT * Config.FIXED_LEVERAGE) / setup['entry']
@@ -360,8 +333,7 @@ class TradingSystem:
             clean_entry_str = f"{setup['entry']:.4f}".rstrip('0').rstrip('.')
         
         success, response, final_size, actual_margin = await self.weex.execute_full_flow(
-            symbol=clean_name, side=setup['side'], size=size, 
-            sl_price_str=clean_sl_str, tp_price_str=clean_tp_str, entry_price=setup['entry']
+            symbol=clean_name, side=setup['side'], size=size, sl_price_str=clean_sl_str, tp_price_str=clean_tp_str, entry_price=setup['entry']
         )
         
         if success:
@@ -374,7 +346,7 @@ class TradingSystem:
                 f"🛒 <b>Entry:</b> <code>{clean_entry_str}</code>\n"
                 f"⚖️ <b>Lev:</b> {Config.FIXED_LEVERAGE}x\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🎯 <b>Target (1.618):</b> <code>{clean_tp_str}</code>\n"
+                f"🎯 <b>Target:</b> <code>{clean_tp_str}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🛑 <b>Stop:</b> <code>{clean_sl_str}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
@@ -409,17 +381,15 @@ class TradingSystem:
         while self.running:
             try:
                 tickers = await self.mexc.fetch_tickers(self.mexc_symbols)
-                
-                valid = [s for s, d in tickers.items() 
-                         if s not in self.active_trades and (time.time() - self.cooldown.get(s, 0)) > Config.COOLDOWN_SECONDS]
-                
+                valid = [s for s, d in tickers.items() if s not in self.active_trades and (time.time() - self.cooldown.get(s, 0)) > Config.COOLDOWN_SECONDS]
                 del tickers 
 
-                if valid: Log.print(f"📊 جاري تحليل {len(valid)} عملة باستراتيجية الفوليوناتشي...")
+                if valid: Log.print(f"📊 جاري الفحص ببطء لحماية السيرفر ({len(valid)} عملة)...")
+                
                 for sym in valid:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     
-                    # جلب بيانات الفريمين للعملة (4 ساعات و 15 دقيقة)
+                    # الفحص يتم لعملة واحدة فقط، ثم تُحذف بياناتها فوراً
                     ohlcv_macro = await self.mexc.fetch_ohlcv(sym, Config.TF_MACRO, limit=50)
                     ohlcv_micro = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=50)
                     
@@ -428,11 +398,15 @@ class TradingSystem:
                     del ohlcv_macro
                     del ohlcv_micro 
                     
-                    if setup: await self.execute_trade(sym, setup)
-                    await asyncio.sleep(0.5) 
+                    if setup: 
+                        await self.execute_trade(sym, setup)
+                        del setup
+                    
+                    # 🛡️ سر الحماية: تفريغ الرام بعد كل عملة، واستراحة 2.5 ثانية ليتنفس السيرفر
+                    gc.collect() 
+                    await asyncio.sleep(2.5) 
                 
-                gc.collect() 
-                await asyncio.sleep(30) 
+                await asyncio.sleep(15) 
             except Exception as e: 
                 Log.print(f"❌ Main Loop Error: {str(e)}", Log.RED)
                 await asyncio.sleep(10)
