@@ -38,7 +38,7 @@ class Config:
     
     MAX_TRADES_AT_ONCE = 3  
     
-    # ⛔ الهامش الصارم (الحد الأقصى 0.2) سيعمل في الكواليس للحماية
+    # ⛔ الهامش الصارم (الحد الأقصى 0.2)
     FIXED_MARGIN_USDT = 0.2  
     FIXED_LEVERAGE = 50       
     
@@ -58,7 +58,7 @@ class Config:
         "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
     ]
     
-    VERSION = "V68000.56 - Resilient MEXC & Clean UI"
+    VERSION = "V68000.70 - Volunacci Prime"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -73,7 +73,7 @@ def format_price(price):
     return f"{price:.4f}"
 
 # ==========================================
-# 2. محرك WEEX
+# 2. محرك WEEX المنيع
 # ==========================================
 class WeexExecutor:
     def __init__(self):
@@ -134,7 +134,6 @@ class WeexExecutor:
 
         actual_margin = (float(size) * entry_price) / Config.FIXED_LEVERAGE
 
-        # المصحح الذكي
         if order_res and order_res.get('code') == -1054:
             msg_str = order_res.get('msg', '')
             match = re.search(r"stepSize '([0-9.]+)' requirement", msg_str)
@@ -157,7 +156,7 @@ class WeexExecutor:
                     decimals = len(str(step_size).split('.')[1])
                     new_size_str = f"{new_size:.{decimals}f}"
 
-                Log.print(f"♻️ تم التعديل الصارم إلى {new_size_str} (الهامش الفعلي: ${actual_margin:.2f})...", Log.YELLOW)
+                Log.print(f"♻️ تم التعديل الصارم إلى {new_size_str}...", Log.YELLOW)
                 order_payload['quantity'] = new_size_str
                 order_res = await self.send_request("POST", "/capi/v3/order", order_payload)
                 size = new_size_str
@@ -200,31 +199,117 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 4. محرك الاستراتيجية 
+# 4. محرك الفوليوناتشي (Volunacci Strategy)
 # ==========================================
 class StrategyEngine:
     @staticmethod
-    def analyze(ohlcv):
+    def analyze(ohlcv_micro, ohlcv_macro):
         setup = None
         try:
-            df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            df['vol_sma'] = ta.sma(df['vol'], length=20)
-            df['kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
+            df_macro = pd.DataFrame(ohlcv_macro, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            df_micro = pd.DataFrame(ohlcv_micro, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             
-            curr = df.iloc[-2]; prev = df.iloc[-3]; kijun = df.iloc[-1]['kijun']
+            if len(df_macro) < 30 or len(df_micro) < 3: return None
             
-            if curr['close'] > prev['high'] and curr['vol'] > curr['vol_sma'] and curr['close'] > kijun:
-                sl = curr['low'] * 0.994
-                setup = {"side": "LONG", "entry": curr['close'], "sl": sl, "tp": curr['close'] + (curr['close'] - sl) * 2.0}
+            # حسابات الماكرو
+            df_macro['vol_sma'] = ta.sma(df_macro['vol'], length=40)
+            df_macro['spread'] = df_macro['high'] - df_macro['low']
+            df_macro['spread_sma'] = ta.sma(df_macro['spread'], length=40)
+            df_macro['kijun'] = (df_macro['high'].rolling(26).max() + df_macro['low'].rolling(26).min()) / 2
             
-            elif curr['close'] < prev['low'] and curr['vol'] > curr['vol_sma'] and curr['close'] < kijun:
-                sl = curr['high'] * 1.006
-                setup = {"side": "SHORT", "entry": curr['close'], "sl": sl, "tp": curr['close'] - (sl - curr['close']) * 2.0}
-        except: 
+            # حسابات المايكرو
+            df_micro['vol_sma'] = ta.sma(df_micro['vol'], length=20)
+            
+            macro_latest = df_macro.iloc[-1]
+            
+            anchors_found = []
+            for j in range(len(df_macro)-20, len(df_macro)-1):
+                anchor = df_macro.iloc[j]
+                conf = df_macro.iloc[j+1]
+                
+                a_spread = anchor['spread']; a_vol = anchor['vol']
+                a_high = anchor['high']; a_low = anchor['low']
+                a_close = anchor['close']; a_open = anchor['open']
+                vol_avg = anchor['vol_sma']; spread_avg = anchor['spread_sma']
+                
+                is_ultra_vol = a_vol > (vol_avg * 2.5)
+                is_high_vol = a_vol > (vol_avg * 1.5)
+                is_low_vol = a_vol < (vol_avg * 0.8)
+                is_wide_spread = a_spread > (spread_avg * 1.5)
+                is_narrow_spread = a_spread < (spread_avg * 0.8)
+                body_middle = a_low + (a_spread / 2)
+                upper_third = a_high - (a_spread / 3)
+                lower_third = a_low + (a_spread / 3)
+                is_up = a_close > a_open
+                is_down = a_close < a_open
+
+                temp_type = None; temp_dir = None
+                
+                # مظاهر القوة (LONG)
+                if is_high_vol and a_close > body_middle and (min(a_open, a_close) - a_low) > (a_spread * 0.5): temp_type, temp_dir = "Shake Out", "LONG"
+                elif is_up and is_high_vol and a_close > df_macro.iloc[j-1]['high'] and df_macro.iloc[j-1]['close'] < df_macro.iloc[j-1]['open']: temp_type, temp_dir = "Bottom Reversal", "LONG"
+                elif is_wide_spread and is_ultra_vol and a_close > lower_third: temp_type, temp_dir = "Selling Climax", "LONG"
+                elif not is_wide_spread and is_high_vol and lower_third <= a_close <= upper_third: temp_type, temp_dir = "Stopping Volume", "LONG"
+                elif is_down and is_narrow_spread and is_low_vol: temp_type, temp_dir = "No Supply", "LONG"
+                elif is_up and is_wide_spread and is_high_vol and a_close > upper_third: temp_type, temp_dir = "Effort to Rise", "LONG"
+
+                # مظاهر الضعف (SHORT)
+                if temp_type is None:
+                    if is_high_vol and a_close < body_middle and (a_high - max(a_open, a_close)) > (a_spread * 0.5): temp_type, temp_dir = "Up Thrust", "SHORT"
+                    elif is_down and is_high_vol and a_close < df_macro.iloc[j-1]['low'] and df_macro.iloc[j-1]['close'] > df_macro.iloc[j-1]['open']: temp_type, temp_dir = "Top Reversal", "SHORT"
+                    elif is_wide_spread and is_ultra_vol and a_close < upper_third: temp_type, temp_dir = "Buying Climax", "SHORT"
+                    elif is_narrow_spread and is_high_vol and a_close < body_middle: temp_type, temp_dir = "End of Rising Market", "SHORT"
+                    elif is_up and is_narrow_spread and is_low_vol: temp_type, temp_dir = "No Demand", "SHORT"
+                    elif is_down and is_wide_spread and is_high_vol and a_close < lower_third: temp_type, temp_dir = "Effort to Fall", "SHORT"
+
+                if temp_type and temp_dir:
+                    conf_is_up = conf['close'] > conf['open']
+                    if (temp_dir == "LONG" and conf_is_up) or (temp_dir == "SHORT" and not conf_is_up):
+                        anchors_found.append({"type": temp_type, "dir": temp_dir, "high": a_high, "low": a_low, "range": a_high - a_low})
+
+            if not anchors_found: return None
+            
+            primary_anchor = anchors_found[-1]
+            
+            # نأخذ آخر شمعتين مغلقات للتحليل المايكرو
+            curr_m = df_micro.iloc[-2]
+            prev_m = df_micro.iloc[-3]
+            
+            is_effort_volume = curr_m['vol'] > prev_m['vol']
+            bullish_divergence = curr_m['low'] < prev_m['low'] and curr_m['vol_sma'] < prev_m['vol_sma']
+            bearish_divergence = curr_m['high'] > prev_m['high'] and curr_m['vol_sma'] < prev_m['vol_sma']
+
+            a_high = primary_anchor['high']; a_low = primary_anchor['low']; a_range = primary_anchor['range']
+            
+            # 🟢 التنفيذ الشراء
+            if primary_anchor['dir'] == "LONG":
+                kijun_ok = macro_latest['close'] > macro_latest['kijun']
+                is_breakout = prev_m['close'] <= a_high and curr_m['close'] > a_high
+                is_retest = curr_m['low'] <= a_high and curr_m['close'] > a_high and prev_m['close'] > a_high
+                
+                if (is_breakout or is_retest) and is_effort_volume and curr_m['close'] > curr_m['open'] and kijun_ok and not bearish_divergence:
+                    entry = curr_m['close']
+                    sl = curr_m['low'] - (curr_m['high'] - curr_m['low']) * 0.1 
+                    tp = a_low + (a_range * 1.618) # الفيبوناتشي 1.618
+                    setup = {"side": "LONG", "entry": entry, "sl": sl, "tp": tp}
+
+            # 🔴 التنفيذ البيع
+            elif primary_anchor['dir'] == "SHORT":
+                kijun_ok = macro_latest['close'] < macro_latest['kijun']
+                is_breakout = prev_m['close'] >= a_low and curr_m['close'] < a_low
+                is_retest = curr_m['high'] >= a_low and curr_m['close'] < a_low and prev_m['close'] < a_low
+                
+                if (is_breakout or is_retest) and is_effort_volume and curr_m['close'] < curr_m['open'] and kijun_ok and not bullish_divergence:
+                    entry = curr_m['close']
+                    sl = curr_m['high'] + (curr_m['high'] - curr_m['low']) * 0.1
+                    tp = a_high - (a_range * 1.618) # الفيبوناتشي 1.618
+                    setup = {"side": "SHORT", "entry": entry, "sl": sl, "tp": tp}
+
+        except Exception as e:
             pass
         finally:
-            if 'df' in locals():
-                del df
+            if 'df_macro' in locals(): del df_macro
+            if 'df_micro' in locals(): del df_micro
         return setup
 
 # ==========================================
@@ -241,19 +326,15 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.weex.start(); await self.mexc.load_markets()
         
-        # 🧠 التحقق المسبق من وجود العملة في MEXC لتجنب الأخطاء
         for sym in Config.WHITELIST:
             base = sym[:-4] 
             mexc_sym = f"{base}/USDT:USDT"
             if mexc_sym in self.mexc.markets:
                 self.mexc_symbols.append(mexc_sym)
-            else:
-                Log.print(f"⚠️ العملة {sym} غير موجودة في MEXC، سيتم تخطيها بأمان.", Log.YELLOW)
                 
         Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
         
-        # 🟢 إعادة رسالة التليجرام الافتتاحية
-        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Verified Coins\n🧠 <b>AI:</b> Strict Limit Active\n🛡️ <b>Status:</b> All Systems Go")
+        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Verified Coins\n🧠 <b>AI:</b> Volunacci Engine (1.618 Fib)\n🛡️ <b>Status:</b> All Systems Go")
 
     def save_state(self):
         try:
@@ -285,16 +366,15 @@ class TradingSystem:
         
         if success:
             icon = "🟢" if setup['side'] == "LONG" else "🔴"
-            # 🧹 رسالة تليجرام نظيفة، قابلة للنسخ، وبدون هامش، مع خط فاصل
             msg = (
-                f"{icon} <b>NEW SIGNAL</b>\n"
+                f"{icon} <b>NEW SIGNAL (Volunacci)</b>\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🪙 <b>Coin:</b> <code>{clean_name}</code>\n"
                 f"⚡ <b>Side:</b> {setup['side']}\n"
                 f"🛒 <b>Entry:</b> <code>{clean_entry_str}</code>\n"
                 f"⚖️ <b>Lev:</b> {Config.FIXED_LEVERAGE}x\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🎯 <b>Target:</b> <code>{clean_tp_str}</code>\n"
+                f"🎯 <b>Target (1.618):</b> <code>{clean_tp_str}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🛑 <b>Stop:</b> <code>{clean_sl_str}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
@@ -335,12 +415,18 @@ class TradingSystem:
                 
                 del tickers 
 
-                if valid: Log.print(f"📊 جاري تحليل {len(valid)} عملة مسموحة وجاهزة...")
+                if valid: Log.print(f"📊 جاري تحليل {len(valid)} عملة باستراتيجية الفوليوناتشي...")
                 for sym in valid:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    ohlcv = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=50)
-                    setup = StrategyEngine.analyze(ohlcv)
-                    del ohlcv 
+                    
+                    # جلب بيانات الفريمين للعملة (4 ساعات و 15 دقيقة)
+                    ohlcv_macro = await self.mexc.fetch_ohlcv(sym, Config.TF_MACRO, limit=50)
+                    ohlcv_micro = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=50)
+                    
+                    setup = StrategyEngine.analyze(ohlcv_micro, ohlcv_macro)
+                    
+                    del ohlcv_macro
+                    del ohlcv_micro 
                     
                     if setup: await self.execute_trade(sym, setup)
                     await asyncio.sleep(0.5) 
