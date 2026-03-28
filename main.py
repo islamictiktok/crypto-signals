@@ -35,13 +35,11 @@ class Config:
     
     TF_MICRO = '15m'
     
-    MAX_TRADES_AT_ONCE = 5  # 🚀 تم التطابق مع الباك تست لـ 5 صفقات
+    MAX_TRADES_AT_ONCE = 5  
     
-    # ⛔ الهامش الصارم (الحد الأقصى 0.2)
     FIXED_MARGIN_USDT = 0.2  
     FIXED_LEVERAGE = 50        
     
-    # 🎯 إعدادات النبضة الذرية المخففة (كما طلبنا في الباك تست)
     RR_RATIO = 0.7                  
     MAX_SL_PCT = 0.012              
     
@@ -61,7 +59,7 @@ class Config:
         "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
     ]
     
-    VERSION = "Atomic Sniper Live V2.0 - Anti-Crash Edition"
+    VERSION = "Atomic Sniper Live V3.0 (Anti-Choke Server Fix)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -69,11 +67,6 @@ class Log:
     def print(msg, color=RESET):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
-
-def format_price(price):
-    if price < 0.001: return f"{price:.7f}"
-    elif price < 1: return f"{price:.5f}"
-    return f"{price:.4f}"
 
 # ==========================================
 # 2. محرك WEEX
@@ -110,15 +103,12 @@ class WeexExecutor:
             url = self.base_url + path
             async with self.session.post(url, headers=headers, json=payload) as resp:
                 return await resp.json()
-        except Exception as e: 
-            Log.print(f"❌ API Connection Error ({path}): {str(e)}", Log.RED)
+        except: 
             return None
 
     async def execute_full_flow(self, symbol, side, size, sl_price_str, tp_price_str, entry_price):
-        Log.print(f"=========================================", Log.BLUE)
-        Log.print(f"🚀 بدء التنفيذ لعملة {symbol} (الاتجاه: {side})", Log.BLUE)
+        Log.print(f"🚀 بدء التنفيذ لعملة {symbol} ({side})", Log.BLUE)
         
-        Log.print(f"⚙️ 1. جاري تعديل الرافعة إلى {Config.FIXED_LEVERAGE}x...")
         leverage_payload = {
             "symbol": symbol, "marginType": "ISOLATED",
             "isolatedLongLeverage": str(Config.FIXED_LEVERAGE),
@@ -128,39 +118,24 @@ class WeexExecutor:
         await self.send_request("POST", "/capi/v3/account/leverage", leverage_payload)
         await asyncio.sleep(1)
 
-        Log.print(f"🛒 2. جاري فتح صفقة MARKET بكمية {size}...")
         order_payload = {
             "symbol": symbol, "side": "BUY" if side == "LONG" else "SELL", "positionSide": side,
             "type": "MARKET", "quantity": str(size), "newClientOrderId": f"VIP_{int(time.time()*1000)}"
         }
         order_res = await self.send_request("POST", "/capi/v3/order", order_payload)
-
         actual_margin = (float(size) * entry_price) / Config.FIXED_LEVERAGE
 
-        # المصحح الذكي
         if order_res and order_res.get('code') == -1054:
             msg_str = order_res.get('msg', '')
             match = re.search(r"stepSize '([0-9.]+)' requirement", msg_str)
             if match:
                 step_size = float(match.group(1))
-                original_size = float(size)
+                new_size = math.floor(float(size) / step_size) * step_size
+                if new_size <= 0: return False, order_res, size, actual_margin
                 
-                new_size = math.floor(original_size / step_size) * step_size
-                
-                if new_size <= 0:
-                    min_margin_req = (step_size * entry_price) / Config.FIXED_LEVERAGE
-                    Log.print(f"❌ الحد الأدنى لعملة {symbol} يتطلب هامش (${min_margin_req:.2f}) أعلى من الحد المسموح (${Config.FIXED_MARGIN_USDT}). تم الإلغاء.", Log.RED)
-                    return False, order_res, size, actual_margin
-
                 actual_margin = (new_size * entry_price) / Config.FIXED_LEVERAGE
-
-                if step_size.is_integer() or step_size >= 1:
-                    new_size_str = str(int(new_size))
-                else:
-                    decimals = len(str(step_size).split('.')[1])
-                    new_size_str = f"{new_size:.{decimals}f}"
-
-                Log.print(f"♻️ تم التعديل الصارم إلى {new_size_str} (الهامش الفعلي: ${actual_margin:.2f})...", Log.YELLOW)
+                new_size_str = str(int(new_size)) if step_size.is_integer() or step_size >= 1 else f"{new_size:.{len(str(step_size).split('.')[1])}f}"
+                
                 order_payload['quantity'] = new_size_str
                 order_res = await self.send_request("POST", "/capi/v3/order", order_payload)
                 size = new_size_str
@@ -171,17 +146,14 @@ class WeexExecutor:
 
         await asyncio.sleep(1.5)
 
-        Log.print(f"🎯 3. وضع الهدف (TP) عند {tp_price_str}...")
         tp_payload = {"symbol": symbol, "clientAlgoId": f"TP_{int(time.time()*1000)}", "planType": "TAKE_PROFIT", "triggerPrice": tp_price_str, "executePrice": tp_price_str, "quantity": str(size), "positionSide": side, "triggerPriceType": "MARK_PRICE"}
         await self.send_request("POST", "/capi/v3/placeTpSlOrder", tp_payload)
         await asyncio.sleep(0.5)
 
-        Log.print(f"🛑 4. وضع الوقف (SL) عند {sl_price_str}...")
         sl_payload = {"symbol": symbol, "clientAlgoId": f"SL_{int(time.time()*1000)}", "planType": "STOP_LOSS", "triggerPrice": sl_price_str, "executePrice": sl_price_str, "quantity": str(size), "positionSide": side, "triggerPriceType": "MARK_PRICE"}
         await self.send_request("POST", "/capi/v3/placeTpSlOrder", sl_payload)
 
         Log.print(f"✅✅ دورة ناجحة لعملة {symbol}!", Log.GREEN)
-        Log.print(f"=========================================", Log.BLUE)
         return True, "Success", size, actual_margin
 
 # ==========================================
@@ -203,7 +175,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 4. محرك الاستراتيجية (ATOMIC SNIPER ENGINE)
+# 4. محرك الاستراتيجية (Atomic Sniper)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -212,11 +184,8 @@ class StrategyEngine:
         try:
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             
-            # --- مؤشرات النبضة الذرية ---
             df['ema200'] = ta.ema(df['close'], length=200)
             bb = ta.bbands(df['close'], length=20, std=2)
-            
-            # ⚠️ معامل الكيلتنر لـ 2.0 (استرخاء الانضغاط)
             kc = ta.kc(df['high'], df['low'], df['close'], length=20, scalar=2.0) 
             
             df = pd.concat([df, bb, kc], axis=1)
@@ -232,11 +201,9 @@ class StrategyEngine:
             df.dropna(inplace=True)
             if len(df) < 3: return setup
             
-            # 🎯 قراءة الشموع المغلقة فقط
             curr = df.iloc[-2]  
             prev = df.iloc[-3]  
             
-            # ⚠️ شرط الفوليوم تم تخفيفه إلى 2.0
             if prev['is_squeezed'] and curr['vol'] > (curr['vol_sma'] * 2.0):
                 if curr['close'] > curr[c_bbu] and curr['close'] > curr['ema200']:
                     entry = curr['close']
@@ -249,15 +216,13 @@ class StrategyEngine:
                     sl = entry * (1 + Config.MAX_SL_PCT)
                     tp = entry - ((sl - entry) * Config.RR_RATIO)
                     setup = {"side": "SHORT", "entry": entry, "sl": sl, "tp": tp}
-        except: 
-            pass
+        except: pass
         finally:
-            if 'df' in locals():
-                del df
+            if 'df' in locals(): del df
         return setup
 
 # ==========================================
-# 5. المدير التنفيذي (Trading System - ANTI-CRASH)
+# 5. المدير التنفيذي
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -273,14 +238,10 @@ class TradingSystem:
         for sym in Config.WHITELIST:
             base = sym[:-4] 
             mexc_sym = f"{base}/USDT:USDT"
-            if mexc_sym in self.mexc.markets:
-                self.mexc_symbols.append(mexc_sym)
-            else:
-                Log.print(f"⚠️ العملة {sym} غير موجودة في MEXC، سيتم تخطيها بأمان.", Log.YELLOW)
+            if mexc_sym in self.mexc.markets: self.mexc_symbols.append(mexc_sym)
                 
         Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
-        
-        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Verified Coins\n🧠 <b>AI:</b> Atomic Sniper (Anti-Crash Edition)\n🛡️ <b>Status:</b> All Systems Go")
+        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)}\n🛡️ <b>Anti-Choke Server Fix:</b> ACTIVE")
 
     def save_state(self):
         try:
@@ -289,7 +250,6 @@ class TradingSystem:
 
     async def execute_trade(self, symbol, setup):
         if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
-        Log.print(f"💡 إشارة {setup['side']} على {symbol}!", Log.GREEN)
         clean_name = symbol.split(':')[0].replace('/', '')
         
         raw_size = (Config.FIXED_MARGIN_USDT * Config.FIXED_LEVERAGE) / setup['entry']
@@ -313,17 +273,13 @@ class TradingSystem:
         if success:
             icon = "🟢" if setup['side'] == "LONG" else "🔴"
             msg = (
-                f"{icon} <b>NEW SIGNAL</b>\n"
-                f"━━━━━━━━━━━━━━━\n"
+                f"{icon} <b>NEW SIGNAL</b>\n━━━━━━━━━━━━━━━\n"
                 f"🪙 <b>Coin:</b> <code>{clean_name}</code>\n"
                 f"⚡ <b>Side:</b> {setup['side']}\n"
                 f"🛒 <b>Entry:</b> <code>{clean_entry_str}</code>\n"
-                f"⚖️ <b>Lev:</b> {Config.FIXED_LEVERAGE}x\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"🎯 <b>Target:</b> <code>{clean_tp_str}</code>\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"🛑 <b>Stop:</b> <code>{clean_sl_str}</code>\n"
-                f"━━━━━━━━━━━━━━━\n"
+                f"⚖️ <b>Lev:</b> {Config.FIXED_LEVERAGE}x\n━━━━━━━━━━━━━━━\n"
+                f"🎯 <b>Target:</b> <code>{clean_tp_str}</code>\n━━━━━━━━━━━━━━━\n"
+                f"🛑 <b>Stop:</b> <code>{clean_sl_str}</code>\n━━━━━━━━━━━━━━━\n"
                 f"🛡️ <i>API: Order Placed Successfully</i>"
             )
             msg_id = await self.tg.send(msg)
@@ -351,39 +307,38 @@ class TradingSystem:
             except: pass
             await asyncio.sleep(2)
 
-    # 🛡️ الحل الجذري لمنع وقوع السيرفر (Memory Anti-Leak)
+    # 🛡️ الحل الجذري (Threading + Micro-Batching) لمنع اختناق السيرفر
     async def main_loop(self):
         while self.running:
             try:
                 tickers = await self.mexc.fetch_tickers(self.mexc_symbols)
-                
-                valid = [s for s, d in tickers.items() 
-                         if s not in self.active_trades and (time.time() - self.cooldown.get(s, 0)) > Config.COOLDOWN_SECONDS]
-                
+                valid = [s for s, d in tickers.items() if s not in self.active_trades and (time.time() - self.cooldown.get(s, 0)) > Config.COOLDOWN_SECONDS]
                 del tickers 
 
                 if valid: Log.print(f"📊 جاري تحليل {len(valid)} عملة مسموحة وجاهزة...")
-                for sym in valid:
-                    if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    
-                    try:
-                        ohlcv = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=300)
-                        setup = StrategyEngine.analyze(ohlcv)
-                        
-                        if setup: 
-                            await self.execute_trade(sym, setup)
-                    except Exception as loop_err:
-                        pass # تجاهل خطأ العملة الواحدة لتفادي انهيار البوت
-                    finally:
-                        # 🧹 حرق الداتا من الرامات فوراً بعد التحليل
-                        if 'ohlcv' in locals(): del ohlcv
-                        if 'setup' in locals(): del setup
-                        
-                    # إعطاء مساحة تنفس للسيرفر ليرد على الـ Ping
-                    await asyncio.sleep(0.5) 
                 
-                # 🧹 تنظيف عميق للذاكرة (RAM) بعد كل دورة كاملة
-                gc.collect() 
+                # تحليل العملات في مجموعات صغيرة (3 عملات) لإراحة المعالج
+                batch_size = 3
+                for i in range(0, len(valid), batch_size):
+                    batch = valid[i:i+batch_size]
+                    
+                    for sym in batch:
+                        if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
+                        try:
+                            ohlcv = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=300)
+                            # 🚀 السحر هنا: عزل الحسابات الثقيلة في مسار جانبي (Thread) لعدم تجميد السيرفر
+                            setup = await asyncio.to_thread(StrategyEngine.analyze, ohlcv)
+                            
+                            if setup: await self.execute_trade(sym, setup)
+                        except: pass 
+                        finally:
+                            if 'ohlcv' in locals(): del ohlcv
+                            if 'setup' in locals(): del setup
+                    
+                    # استراحة إجبارية ثانيتين بعد كل 3 عملات عشان السيرفر يقدر يرد على الـ Ping
+                    await asyncio.sleep(2)
+                    gc.collect() 
+                
                 await asyncio.sleep(30) 
             except Exception as e: 
                 Log.print(f"❌ Main Loop Error: {str(e)}", Log.RED)
@@ -392,11 +347,11 @@ class TradingSystem:
 async def keep_alive_pinger():
     while True:
         try:
-            await asyncio.sleep(180) 
+            await asyncio.sleep(120)  # تسريع النبض الداخلي كل دقيقتين
             async with aiohttp.ClientSession() as session:
                 url = f"http://127.0.0.1:{os.environ.get('PORT', 10000)}/ping"
                 async with session.get(url) as resp:
-                    Log.print(f"🔄 نبضة تنشيط ذاتية (Self-Ping) - Status: {resp.status}", Log.BLUE)
+                    pass
         except: pass
 
 bot = TradingSystem()
