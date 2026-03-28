@@ -58,7 +58,7 @@ class Config:
         "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
     ]
     
-    VERSION = "V68000.56 - Resilient MEXC & Clean UI"
+    VERSION = "V68000.70 - Advanced Sniper Filter"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -200,31 +200,65 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 4. محرك الاستراتيجية 
+# 4. محرك الاستراتيجية (المطور والمنقح)
 # ==========================================
 class StrategyEngine:
     @staticmethod
     def analyze(ohlcv):
         setup = None
         try:
+            # تحويل البيانات إلى DataFrame
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            df['vol_sma'] = ta.sma(df['vol'], length=20)
-            df['kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
             
-            curr = df.iloc[-2]; prev = df.iloc[-3]; kijun = df.iloc[-1]['kijun']
+            # 1. إضافة الفلاتر والمؤشرات الاحترافية
+            df['ema20'] = ta.ema(df['close'], length=20)  # فلتر اتجاه سريع
+            df['kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2 # فلتر اتجاه متوسط
+            df['rsi'] = ta.rsi(df['close'], length=14)    # فلتر الزخم
+            df['vol_sma'] = ta.sma(df['vol'], length=20)  # فلتر السيولة
             
-            if curr['close'] > prev['high'] and curr['vol'] > curr['vol_sma'] and curr['close'] > kijun:
-                sl = curr['low'] * 0.994
-                setup = {"side": "LONG", "entry": curr['close'], "sl": sl, "tp": curr['close'] + (curr['close'] - sl) * 2.0}
+            # الحصول على الشمعة الحالية المغلقة (index -2) والشمعة السابقة (index -3)
+            curr = df.iloc[-2]
+            prev = df.iloc[-3]
             
-            elif curr['close'] < prev['low'] and curr['vol'] > curr['vol_sma'] and curr['close'] < kijun:
-                sl = curr['high'] * 1.006
-                setup = {"side": "SHORT", "entry": curr['close'], "sl": sl, "tp": curr['close'] - (sl - curr['close']) * 2.0}
-        except: 
+            # متغيرات مساعدة للفلترة
+            rsi_val = curr['rsi']
+            vol_confirmed = curr['vol'] > curr['vol_sma']
+            
+            # --- منطق صيد صفقات الشراء (LONG SNIPER) ---
+            # الشروط: إغلاق فوق الهاي السابق + فوق EMA20 + فوق Kijun + RSI بين 52 و 68 + فوليوم عالي
+            if (curr['close'] > prev['high'] and 
+                curr['close'] > curr['ema20'] and 
+                curr['close'] > curr['kijun'] and 
+                52 < rsi_val < 68 and 
+                vol_confirmed):
+                
+                # حساب الوقف والهدف (نسبة ربح 1:2.5)
+                # الوقف عند أدنى الشمعة الحالية مع هامش أمان بسيط
+                sl = curr['low'] * 0.995 
+                diff = curr['close'] - sl
+                tp = curr['close'] + (diff * 2.5)
+                
+                setup = {"side": "LONG", "entry": curr['close'], "sl": sl, "tp": tp}
+            
+            # --- منطق صيد صفقات البيع (SHORT SNIPER) ---
+            # الشروط: إغلاق تحت اللو السابق + تحت EMA20 + تحت Kijun + RSI بين 32 و 48 + فوليوم عالي
+            elif (curr['close'] < prev['low'] and 
+                  curr['close'] < curr['ema20'] and 
+                  curr['close'] < curr['kijun'] and 
+                  32 < rsi_val < 48 and 
+                  vol_confirmed):
+                
+                # الوقف عند أعلى الشمعة الحالية مع هامش أمان بسيط
+                sl = curr['high'] * 1.005
+                diff = sl - curr['close']
+                tp = curr['close'] - (diff * 2.5)
+                
+                setup = {"side": "SHORT", "entry": curr['close'], "sl": sl, "tp": tp}
+                
+        except Exception: 
             pass
         finally:
-            if 'df' in locals():
-                del df
+            if 'df' in locals(): del df
         return setup
 
 # ==========================================
@@ -253,7 +287,7 @@ class TradingSystem:
         Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
         
         # 🟢 إعادة رسالة التليجرام الافتتاحية
-        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Verified Coins\n🧠 <b>AI:</b> Strict Limit Active\n🛡️ <b>Status:</b> All Systems Go")
+        await self.tg.send(f"⚡ <b>VIP SNIPER {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Pairs\n🧠 <b>Strategy:</b> Triple Filter (EMA/RSI/VOL)\n🛡️ <b>Status:</b> All Systems Go")
 
     def save_state(self):
         try:
@@ -287,7 +321,7 @@ class TradingSystem:
             icon = "🟢" if setup['side'] == "LONG" else "🔴"
             # 🧹 رسالة تليجرام نظيفة، قابلة للنسخ، وبدون هامش، مع خط فاصل
             msg = (
-                f"{icon} <b>NEW SIGNAL</b>\n"
+                f"{icon} <b>NEW VIP SIGNAL</b>\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🪙 <b>Coin:</b> <code>{clean_name}</code>\n"
                 f"⚡ <b>Side:</b> {setup['side']}\n"
