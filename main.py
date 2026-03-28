@@ -59,7 +59,7 @@ class Config:
         "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
     ]
     
-    VERSION = "Atomic Sniper Live V3.0 (Anti-Choke Server Fix)"
+    VERSION = "Atomic Sniper Live V4.0 (Drip-Feed Anti-Crash)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -103,8 +103,7 @@ class WeexExecutor:
             url = self.base_url + path
             async with self.session.post(url, headers=headers, json=payload) as resp:
                 return await resp.json()
-        except: 
-            return None
+        except: return None
 
     async def execute_full_flow(self, symbol, side, size, sl_price_str, tp_price_str, entry_price):
         Log.print(f"🚀 بدء التنفيذ لعملة {symbol} ({side})", Log.BLUE)
@@ -123,6 +122,7 @@ class WeexExecutor:
             "type": "MARKET", "quantity": str(size), "newClientOrderId": f"VIP_{int(time.time()*1000)}"
         }
         order_res = await self.send_request("POST", "/capi/v3/order", order_payload)
+
         actual_margin = (float(size) * entry_price) / Config.FIXED_LEVERAGE
 
         if order_res and order_res.get('code') == -1054:
@@ -132,10 +132,8 @@ class WeexExecutor:
                 step_size = float(match.group(1))
                 new_size = math.floor(float(size) / step_size) * step_size
                 if new_size <= 0: return False, order_res, size, actual_margin
-                
                 actual_margin = (new_size * entry_price) / Config.FIXED_LEVERAGE
                 new_size_str = str(int(new_size)) if step_size.is_integer() or step_size >= 1 else f"{new_size:.{len(str(step_size).split('.')[1])}f}"
-                
                 order_payload['quantity'] = new_size_str
                 order_res = await self.send_request("POST", "/capi/v3/order", order_payload)
                 size = new_size_str
@@ -241,7 +239,7 @@ class TradingSystem:
             if mexc_sym in self.mexc.markets: self.mexc_symbols.append(mexc_sym)
                 
         Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
-        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)}\n🛡️ <b>Anti-Choke Server Fix:</b> ACTIVE")
+        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)}\n🛡️ <b>Architecture:</b> Drip-Feed Anti-Crash\n⚙️ <b>Status:</b> Stable")
 
     def save_state(self):
         try:
@@ -289,7 +287,9 @@ class TradingSystem:
 
     async def monitor(self):
         while self.running:
-            if not self.active_trades: await asyncio.sleep(5); continue
+            if not self.active_trades: 
+                await asyncio.sleep(5)
+                continue
             try:
                 tickers = await self.mexc.fetch_tickers(list(self.active_trades.keys()))
                 for sym, t in list(self.active_trades.items()):
@@ -307,7 +307,7 @@ class TradingSystem:
             except: pass
             await asyncio.sleep(2)
 
-    # 🛡️ الحل الجذري (Threading + Micro-Batching) لمنع اختناق السيرفر
+    # 🛡️ الحل الجذري والنهائي: نظام التقطير (Drip-Feed) لمنع الانهيار
     async def main_loop(self):
         while self.running:
             try:
@@ -315,40 +315,47 @@ class TradingSystem:
                 valid = [s for s, d in tickers.items() if s not in self.active_trades and (time.time() - self.cooldown.get(s, 0)) > Config.COOLDOWN_SECONDS]
                 del tickers 
 
-                if valid: Log.print(f"📊 جاري تحليل {len(valid)} عملة مسموحة وجاهزة...")
+                if valid: 
+                    Log.print(f"📊 جاري تحليل {len(valid)} عملة (بنظام التقطير الآمن)...")
                 
-                # تحليل العملات في مجموعات صغيرة (3 عملات) لإراحة المعالج
-                batch_size = 3
-                for i in range(0, len(valid), batch_size):
-                    batch = valid[i:i+batch_size]
+                for sym in valid:
+                    if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     
-                    for sym in batch:
-                        if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                        try:
-                            ohlcv = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=300)
-                            # 🚀 السحر هنا: عزل الحسابات الثقيلة في مسار جانبي (Thread) لعدم تجميد السيرفر
-                            setup = await asyncio.to_thread(StrategyEngine.analyze, ohlcv)
+                    try:
+                        # 1. سحب الداتا
+                        ohlcv = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=300)
+                        
+                        # 2. عزل التحليل لمنع اختناق المعالج
+                        setup = await asyncio.to_thread(StrategyEngine.analyze, ohlcv)
+                        
+                        if setup: 
+                            await self.execute_trade(sym, setup)
                             
-                            if setup: await self.execute_trade(sym, setup)
-                        except: pass 
-                        finally:
-                            if 'ohlcv' in locals(): del ohlcv
-                            if 'setup' in locals(): del setup
-                    
-                    # استراحة إجبارية ثانيتين بعد كل 3 عملات عشان السيرفر يقدر يرد على الـ Ping
-                    await asyncio.sleep(2)
-                    gc.collect() 
+                    except Exception as e:
+                        Log.print(f"⚠️ تخطي العملة {sym} بسبب خطأ مؤقت.", Log.YELLOW)
+                    finally:
+                        # 3. حرق البيانات فوراً من الرام
+                        if 'ohlcv' in locals(): del ohlcv
+                        if 'setup' in locals(): del setup
+                        
+                    # 🚀 السحر هنا: استراحة إجبارية 1.5 ثانية بعد *كل* عملة 
+                    # هذا يمنع حظر MEXC ويجعل استهلاك السيرفر يقترب من الصفر
+                    await asyncio.sleep(1.5)
                 
-                await asyncio.sleep(30) 
+                # تنظيف عميق في نهاية الدورة
+                gc.collect() 
+                await asyncio.sleep(15) 
             except Exception as e: 
-                Log.print(f"❌ Main Loop Error: {str(e)}", Log.RED)
+                Log.print(f"❌ خطأ عام في الدورة، سيتم إعادة المحاولة: {str(e)}", Log.RED)
                 await asyncio.sleep(10)
 
 async def keep_alive_pinger():
     while True:
         try:
-            await asyncio.sleep(120)  # تسريع النبض الداخلي كل دقيقتين
-            async with aiohttp.ClientSession() as session:
+            await asyncio.sleep(120)  
+            # 🛡️ التأكد من إغلاق جلسة البينج بشكل صحيح لمنع تسريب الاتصالات
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 url = f"http://127.0.0.1:{os.environ.get('PORT', 10000)}/ping"
                 async with session.get(url) as resp:
                     pass
