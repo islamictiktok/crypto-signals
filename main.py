@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 warnings.filterwarnings("ignore")
 
 # ==========================================
-# 1. الإعدادات المركزية (ATOMIC CONFIG)
+# 1. الإعدادات المركزية (CONFIG)
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
@@ -36,13 +36,13 @@ class Config:
     TF_MACRO = '4h'  
     TF_MICRO = '15m'
     
-    MAX_TRADES_AT_ONCE = 5          # 🚀 تم التطابق مع الباك تست لـ 5 صفقات
+    MAX_TRADES_AT_ONCE = 5  
     
-    # ⛔ الهامش الصارم (الحد الأقصى 0.2)
+    # ⛔ الهامش الصارم 
     FIXED_MARGIN_USDT = 0.2  
     FIXED_LEVERAGE = 50        
     
-    # 🎯 إعدادات النبضة الذرية الكربونية
+    # 🎯 إعدادات النبضة الذرية المخففة
     RR_RATIO = 0.7                  
     MAX_SL_PCT = 0.012              
     
@@ -62,7 +62,7 @@ class Config:
         "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
     ]
     
-    VERSION = "Atomic Sniper Live V1.0 - Carbon Copy"
+    VERSION = "Atomic Sniper Live V1.1 - Relaxed Filters"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -138,7 +138,6 @@ class WeexExecutor:
 
         actual_margin = (float(size) * entry_price) / Config.FIXED_LEVERAGE
 
-        # المصحح الذكي لـ WEEX
         if order_res and order_res.get('code') == -1054:
             msg_str = order_res.get('msg', '')
             match = re.search(r"stepSize '([0-9.]+)' requirement", msg_str)
@@ -204,7 +203,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 4. محرك الاستراتيجية (ATOMIC SNIPER ENGINE) - النسخة الكربونية
+# 4. محرك الاستراتيجية (ATOMIC SNIPER ENGINE - RELAXED)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -213,39 +212,37 @@ class StrategyEngine:
         try:
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             
-            # --- حساب المؤشرات الذرية ---
             df['ema200'] = ta.ema(df['close'], length=200)
             bb = ta.bbands(df['close'], length=20, std=2)
-            kc = ta.kc(df['high'], df['low'], df['close'], length=20, scalar=1.5)
+            
+            # ⚠️ التعديل الجراحي 1: تغيير معامل كيلتنر إلى 2.0 لتخفيف الانضغاط
+            kc = ta.kc(df['high'], df['low'], df['close'], length=20, scalar=2.0) 
+            
             df = pd.concat([df, bb, kc], axis=1)
             
-            # استخراج أسماء الأعمدة ديناميكياً لتجنب الأخطاء
             c_bbl = [c for c in df.columns if 'BBL' in c][0]
             c_bbu = [c for c in df.columns if 'BBU' in c][0]
             c_kcl = [c for c in df.columns if 'KCL' in c][0]
             c_kcu = [c for c in df.columns if 'KCU' in c][0]
             
-            # شرط السكويز (Squeeze)
             df['is_squeezed'] = (df[c_bbl] > df[c_kcl]) & (df[c_bbu] < df[c_kcu])
             df['vol_sma'] = ta.sma(df['vol'], length=20)
             
             df.dropna(inplace=True)
             if len(df) < 3: return setup
             
-            # 🎯 التطابق التام مع الباك تست (قراءة الشموع المغلقة فقط)
-            curr = df.iloc[-2]  # آخر شمعة أغلقت تماماً واكتمل فوليومها
-            prev = df.iloc[-3]  # الشمعة التي تسبقها مباشرة
+            curr = df.iloc[-2]  
+            prev = df.iloc[-3]  
             
-            # --- شرط الاختراع: سكويز سابق + فوليوم 4 أضعاف + مع الاتجاه ---
-            if prev['is_squeezed'] and curr['vol'] > (curr['vol_sma'] * 4.0):
-                # 🟢 LONG: انفجار فوق البولينجر + فوق EMA 200
+            # ⚠️ التعديل الجراحي 2: تغيير الفوليوم إلى 2.0 بدلاً من 4.0
+            if prev['is_squeezed'] and curr['vol'] > (curr['vol_sma'] * 2.0): 
+                
                 if curr['close'] > curr[c_bbu] and curr['close'] > curr['ema200']:
                     entry = curr['close']
                     sl = entry * (1 - Config.MAX_SL_PCT)
                     tp = entry + ((entry - sl) * Config.RR_RATIO)
                     setup = {"side": "LONG", "entry": entry, "sl": sl, "tp": tp}
                 
-                # 🔴 SHORT: انفجار تحت البولينجر + تحت EMA 200
                 elif curr['close'] < curr[c_bbl] and curr['close'] < curr['ema200']:
                     entry = curr['close']
                     sl = entry * (1 + Config.MAX_SL_PCT)
@@ -272,7 +269,6 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.weex.start(); await self.mexc.load_markets()
         
-        # 🧠 التحقق المسبق من وجود العملة في MEXC
         for sym in Config.WHITELIST:
             base = sym[:-4] 
             mexc_sym = f"{base}/USDT:USDT"
@@ -283,7 +279,7 @@ class TradingSystem:
                 
         Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
         
-        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Verified Coins\n🧠 <b>AI:</b> Atomic Sniper Carbon Copy\n🛡️ <b>Status:</b> All Systems Go")
+        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Verified Coins\n🧠 <b>AI:</b> Atomic Sniper (Relaxed Filters)\n🛡️ <b>Status:</b> All Systems Go")
 
     def save_state(self):
         try:
@@ -316,7 +312,7 @@ class TradingSystem:
         if success:
             icon = "🟢" if setup['side'] == "LONG" else "🔴"
             msg = (
-                f"{icon} <b>NEW ATOMIC SIGNAL</b>\n"
+                f"{icon} <b>NEW SIGNAL</b>\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🪙 <b>Coin:</b> <code>{clean_name}</code>\n"
                 f"⚡ <b>Side:</b> {setup['side']}\n"
@@ -367,8 +363,6 @@ class TradingSystem:
                 if valid: Log.print(f"📊 جاري تحليل {len(valid)} عملة مسموحة وجاهزة...")
                 for sym in valid:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    
-                    # ⚠️ التعديل الجراحي: تم رفع الشموع لـ 300 ليعمل EMA200 بكفاءة تامة
                     ohlcv = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=300)
                     setup = StrategyEngine.analyze(ohlcv)
                     del ohlcv 
