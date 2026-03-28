@@ -37,9 +37,13 @@ class Config:
     
     MAX_TRADES_AT_ONCE = 5  # 🚀 تم التطابق مع الباك تست لـ 5 صفقات
     
-    # ⛔ الهامش الصارم (الحد الأقصى 0.2) سيعمل في الكواليس للحماية
+    # ⛔ الهامش الصارم (الحد الأقصى 0.2)
     FIXED_MARGIN_USDT = 0.2  
     FIXED_LEVERAGE = 50        
+    
+    # 🎯 إعدادات النبضة الذرية المخففة (كما طلبنا في الباك تست)
+    RR_RATIO = 0.7                  
+    MAX_SL_PCT = 0.012              
     
     COOLDOWN_SECONDS = 3600   
     STATE_FILE = "bot_state.json"
@@ -57,7 +61,7 @@ class Config:
         "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
     ]
     
-    VERSION = "Atomic Sniper Live V1.2 - Match Backtest exactly"
+    VERSION = "Atomic Sniper Live V2.0 - Anti-Crash Edition"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -199,7 +203,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 4. محرك الاستراتيجية (نفس الباك تست بالمللي)
+# 4. محرك الاستراتيجية (ATOMIC SNIPER ENGINE)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -208,16 +212,15 @@ class StrategyEngine:
         try:
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             
-            # مؤشرات النبضة الذرية
+            # --- مؤشرات النبضة الذرية ---
             df['ema200'] = ta.ema(df['close'], length=200)
             bb = ta.bbands(df['close'], length=20, std=2)
             
-            # ⚠️ التعديل الأول: تم رفع معامل الكيلتنر لـ 2.0 لتوسيع القناة وتسهيل تحقيق شرط الانضغاط
+            # ⚠️ معامل الكيلتنر لـ 2.0 (استرخاء الانضغاط)
             kc = ta.kc(df['high'], df['low'], df['close'], length=20, scalar=2.0) 
             
             df = pd.concat([df, bb, kc], axis=1)
             
-            # استخراج أسماء الأعمدة ديناميكياً
             c_bbl = [c for c in df.columns if 'BBL' in c][0]
             c_bbu = [c for c in df.columns if 'BBU' in c][0]
             c_kcl = [c for c in df.columns if 'KCL' in c][0]
@@ -229,26 +232,22 @@ class StrategyEngine:
             df.dropna(inplace=True)
             if len(df) < 3: return setup
             
-            # 🎯 محاكاة الباك تست لقراءة الشموع المغلقة فقط
+            # 🎯 قراءة الشموع المغلقة فقط
             curr = df.iloc[-2]  
             prev = df.iloc[-3]  
             
-            # نفس إعدادات الربح والخسارة من الباك تست
-            RR_RATIO = 0.7
-            MAX_SL_PCT = 0.012
-            
-            # ⚠️ التعديل الثاني: تم تخفيف شرط الفوليوم إلى 2.0 بدلاً من 4.0
+            # ⚠️ شرط الفوليوم تم تخفيفه إلى 2.0
             if prev['is_squeezed'] and curr['vol'] > (curr['vol_sma'] * 2.0):
                 if curr['close'] > curr[c_bbu] and curr['close'] > curr['ema200']:
                     entry = curr['close']
-                    sl = entry * (1 - MAX_SL_PCT)
-                    tp = entry + ((entry - sl) * RR_RATIO)
+                    sl = entry * (1 - Config.MAX_SL_PCT)
+                    tp = entry + ((entry - sl) * Config.RR_RATIO)
                     setup = {"side": "LONG", "entry": entry, "sl": sl, "tp": tp}
                 
                 elif curr['close'] < curr[c_bbl] and curr['close'] < curr['ema200']:
                     entry = curr['close']
-                    sl = entry * (1 + MAX_SL_PCT)
-                    tp = entry - ((sl - entry) * RR_RATIO)
+                    sl = entry * (1 + Config.MAX_SL_PCT)
+                    tp = entry - ((sl - entry) * Config.RR_RATIO)
                     setup = {"side": "SHORT", "entry": entry, "sl": sl, "tp": tp}
         except: 
             pass
@@ -258,7 +257,7 @@ class StrategyEngine:
         return setup
 
 # ==========================================
-# 5. المدير التنفيذي
+# 5. المدير التنفيذي (Trading System - ANTI-CRASH)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -271,7 +270,6 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.weex.start(); await self.mexc.load_markets()
         
-        # 🧠 التحقق المسبق من وجود العملة في MEXC لتجنب الأخطاء
         for sym in Config.WHITELIST:
             base = sym[:-4] 
             mexc_sym = f"{base}/USDT:USDT"
@@ -282,8 +280,7 @@ class TradingSystem:
                 
         Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
         
-        # 🟢 إعادة رسالة التليجرام الافتتاحية
-        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Verified Coins\n🧠 <b>AI:</b> Atomic Sniper (Match Backtest Exact)\n🛡️ <b>Status:</b> All Systems Go")
+        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Verified Coins\n🧠 <b>AI:</b> Atomic Sniper (Anti-Crash Edition)\n🛡️ <b>Status:</b> All Systems Go")
 
     def save_state(self):
         try:
@@ -315,7 +312,6 @@ class TradingSystem:
         
         if success:
             icon = "🟢" if setup['side'] == "LONG" else "🔴"
-            # 🧹 رسالة تليجرام نظيفة، قابلة للنسخ، وبدون هامش، مع خط فاصل
             msg = (
                 f"{icon} <b>NEW SIGNAL</b>\n"
                 f"━━━━━━━━━━━━━━━\n"
@@ -355,6 +351,7 @@ class TradingSystem:
             except: pass
             await asyncio.sleep(2)
 
+    # 🛡️ الحل الجذري لمنع وقوع السيرفر (Memory Anti-Leak)
     async def main_loop(self):
         while self.running:
             try:
@@ -368,14 +365,24 @@ class TradingSystem:
                 if valid: Log.print(f"📊 جاري تحليل {len(valid)} عملة مسموحة وجاهزة...")
                 for sym in valid:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    # ⚠️ التعديل الجراحي: سحب 300 شمعة لحساب الـ EMA 200 بشكل صحيح تماماً
-                    ohlcv = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=300)
-                    setup = StrategyEngine.analyze(ohlcv)
-                    del ohlcv 
                     
-                    if setup: await self.execute_trade(sym, setup)
+                    try:
+                        ohlcv = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=300)
+                        setup = StrategyEngine.analyze(ohlcv)
+                        
+                        if setup: 
+                            await self.execute_trade(sym, setup)
+                    except Exception as loop_err:
+                        pass # تجاهل خطأ العملة الواحدة لتفادي انهيار البوت
+                    finally:
+                        # 🧹 حرق الداتا من الرامات فوراً بعد التحليل
+                        if 'ohlcv' in locals(): del ohlcv
+                        if 'setup' in locals(): del setup
+                        
+                    # إعطاء مساحة تنفس للسيرفر ليرد على الـ Ping
                     await asyncio.sleep(0.5) 
                 
+                # 🧹 تنظيف عميق للذاكرة (RAM) بعد كل دورة كاملة
                 gc.collect() 
                 await asyncio.sleep(30) 
             except Exception as e: 
