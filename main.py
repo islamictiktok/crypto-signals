@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 warnings.filterwarnings("ignore")
 
 # ==========================================
-# 1. الإعدادات المركزية (CONFIG)
+# 1. الإعدادات المركزية (ATOMIC CONFIG)
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
@@ -36,13 +36,15 @@ class Config:
     TF_MACRO = '4h'  
     TF_MICRO = '15m'
     
-    MAX_TRADES_AT_ONCE = 5          # 🚀 تم التعديل لـ 5 بناءً على نجاح الـ 180 يوم
+    MAX_TRADES_AT_ONCE = 5          # 🚀 تم التطابق مع الباك تست لـ 5 صفقات
     
-    # ⛔ الهامش الصارم
+    # ⛔ الهامش الصارم (الحد الأقصى 0.2)
     FIXED_MARGIN_USDT = 0.2  
-    FIXED_LEVERAGE = 50       
-    RR_RATIO = 0.7                  # 🎯 تم التعديل لـ 0.7 (سر نجاح Atomic Sniper)
-    MAX_SL_PCT = 0.012              # 🛑 وقف خسارة 1.2%
+    FIXED_LEVERAGE = 50        
+    
+    # 🎯 إعدادات النبضة الذرية الكربونية
+    RR_RATIO = 0.7                  
+    MAX_SL_PCT = 0.012              
     
     COOLDOWN_SECONDS = 3600   
     STATE_FILE = "bot_state.json"
@@ -60,7 +62,7 @@ class Config:
         "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
     ]
     
-    VERSION = "Atomic Sniper V1.0 - 180D Optimized"
+    VERSION = "Atomic Sniper Live V1.0 - Carbon Copy"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -136,24 +138,29 @@ class WeexExecutor:
 
         actual_margin = (float(size) * entry_price) / Config.FIXED_LEVERAGE
 
-        # المصحح الذكي
+        # المصحح الذكي لـ WEEX
         if order_res and order_res.get('code') == -1054:
             msg_str = order_res.get('msg', '')
             match = re.search(r"stepSize '([0-9.]+)' requirement", msg_str)
             if match:
                 step_size = float(match.group(1))
                 original_size = float(size)
+                
                 new_size = math.floor(original_size / step_size) * step_size
+                
                 if new_size <= 0:
                     min_margin_req = (step_size * entry_price) / Config.FIXED_LEVERAGE
                     Log.print(f"❌ الحد الأدنى لعملة {symbol} يتطلب هامش (${min_margin_req:.2f}) أعلى من الحد المسموح (${Config.FIXED_MARGIN_USDT}). تم الإلغاء.", Log.RED)
                     return False, order_res, size, actual_margin
+
                 actual_margin = (new_size * entry_price) / Config.FIXED_LEVERAGE
+
                 if step_size.is_integer() or step_size >= 1:
                     new_size_str = str(int(new_size))
                 else:
                     decimals = len(str(step_size).split('.')[1])
                     new_size_str = f"{new_size:.{decimals}f}"
+
                 Log.print(f"♻️ تم التعديل الصارم إلى {new_size_str} (الهامش الفعلي: ${actual_margin:.2f})...", Log.YELLOW)
                 order_payload['quantity'] = new_size_str
                 order_res = await self.send_request("POST", "/capi/v3/order", order_payload)
@@ -197,7 +204,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 4. محرك الاستراتيجية (ATOMIC SNIPER ENGINE)
+# 4. محرك الاستراتيجية (ATOMIC SNIPER ENGINE) - النسخة الكربونية
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -212,7 +219,7 @@ class StrategyEngine:
             kc = ta.kc(df['high'], df['low'], df['close'], length=20, scalar=1.5)
             df = pd.concat([df, bb, kc], axis=1)
             
-            # استخراج أسماء الأعمدة ديناميكياً
+            # استخراج أسماء الأعمدة ديناميكياً لتجنب الأخطاء
             c_bbl = [c for c in df.columns if 'BBL' in c][0]
             c_bbu = [c for c in df.columns if 'BBU' in c][0]
             c_kcl = [c for c in df.columns if 'KCL' in c][0]
@@ -222,28 +229,33 @@ class StrategyEngine:
             df['is_squeezed'] = (df[c_bbl] > df[c_kcl]) & (df[c_bbu] < df[c_kcu])
             df['vol_sma'] = ta.sma(df['vol'], length=20)
             
-            curr = df.iloc[-1]
-            prev = df.iloc[-2]
+            df.dropna(inplace=True)
+            if len(df) < 3: return setup
             
-            # --- منطق القناص (Atomic Sniper) ---
+            # 🎯 التطابق التام مع الباك تست (قراءة الشموع المغلقة فقط)
+            curr = df.iloc[-2]  # آخر شمعة أغلقت تماماً واكتمل فوليومها
+            prev = df.iloc[-3]  # الشمعة التي تسبقها مباشرة
+            
+            # --- شرط الاختراع: سكويز سابق + فوليوم 4 أضعاف + مع الاتجاه ---
             if prev['is_squeezed'] and curr['vol'] > (curr['vol_sma'] * 4.0):
                 # 🟢 LONG: انفجار فوق البولينجر + فوق EMA 200
                 if curr['close'] > curr[c_bbu] and curr['close'] > curr['ema200']:
                     entry = curr['close']
                     sl = entry * (1 - Config.MAX_SL_PCT)
-                    tp = entry + (abs(entry - sl) * Config.RR_RATIO)
+                    tp = entry + ((entry - sl) * Config.RR_RATIO)
                     setup = {"side": "LONG", "entry": entry, "sl": sl, "tp": tp}
                 
                 # 🔴 SHORT: انفجار تحت البولينجر + تحت EMA 200
                 elif curr['close'] < curr[c_bbl] and curr['close'] < curr['ema200']:
                     entry = curr['close']
                     sl = entry * (1 + Config.MAX_SL_PCT)
-                    tp = entry - (abs(sl - entry) * Config.RR_RATIO)
+                    tp = entry - ((sl - entry) * Config.RR_RATIO)
                     setup = {"side": "SHORT", "entry": entry, "sl": sl, "tp": tp}
         except: 
             pass
         finally:
-            if 'df' in locals(): del df
+            if 'df' in locals():
+                del df
         return setup
 
 # ==========================================
@@ -259,6 +271,8 @@ class TradingSystem:
 
     async def initialize(self):
         await self.tg.start(); await self.weex.start(); await self.mexc.load_markets()
+        
+        # 🧠 التحقق المسبق من وجود العملة في MEXC
         for sym in Config.WHITELIST:
             base = sym[:-4] 
             mexc_sym = f"{base}/USDT:USDT"
@@ -266,8 +280,10 @@ class TradingSystem:
                 self.mexc_symbols.append(mexc_sym)
             else:
                 Log.print(f"⚠️ العملة {sym} غير موجودة في MEXC، سيتم تخطيها بأمان.", Log.YELLOW)
-        Log.print(f"🚀 {Config.VERSION} STARTED", Log.GREEN)
-        await self.tg.send(f"☢️ <b>{Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n🎯 <b>Strategy:</b> Atomic Sniper (180D Proven)\n🛡️ <b>Max Concurrent:</b> {Config.MAX_TRADES_AT_ONCE}")
+                
+        Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
+        
+        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Verified Coins\n🧠 <b>AI:</b> Atomic Sniper Carbon Copy\n🛡️ <b>Status:</b> All Systems Go")
 
     def save_state(self):
         try:
@@ -276,8 +292,9 @@ class TradingSystem:
 
     async def execute_trade(self, symbol, setup):
         if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
-        Log.print(f"💡 إشارة {setup['side']} ذرية على {symbol}!", Log.GREEN)
+        Log.print(f"💡 إشارة {setup['side']} على {symbol}!", Log.GREEN)
         clean_name = symbol.split(':')[0].replace('/', '')
+        
         raw_size = (Config.FIXED_MARGIN_USDT * Config.FIXED_LEVERAGE) / setup['entry']
         try: size = self.mexc.amount_to_precision(symbol, raw_size)
         except: size = f"{raw_size:.4f}"
@@ -307,9 +324,10 @@ class TradingSystem:
                 f"⚖️ <b>Lev:</b> {Config.FIXED_LEVERAGE}x\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🎯 <b>Target:</b> <code>{clean_tp_str}</code>\n"
+                f"━━━━━━━━━━━━━━━\n"
                 f"🛑 <b>Stop:</b> <code>{clean_sl_str}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🛡️ <i>API: Atomic Sniper Executed</i>"
+                f"🛡️ <i>API: Order Placed Successfully</i>"
             )
             msg_id = await self.tg.send(msg)
             if msg_id:
@@ -329,7 +347,7 @@ class TradingSystem:
                     if win or loss:
                         pnl = (curr - t['entry']) * float(t['size']) if t['side'] == "LONG" else (t['entry'] - curr) * float(t['size'])
                         roe = (pnl / t['margin']) * 100
-                        status_text = "🏆 <b>TARGET HIT!</b> ☢️" if win else "🛑 <b>STOP LOSS HIT</b>"
+                        status_text = "🏆 <b>TARGET HIT!</b> 🏦" if win else "🛑 <b>STOP LOSS HIT</b>"
                         await self.tg.send(f"{status_text}\n💰 <b>Net ROE:</b> {roe:+.2f}%", t['msg_id'])
                         self.stats["wins" if win else "losses"] += 1; self.stats["roe"] += roe; self.stats["equity"] += pnl
                         del self.active_trades[sym]; self.save_state()
@@ -340,19 +358,26 @@ class TradingSystem:
         while self.running:
             try:
                 tickers = await self.mexc.fetch_tickers(self.mexc_symbols)
+                
                 valid = [s for s, d in tickers.items() 
                          if s not in self.active_trades and (time.time() - self.cooldown.get(s, 0)) > Config.COOLDOWN_SECONDS]
+                
                 del tickers 
+
                 if valid: Log.print(f"📊 جاري تحليل {len(valid)} عملة مسموحة وجاهزة...")
                 for sym in valid:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    # ⚠️ سحب 300 شمعة لضمان دقة حساب الـ EMA 200
+                    
+                    # ⚠️ التعديل الجراحي: تم رفع الشموع لـ 300 ليعمل EMA200 بكفاءة تامة
                     ohlcv = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=300)
                     setup = StrategyEngine.analyze(ohlcv)
                     del ohlcv 
+                    
                     if setup: await self.execute_trade(sym, setup)
                     await asyncio.sleep(0.5) 
-                gc.collect(); await asyncio.sleep(30) 
+                
+                gc.collect() 
+                await asyncio.sleep(30) 
             except Exception as e: 
                 Log.print(f"❌ Main Loop Error: {str(e)}", Log.RED)
                 await asyncio.sleep(10)
