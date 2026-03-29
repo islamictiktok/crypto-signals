@@ -37,7 +37,7 @@ class Config:
     TF_MICRO = '30m'  # فريم 30 دقيقة الذهبي
     MAX_TRADES_AT_ONCE = 5  
     
-    FIXED_MARGIN_USDT = 0.15  # مخاطرة 0.15 دولار
+    FIXED_MARGIN_USDT = 0.07  # مخاطرة 0.15 دولار
     FIXED_LEVERAGE = 50        
     RR_RATIO = 2.0  # الهدف ضعف الوقف                
     
