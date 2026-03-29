@@ -1,439 +1,271 @@
 import asyncio
-import os
+import websockets
 import json
-import warnings
-import traceback
-import gc  
-import hmac
-import hashlib
-import base64
 import time
-import re
 import math
-from datetime import datetime, timezone
-import pandas as pd
-import pandas_ta as ta
-import numpy as np
-import ccxt.async_support as ccxt
+import os
 import aiohttp
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 from contextlib import asynccontextmanager
 
-warnings.filterwarnings("ignore")
-
 # ==========================================
-# 1. الإعدادات المركزية (CONFIG)
+# 1. الإعدادات (HFT Paper Config)
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
     CHAT_ID = "-1003653652451"
     
-    WEEX_API_KEY = "weex_64531a2b79748e202623fe9cd96ff478"
-    WEEX_SECRET_KEY = "263f6868f81b6d9dd4af394c6f07d8798b5d4ba220b42c1a598893acb95bbc12"
-    WEEX_PASSPHRASE = "MOMOmax264"
+    SYMBOL = "BTCUSDT"
     
-    TF_MICRO = '30m'  
-    MAX_TRADES_AT_ONCE = 5  
+    # محفظة المحاكاة
+    STARTING_EQUITY = 100.0     # رصيد البداية الوهمي
+    MARGIN_USDT = 0.15          # الهامش المستخدم
+    LEVERAGE = 50               # الرافعة
     
-    FIXED_MARGIN_USDT = 0.15  
-    FIXED_LEVERAGE = 50        
-    RR_RATIO = 2.0                
+    # إعدادات الـ HFT Scalping
+    TP_PCT = 0.003              # هدف 0.3%
+    SL_PCT = 0.0015             # ستوب 0.15% 
     
-    COOLDOWN_SECONDS = 3600   
-    STATE_FILE = "bot_state.json"
-
-    WHITELIST = [
-        "AAVEUSDT", "ADAUSDT", "AEROUSDT", "AGLDUSDT", "APEUSDT", "APTUSDT", "ARKMUSDT", "ATOMUSDT", 
-        "AVAXUSDT", "AXSUSDT", "BANDUSDT", "BCHUSDT", "BNBUSDT", "BTCUSDT", "COMPUSDT", "COWUSDT", 
-        "CRVUSDT", "CVXUSDT", "DASHUSDT", "DOGEUSDT", "DOTUSDT", "DUSKUSDT", "ENSUSDT", "ETCUSDT", 
-        "ETHUSDT", "FARTCOINUSDT", "HBARUSDT", "HYPEUSDT", "ICPUSDT", "IPUSDT", "JASMYUSDT", 
-        "JELLYJELLYUSDT", "JTOUSDT", "KASUSDT", "LDOUSDT", "LINKUSDT", "LTCUSDT", "LYNUSDT", 
-        "NEARUSDT", "NEOUSDT", "ONDOUSDT", "OPUSDT", "ORDIUSDT", "PAXGUSDT", "PENGUUSDT", 
-        "PUMPUSDT", "QNTUSDT", "RENDERUSDT", "SEIUSDT", "SOLUSDT", "SSVUSDT", "SUIUSDT", 
-        "TAOUSDT", "THETAUSDT", "TIAUSDT", "TONUSDT", "TRBUSDT", "TRUMPUSDT", "TRXUSDT", 
-        "UNIUSDT", "VETUSDT", "VIRTUALUSDT", "WIFUSDT", "WLDUSDT", "XAGUSDT", "XAUTUSDT", 
-        "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
-    ]
+    # حساسية الرادار
+    IMBALANCE_THRESHOLD = 65.0  
     
-    VERSION = "Holy Grail V14.0 (No Fear Edition)"
-
-class Log:
-    GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
-    @staticmethod
-    def print(msg, color=RESET):
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
-
-# =========================================
-# 2. Linear Regression (مطابق TV)
-# =========================================
-def linreg_tv(close, length=100, mult=2.0):
-    lr, upper, lower = [], [], []
-    for i in range(len(close)):
-        if i < length:
-            lr.append(np.nan)
-            upper.append(np.nan)
-            lower.append(np.nan)
-            continue
-        y = close[i-length:i]
-        x = np.arange(length)
-        slope, intercept = np.polyfit(x, y, 1)
-        reg = intercept + slope * x
-        center = intercept + slope * (length-1)
-        dev = y - reg
-        std = np.sqrt(np.sum(dev**2) / (length - 1))
-        lr.append(center)
-        upper.append(center + mult * std)
-        lower.append(center - mult * std)
-    return np.array(lr), np.array(upper), np.array(lower)
+    STATE_FILE = "paper_state.json"
 
 # ==========================================
-# 3. محرك WEEX المتطور
-# ==========================================
-class WeexExecutor:
-    def __init__(self):
-        self.api_key = Config.WEEX_API_KEY
-        self.secret_key = Config.WEEX_SECRET_KEY
-        self.passphrase = Config.WEEX_PASSPHRASE
-        self.base_url = "https://api-contract.weex.com" 
-        self.rules = {}  
-
-    def get_signature(self, timestamp, method, path, body_str):
-        message = str(timestamp) + method.upper() + path + body_str
-        mac = hmac.new(bytes(self.secret_key, 'utf8'), bytes(message, 'utf-8'), digestmod=hashlib.sha256)
-        return base64.b64encode(mac.digest()).decode('utf-8')
-
-    async def send_request(self, method, path, payload=None, retries=3):
-        timestamp = str(int(time.time() * 1000))
-        body_str = json.dumps(payload) if payload else ""
-        if method.upper() == "GET": body_str = ""
-            
-        headers = {
-            "Content-Type": "application/json", 
-            "ACCESS-KEY": self.api_key, 
-            "ACCESS-SIGN": self.get_signature(timestamp, method, path, body_str), 
-            "ACCESS-TIMESTAMP": timestamp, 
-            "ACCESS-PASSPHRASE": self.passphrase
-        }
-        url = self.base_url + path
-        timeout = aiohttp.ClientTimeout(total=5) 
-        
-        for attempt in range(retries):
-            try:
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    if method.upper() == "GET":
-                        async with session.get(url, headers=headers) as resp:
-                            if resp.status == 200: return await resp.json()
-                    else:
-                        async with session.post(url, headers=headers, json=payload) as resp:
-                            if resp.status == 200: return await resp.json()
-            except: 
-                await asyncio.sleep(1)
-        return None
-
-    async def fetch_exchange_rules(self):
-        Log.print("📥 جاري جلب قواعد المنصة (Contract Sizes) من WEEX...", Log.YELLOW)
-        res = await self.send_request("GET", "/capi/v3/market/exchangeInfo")
-        if res and 'data' in res and 'symbols' in res['data']:
-            symbols_data = res['data']['symbols']
-        elif res and 'symbols' in res:
-            symbols_data = res['symbols']
-        else:
-            Log.print("❌ فشل جلب القواعد، سنعتمد على التقريب الافتراضي.", Log.RED)
-            return
-
-        for sym in symbols_data:
-            self.rules[sym['symbol']] = {
-                'qty_prec': int(sym.get('quantityPrecision', 4)),
-                'price_prec': int(sym.get('pricePrecision', 4)),
-                'min_qty': float(sym.get('minOrderSize', 0.0001))
-            }
-        Log.print(f"✅ تم تحميل قواعد {len(self.rules)} عملة بنجاح.", Log.GREEN)
-
-    async def execute_full_flow(self, symbol, side, size_str, sl_price_str, tp_price_str, actual_margin):
-        Log.print(f"=========================================", Log.BLUE)
-        Log.print(f"🚀 بدء التنفيذ لعملة {symbol} ({side})", Log.BLUE)
-        
-        Log.print(f"⚙️ 1. جاري تعديل الرافعة إلى {Config.FIXED_LEVERAGE}x...", Log.YELLOW)
-        leverage_payload = {
-            "symbol": symbol, "marginType": "ISOLATED",
-            "isolatedLongLeverage": str(Config.FIXED_LEVERAGE),
-            "isolatedShortLeverage": str(Config.FIXED_LEVERAGE),
-            "crossLeverage": str(Config.FIXED_LEVERAGE)
-        }
-        await self.send_request("POST", "/capi/v3/account/leverage", leverage_payload)
-        await asyncio.sleep(0.5)
-
-        Log.print(f"🛒 2. إرسال أوردر MARKET بكمية {size_str} (محاولة قتالية)...", Log.YELLOW)
-        order_payload = {
-            "symbol": symbol, "side": "BUY" if side == "LONG" else "SELL", "positionSide": side,
-            "type": "MARKET", "quantity": size_str, "newClientOrderId": f"VIP_{int(time.time()*1000)}"
-        }
-        order_res = await self.send_request("POST", "/capi/v3/order", order_payload)
-        
-        if not order_res or (not order_res.get('success') and order_res.get('code') != '00000'):
-            error_msg = order_res.get('msg', 'Unknown Error') if order_res else 'No Response'
-            Log.print(f"❌ فشل فتح الصفقة. السبب من WEEX: {error_msg}", Log.RED)
-            return False, order_res, size_str, actual_margin
-
-        Log.print(f"✅ تم قبول الصفقة، جاري وضع الحماية...", Log.GREEN)
-        await asyncio.sleep(1)
-
-        tp_payload = {"symbol": symbol, "clientAlgoId": f"TP_{int(time.time()*1000)}", "planType": "TAKE_PROFIT", "triggerPrice": tp_price_str, "executePrice": tp_price_str, "quantity": size_str, "positionSide": side, "triggerPriceType": "MARK_PRICE"}
-        await self.send_request("POST", "/capi/v3/placeTpSlOrder", tp_payload)
-        await asyncio.sleep(0.5)
-
-        sl_payload = {"symbol": symbol, "clientAlgoId": f"SL_{int(time.time()*1000)}", "planType": "STOP_LOSS", "triggerPrice": sl_price_str, "executePrice": sl_price_str, "quantity": size_str, "positionSide": side, "triggerPriceType": "MARK_PRICE"}
-        await self.send_request("POST", "/capi/v3/placeTpSlOrder", sl_payload)
-
-        Log.print(f"✅✅ تمت الدورة بنجاح لعملة {symbol}!", Log.GREEN)
-        return True, "Success", size_str, actual_margin
-
-# ==========================================
-# 4. نظام الإشعارات
+# 2. نظام الإشعارات (Telegram)
 # ==========================================
 class TelegramNotifier:
     def __init__(self):
-        self.url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"; self.session = None
-    async def start(self): self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        self.url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
+        self.session = None
+        
+    async def start(self): 
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        
     async def stop(self): 
         if self.session: await self.session.close()
-    async def send(self, text, reply_to=None):
-        if not self.session: return None
+        
+    async def send(self, text):
+        if not self.session: return
         payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-        if reply_to: payload["reply_to_message_id"] = reply_to
         try:
             async with self.session.post(self.url, json=payload) as resp:
-                d = await resp.json(); return d.get('result', {}).get('message_id')
-        except: return None
+                await resp.json()
+        except Exception as e: print(f"TG Error: {e}")
+
+tg = TelegramNotifier()
 
 # ==========================================
-# 5. محرك الاستراتيجية 
+# 3. الوسيط الوهمي (Paper Broker)
 # ==========================================
-class StrategyEngine:
-    @staticmethod
-    def analyze(ohlcv):
-        setup = None
-        try:
-            df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            df = df[:-1] 
-            
-            df['ema200'] = ta.ema(df['close'], length=200)
-            lr, up, low = linreg_tv(df['close'].values)
-            df['upper'] = up
-            df['lower'] = low
-            
-            df.dropna(inplace=True)
-            if len(df) < 3: return setup 
-            
-            touch = df.iloc[-3]
-            confirm = df.iloc[-2]
-            curr = df.iloc[-1]
-            
-            tol_factor = 0.001
-            tol = curr['close'] * tol_factor
-            side = None
-
-            if (touch['high'] >= (touch['upper'] - tol) and touch['close'] < touch['upper'] and confirm['close'] < confirm['upper'] and curr['close'] < curr['upper'] and curr['close'] < curr['ema200']):
-                side = "SHORT"; entry = curr['close']; sl = touch['high'] * 1.002; tp = entry - (sl - entry) * Config.RR_RATIO
-            elif (touch['high'] >= (touch['ema200'] - tol) and confirm['close'] < confirm['ema200']):
-                side = "SHORT"; entry = curr['close']; sl = touch['high'] * 1.002; tp = entry - (sl - entry) * Config.RR_RATIO
-            elif (touch['low'] <= (touch['lower'] + tol) and touch['close'] > touch['lower'] and confirm['close'] > confirm['lower'] and curr['close'] > curr['lower'] and curr['close'] > curr['ema200']):
-                side = "LONG"; entry = curr['close']; sl = touch['low'] * 0.998; tp = entry + (entry - sl) * Config.RR_RATIO
-            elif (touch['low'] <= (touch['ema200'] + tol) and confirm['close'] > confirm['ema200']):
-                side = "LONG"; entry = curr['close']; sl = touch['low'] * 0.998; tp = entry + (entry - sl) * Config.RR_RATIO
-
-            if side: setup = {"side": side, "entry": entry, "sl": sl, "tp": tp}
-        except: pass
-        finally:
-            if 'df' in locals(): del df
-        return setup
-
-# ==========================================
-# 6. المدير التنفيذي
-# ==========================================
-class TradingSystem:
+class PaperBroker:
     def __init__(self):
-        self.mexc = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
-        self.weex = WeexExecutor(); self.tg = TelegramNotifier()
-        self.active_trades = {}; self.cooldown = {}; self.stats = {"signals": 0, "wins": 0, "losses": 0, "roe": 0.0, "equity": 100.0}
-        self.running = True
-        self.mexc_symbols = [] 
-
-    async def initialize(self):
-        await self.tg.start(); await self.mexc.load_markets()
-        await self.weex.fetch_exchange_rules()
-        
-        for sym in Config.WHITELIST:
-            base = sym[:-4] 
-            mexc_sym = f"{base}/USDT:USDT"
-            if mexc_sym in self.mexc.markets: self.mexc_symbols.append(mexc_sym)
-                
-        Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
-        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Coins\n⚔️ <b>Mode:</b> No Fear (Forced Orders)")
+        self.equity = Config.STARTING_EQUITY
+        self.wins = 0
+        self.losses = 0
+        self.position = None
+        self.cooldown_until = 0
+        self.rule = {'qty_prec': 4, 'min_qty': 0.0001} # قيم افتراضية حتى يتم تحديثها
+        self.load_state()
 
     def save_state(self):
         try:
-            with open(Config.STATE_FILE, "w") as f: json.dump({"stats": self.stats, "active": self.active_trades, "cooldown": self.cooldown}, f)
+            with open(Config.STATE_FILE, "w") as f:
+                json.dump({"equity": self.equity, "wins": self.wins, "losses": self.losses}, f)
         except: pass
 
-    async def check_weex_balance(self):
-        res = await self.weex.send_request("GET", "/capi/v3/account/balance")
-        if not res: return None
-        data = res.get('data') if isinstance(res, dict) and 'data' in res else res
-        if isinstance(data, list):
-            for item in data:
-                if item.get('asset') == 'USDT': return float(item.get('availableBalance', 0))
-        if isinstance(res, dict) and res.get('asset') == 'USDT': return float(res.get('availableBalance', 0))
-        return None
-
-    async def execute_trade(self, symbol, setup):
-        if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: return
-        Log.print(f"💡 إشارة {setup['side']} على {symbol}!", Log.GREEN)
-        clean_name = symbol.split(':')[0].replace('/', '')
-        
-        rule = self.weex.rules.get(clean_name)
-        if not rule:
-            Log.print(f"⚠️ لا توجد قواعد مسجلة لعملة {clean_name}، تجاهل.", Log.YELLOW)
-            return
-
-        # ⚔️ الهجوم الإجباري بالحد الأدنى
-        raw_size = (Config.FIXED_MARGIN_USDT * Config.FIXED_LEVERAGE) / setup['entry']
-        if raw_size < rule['min_qty']:
-            raw_size = rule['min_qty']
-            Log.print(f"⚔️ إجبار الكمية لـ {clean_name} إلى الحد الأدنى ({raw_size}).", Log.YELLOW)
-
-        q_prec = rule['qty_prec']
-        p_prec = rule['price_prec']
-
-        factor_q = 10 ** q_prec
-        final_size = math.ceil(raw_size * factor_q) / factor_q
-        
-        if final_size < rule['min_qty']: final_size = rule['min_qty']
-            
-        size_str = f"{final_size:.{q_prec}f}"
-        actual_margin = (final_size * setup['entry']) / Config.FIXED_LEVERAGE
-        
-        tp_str = f"{setup['tp']:.{p_prec}f}"
-        sl_str = f"{setup['sl']:.{p_prec}f}"
-        entry_str = f"{setup['entry']:.{p_prec}f}"
-        
-        success, response, final_size_str, margin_used = await self.weex.execute_full_flow(
-            symbol=clean_name, side=setup['side'], size_str=size_str, 
-            sl_price_str=sl_str, tp_price_str=tp_str, actual_margin=actual_margin
-        )
-        
-        if success:
-            icon = "🟢" if setup['side'] == "LONG" else "🔴"
-            msg = (
-                f"{icon} <b>HOLY GRAIL SIGNAL (30m)</b>\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"🪙 <b>Coin:</b> <code>{clean_name}</code>\n"
-                f"⚡ <b>Side:</b> {setup['side']}\n"
-                f"🛒 <b>Entry:</b> <code>{entry_str}</code>\n"
-                f"⚖️ <b>Lev:</b> {Config.FIXED_LEVERAGE}x\n"
-                f"💰 <b>Margin Used:</b> <code>${margin_used:.2f}</code>\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"🎯 <b>Target:</b> <code>{tp_str}</code> (1:2)\n"
-                f"🛑 <b>Stop:</b> <code>{sl_str}</code>\n"
-                f"━━━━━━━━━━━━━━━"
-            )
-            msg_id = await self.tg.send(msg)
-            if msg_id:
-                self.active_trades[symbol] = {**setup, "msg_id": msg_id, "size": final_size_str, "margin": margin_used}
-                self.stats["signals"] += 1; self.cooldown[symbol] = time.time(); self.save_state()
-
-    async def monitor(self):
-        while self.running:
-            if not self.active_trades: 
-                await asyncio.sleep(5)
-                continue
-            try:
-                tickers = await self.mexc.fetch_tickers(list(self.active_trades.keys()))
-                for sym, t in list(self.active_trades.items()):
-                    curr = tickers.get(sym, {}).get('last')
-                    if not curr: continue
-                    win = (t['side'] == "LONG" and curr >= t['tp']) or (t['side'] == "SHORT" and curr <= t['tp'])
-                    loss = (t['side'] == "LONG" and curr <= t['sl']) or (t['side'] == "SHORT" and curr >= t['sl'])
-                    if win or loss:
-                        pnl = (curr - t['entry']) * float(t['size']) if t['side'] == "LONG" else (t['entry'] - curr) * float(t['size'])
-                        roe = (pnl / t['margin']) * 100
-                        status_text = "🏆 <b>TARGET HIT (1:2)!</b> 🚀" if win else "🛑 <b>STOP LOSS HIT</b>"
-                        await self.tg.send(f"{status_text}\n💰 <b>Net ROE:</b> {roe:+.2f}%", t['msg_id'])
-                        self.stats["wins" if win else "losses"] += 1; self.stats["roe"] += roe; self.stats["equity"] += pnl
-                        del self.active_trades[sym]; self.save_state()
-            except: pass
-            await asyncio.sleep(2)
-
-    async def main_loop(self):
-        while self.running:
-            try:
-                balance = await self.check_weex_balance()
-                
-                if balance is not None:
-                    if balance <= 0.02: # ⚔️ تخفيض حاجز الإيقاف لمستوى الصفر تقريباً
-                        Log.print(f"⏳ الرصيد فارغ تقريباً ({balance:.4f} USDT). سيتم الانتظار...", Log.YELLOW)
-                        await asyncio.sleep(300)
-                        continue
-                else:
-                    await asyncio.sleep(10)
-                    continue
-
-                tickers = await self.mexc.fetch_tickers(self.mexc_symbols)
-                valid = [s for s, d in tickers.items() if s not in self.active_trades and (time.time() - self.cooldown.get(s, 0)) > Config.COOLDOWN_SECONDS]
-                del tickers 
-
-                if valid: 
-                    Log.print(f"🏦 الرصيد اللحظي: {balance:.2f}$ | تحليل {len(valid)} عملة (No Fear Mode)...")
-                
-                for sym in valid:
-                    if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    try:
-                        ohlcv = await self.mexc.fetch_ohlcv(sym, Config.TF_MICRO, limit=300)
-                        setup = await asyncio.to_thread(StrategyEngine.analyze, ohlcv)
-                        if setup: 
-                            await self.execute_trade(sym, setup)
-                    except Exception: pass
-                    finally:
-                        if 'ohlcv' in locals(): del ohlcv
-                        if 'setup' in locals(): del setup
-                    await asyncio.sleep(1.5)
-                
-                gc.collect() 
-                await asyncio.sleep(15) 
-            except Exception as e: 
-                Log.print(f"❌ خطأ عام: {str(e)}\n{traceback.format_exc()}", Log.RED)
-                await asyncio.sleep(10)
-
-async def keep_alive_pinger():
-    while True:
+    def load_state(self):
         try:
-            await asyncio.sleep(120)  
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                url = f"http://127.0.0.1:{os.environ.get('PORT', 10000)}/ping"
-                async with session.get(url) as resp: pass
+            if os.path.exists(Config.STATE_FILE):
+                with open(Config.STATE_FILE, "r") as f:
+                    data = json.load(f)
+                    self.equity = data.get("equity", Config.STARTING_EQUITY)
+                    self.wins = data.get("wins", 0)
+                    self.losses = data.get("losses", 0)
         except: pass
 
-bot = TradingSystem()
+    # سحب قواعد المنصة الحقيقية لتطبيقها في المحاكاة
+    async def fetch_rules(self):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://api-contract.weex.com/capi/v3/market/exchangeInfo") as resp:
+                    res = await resp.json()
+                    symbols = res.get('data', {}).get('symbols', []) if 'data' in res else res.get('symbols', [])
+                    for sym in symbols:
+                        if sym['symbol'] == Config.SYMBOL:
+                            self.rule['qty_prec'] = int(sym.get('quantityPrecision', 4))
+                            self.rule['min_qty'] = float(sym.get('minOrderSize', 0.0001))
+                            print(f"✅ تم سحب قواعد WEEX لـ {Config.SYMBOL}: دقة {self.rule['qty_prec']} | أدنى كمية {self.rule['min_qty']}")
+        except Exception as e: print(f"⚠️ فشل سحب القواعد: {e}")
+
+    async def open_position(self, side, current_price, bid_imb, buy_dom):
+        if self.position is not None or time.time() < self.cooldown_until: return
+
+        # 1. حساب الكمية وتطبيق القواعد الحقيقية
+        raw_size = (Config.MARGIN_USDT * Config.LEVERAGE) / current_price
+        if raw_size < self.rule['min_qty']: raw_size = self.rule['min_qty']
+        
+        factor = 10 ** self.rule['qty_prec']
+        final_size = math.ceil(raw_size * factor) / factor
+        actual_margin = (final_size * current_price) / Config.LEVERAGE
+
+        # 2. حساب الأهداف
+        if side == "LONG":
+            tp = current_price * (1 + Config.TP_PCT)
+            sl = current_price * (1 - Config.SL_PCT)
+        else:
+            tp = current_price * (1 - Config.TP_PCT)
+            sl = current_price * (1 + Config.SL_PCT)
+
+        self.position = {
+            "side": side, "entry": current_price, "tp": tp, "sl": sl, 
+            "size": final_size, "margin": actual_margin
+        }
+        
+        icon = "🟢" if side == "LONG" else "🔴"
+        msg = (
+            f"{icon} <b>[PAPER TRADE] HFT ENTRY</b>\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🪙 <b>Coin:</b> {Config.SYMBOL}\n"
+            f"⚡ <b>Side:</b> {side}\n"
+            f"🛒 <b>Entry:</b> {current_price:.2f}\n"
+            f"💰 <b>Margin Used:</b> ${actual_margin:.2f}\n"
+            f"📊 <b>Bids Imbalance:</b> {bid_imb:.1f}%\n"
+            f"📈 <b>Trade Buys:</b> {buy_dom:.1f}%\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🎯 <b>TP:</b> {tp:.2f} | 🛑 <b>SL:</b> {sl:.2f}"
+        )
+        print(f"\n{msg}")
+        await tg.send(msg)
+
+    async def check_position(self, current_price):
+        if not self.position: return
+
+        pos = self.position
+        win, loss = False, False
+
+        if pos["side"] == "LONG":
+            if current_price >= pos["tp"]: win = True
+            elif current_price <= pos["sl"]: loss = True
+        else:
+            if current_price <= pos["tp"]: win = True
+            elif current_price >= pos["sl"]: loss = True
+
+        if win or loss:
+            price_diff_pct = abs(current_price - pos["entry"]) / pos["entry"]
+            pnl = (pos["size"] * current_price * price_diff_pct) if win else -(pos["size"] * current_price * price_diff_pct)
+            
+            self.equity += pnl
+            if win: self.wins += 1
+            else: self.losses += 1
+            
+            total = self.wins + self.losses
+            winrate = (self.wins / total) * 100 if total > 0 else 0
+            
+            self.save_state()
+            
+            icon = "🏆" if win else "🛑"
+            res_txt = "TARGET HIT!" if win else "STOP LOSS HIT!"
+            msg = (
+                f"{icon} <b>[PAPER RESULT] {res_txt}</b>\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"💵 <b>PnL:</b> ${pnl:+.4f}\n"
+                f"🏦 <b>New Equity:</b> ${self.equity:.4f}\n"
+                f"📈 <b>Win Rate:</b> {winrate:.1f}% ({self.wins}W / {self.losses}L)"
+            )
+            print(f"\n{msg}\n⏳ تبريد الرادار 5 ثواني...\n")
+            await tg.send(msg)
+            
+            self.position = None
+            self.cooldown_until = time.time() + 5 
+
+broker = PaperBroker()
+
+# ==========================================
+# 4. محرك التحليل اللحظي والاتصال (HFT Engine)
+# ==========================================
+market_data = {"current_price": 0.0, "bid_vol": 0.0, "ask_vol": 0.0, "buy_pressure": 0.0, "sell_pressure": 0.0}
+
+async def analyze_order_flow():
+    if broker.position is not None: return
+    
+    total_depth = market_data["bid_vol"] + market_data["ask_vol"]
+    if total_depth > 0:
+        bid_imb = (market_data["bid_vol"] / total_depth) * 100
+        tot_trades = market_data["buy_pressure"] + market_data["sell_pressure"]
+        buy_dom = (market_data["buy_pressure"] / tot_trades * 100) if tot_trades > 0 else 50
+        
+        if market_data["current_price"] > 0:
+            if bid_imb >= Config.IMBALANCE_THRESHOLD and buy_dom >= Config.IMBALANCE_THRESHOLD:
+                await broker.open_position("LONG", market_data["current_price"], bid_imb, buy_dom)
+            elif bid_imb <= (100 - Config.IMBALANCE_THRESHOLD) and buy_dom <= (100 - Config.IMBALANCE_THRESHOLD):
+                await broker.open_position("SHORT", market_data["current_price"], bid_imb, buy_dom)
+        
+        market_data["buy_pressure"] *= 0.8
+        market_data["sell_pressure"] *= 0.8
+
+async def weex_paper_stream():
+    url = "wss://ws-contract.weex.com/v3/ws/public"
+    while True: # ضمان عدم التوقف
+        try:
+            print("⏳ جاري الاتصال بسيرفرات WEEX WebSockets...")
+            async for ws in websockets.connect(url, ping_interval=20, ping_timeout=20):
+                print(f"✅ HFT SIMULATOR ONLINE - TARGET: {Config.SYMBOL}")
+                await tg.send(f"🤖 <b>HFT Paper Trading Started!</b>\n🏦 <b>Equity:</b> ${broker.equity:.2f}\n🎯 <b>Target:</b> {Config.SYMBOL}")
+                
+                sub_msg = {"method": "SUBSCRIBE", "params": [f"{Config.SYMBOL}@depth15", f"{Config.SYMBOL}@trade", f"{Config.SYMBOL}@ticker"], "id": 1}
+                await ws.send(json.dumps(sub_msg))
+                
+                async for msg in ws:
+                    data = json.loads(msg)
+                    
+                    if "event" in data and data["event"] == "ping":
+                        await ws.send(json.dumps({"method": "PONG", "id": 1}))
+                        continue
+                    
+                    if "e" in data and data["e"] == "ticker":
+                        market_data["current_price"] = float(data["d"][0]["c"])
+                        await broker.check_position(market_data["current_price"])
+                        
+                    elif "e" in data and data["e"] == "depth":
+                        market_data["bid_vol"] = sum(float(b[1]) for b in data.get("b", []))
+                        market_data["ask_vol"] = sum(float(a[1]) for a in data.get("a", []))
+                        await analyze_order_flow()
+                        
+                    elif "e" in data and data["e"] == "trade":
+                        for t in data.get("d", []):
+                            if t["m"]: market_data["sell_pressure"] += float(t["q"])
+                            else: market_data["buy_pressure"] += float(t["q"])
+
+        except websockets.ConnectionClosed:
+            print("⚠️ انقطع الاتصال... جاري إعادة الاتصال بعد 3 ثواني")
+            await asyncio.sleep(3)
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            await asyncio.sleep(3)
+
+# ==========================================
+# 5. خادم Render (FastAPI)
+# ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await bot.initialize()
-    asyncio.create_task(bot.main_loop())
-    asyncio.create_task(bot.monitor())
-    asyncio.create_task(keep_alive_pinger())
+    await tg.start()
+    await broker.fetch_rules()
+    asyncio.create_task(weex_paper_stream())
     yield
-    bot.running = False
+    await tg.stop()
+
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/ping")
-async def ping(): return JSONResponse(content={"status": "online", "message": "PONG", "time": time.time()})
+async def ping():
+    return JSONResponse(content={"status": "online", "equity": broker.equity, "trades": broker.wins + broker.losses})
 
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
 async def catch_all(path_name: str):
-    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#00ff00;padding:50px;font-family:monospace;'><h1>VIP FORTS {Config.VERSION}</h1><p>Status: All Systems Operational</p></body></html>", status_code=200)
+    return HTMLResponse(content="<html><body style='background:#0d1117;color:#00ff00;padding:50px;font-family:monospace;'><h1>HFT Paper Trading Online</h1></body></html>", status_code=200)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
