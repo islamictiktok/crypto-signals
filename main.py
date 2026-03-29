@@ -34,12 +34,12 @@ class Config:
     WEEX_SECRET_KEY = "263f6868f81b6d9dd4af394c6f07d8798b5d4ba220b42c1a598893acb95bbc12"
     WEEX_PASSPHRASE = "MOMOmax264"
     
-    TF_MICRO = '30m'  # فريم 30 دقيقة الذهبي
+    TF_MICRO = '30m'  
     MAX_TRADES_AT_ONCE = 5  
     
-    FIXED_MARGIN_USDT = 0.07  # مخاطرة 0.15 دولار
+    FIXED_MARGIN_USDT = 0.15  
     FIXED_LEVERAGE = 50        
-    RR_RATIO = 2.0  # الهدف ضعف الوقف                
+    RR_RATIO = 2.0                
     
     COOLDOWN_SECONDS = 3600   
     STATE_FILE = "bot_state.json"
@@ -57,7 +57,7 @@ class Config:
         "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
     ]
     
-    VERSION = "Holy Grail V12.0 (WEEX Precision Match)"
+    VERSION = "Holy Grail V14.0 (No Fear Edition)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -90,7 +90,7 @@ def linreg_tv(close, length=100, mult=2.0):
     return np.array(lr), np.array(upper), np.array(lower)
 
 # ==========================================
-# 3. محرك WEEX (مزود بنظام القواعد الدقيقة)
+# 3. محرك WEEX المتطور
 # ==========================================
 class WeexExecutor:
     def __init__(self):
@@ -98,7 +98,7 @@ class WeexExecutor:
         self.secret_key = Config.WEEX_SECRET_KEY
         self.passphrase = Config.WEEX_PASSPHRASE
         self.base_url = "https://api-contract.weex.com" 
-        self.rules = {}  # ⚠️ قاموس قواعد المنصة
+        self.rules = {}  
 
     def get_signature(self, timestamp, method, path, body_str):
         message = str(timestamp) + method.upper() + path + body_str
@@ -133,7 +133,6 @@ class WeexExecutor:
                 await asyncio.sleep(1)
         return None
 
-    # ⚠️ جلب قواعد المنصة وتخزينها
     async def fetch_exchange_rules(self):
         Log.print("📥 جاري جلب قواعد المنصة (Contract Sizes) من WEEX...", Log.YELLOW)
         res = await self.send_request("GET", "/capi/v3/market/exchangeInfo")
@@ -167,7 +166,7 @@ class WeexExecutor:
         await self.send_request("POST", "/capi/v3/account/leverage", leverage_payload)
         await asyncio.sleep(0.5)
 
-        Log.print(f"🛒 2. جاري فتح صفقة MARKET بكمية {size_str}...", Log.YELLOW)
+        Log.print(f"🛒 2. إرسال أوردر MARKET بكمية {size_str} (محاولة قتالية)...", Log.YELLOW)
         order_payload = {
             "symbol": symbol, "side": "BUY" if side == "LONG" else "SELL", "positionSide": side,
             "type": "MARKET", "quantity": size_str, "newClientOrderId": f"VIP_{int(time.time()*1000)}"
@@ -175,12 +174,11 @@ class WeexExecutor:
         order_res = await self.send_request("POST", "/capi/v3/order", order_payload)
         
         if not order_res or (not order_res.get('success') and order_res.get('code') != '00000'):
-            # طباعة الخطأ الفعلي من المنصة عشان لو في حاجة جديدة نفهمها
             error_msg = order_res.get('msg', 'Unknown Error') if order_res else 'No Response'
             Log.print(f"❌ فشل فتح الصفقة. السبب من WEEX: {error_msg}", Log.RED)
             return False, order_res, size_str, actual_margin
 
-        Log.print(f"✅ تم فتح الصفقة، جاري وضع الحماية...", Log.GREEN)
+        Log.print(f"✅ تم قبول الصفقة، جاري وضع الحماية...", Log.GREEN)
         await asyncio.sleep(1)
 
         tp_payload = {"symbol": symbol, "clientAlgoId": f"TP_{int(time.time()*1000)}", "planType": "TAKE_PROFIT", "triggerPrice": tp_price_str, "executePrice": tp_price_str, "quantity": size_str, "positionSide": side, "triggerPriceType": "MARK_PRICE"}
@@ -212,7 +210,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 5. محرك الاستراتيجية (Exact TV Match)
+# 5. محرك الاستراتيجية 
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -220,10 +218,9 @@ class StrategyEngine:
         setup = None
         try:
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            df = df[:-1] # إزالة الشمعة غير المكتملة
+            df = df[:-1] 
             
             df['ema200'] = ta.ema(df['close'], length=200)
-            
             lr, up, low = linreg_tv(df['close'].values)
             df['upper'] = up
             df['lower'] = low
@@ -237,65 +234,25 @@ class StrategyEngine:
             
             tol_factor = 0.001
             tol = curr['close'] * tol_factor
-            
             side = None
 
-            # SHORT LinReg
-            if (
-                touch['high'] >= (touch['upper'] - tol) and
-                touch['close'] < touch['upper'] and
-                confirm['close'] < confirm['upper'] and
-                curr['close'] < curr['upper'] and
-                curr['close'] < curr['ema200']
-            ):
-                side = "SHORT"
-                entry = curr['close']
-                sl = touch['high'] * 1.002
-                tp = entry - (sl - entry) * Config.RR_RATIO
+            if (touch['high'] >= (touch['upper'] - tol) and touch['close'] < touch['upper'] and confirm['close'] < confirm['upper'] and curr['close'] < curr['upper'] and curr['close'] < curr['ema200']):
+                side = "SHORT"; entry = curr['close']; sl = touch['high'] * 1.002; tp = entry - (sl - entry) * Config.RR_RATIO
+            elif (touch['high'] >= (touch['ema200'] - tol) and confirm['close'] < confirm['ema200']):
+                side = "SHORT"; entry = curr['close']; sl = touch['high'] * 1.002; tp = entry - (sl - entry) * Config.RR_RATIO
+            elif (touch['low'] <= (touch['lower'] + tol) and touch['close'] > touch['lower'] and confirm['close'] > confirm['lower'] and curr['close'] > curr['lower'] and curr['close'] > curr['ema200']):
+                side = "LONG"; entry = curr['close']; sl = touch['low'] * 0.998; tp = entry + (entry - sl) * Config.RR_RATIO
+            elif (touch['low'] <= (touch['ema200'] + tol) and confirm['close'] > confirm['ema200']):
+                side = "LONG"; entry = curr['close']; sl = touch['low'] * 0.998; tp = entry + (entry - sl) * Config.RR_RATIO
 
-            # SHORT EMA
-            elif (
-                touch['high'] >= (touch['ema200'] - tol) and
-                confirm['close'] < confirm['ema200']
-            ):
-                side = "SHORT"
-                entry = curr['close']
-                sl = touch['high'] * 1.002
-                tp = entry - (sl - entry) * Config.RR_RATIO
-
-            # LONG LinReg
-            elif (
-                touch['low'] <= (touch['lower'] + tol) and
-                touch['close'] > touch['lower'] and
-                confirm['close'] > confirm['lower'] and
-                curr['close'] > curr['lower'] and
-                curr['close'] > curr['ema200']
-            ):
-                side = "LONG"
-                entry = curr['close']
-                sl = touch['low'] * 0.998
-                tp = entry + (entry - sl) * Config.RR_RATIO
-
-            # LONG EMA
-            elif (
-                touch['low'] <= (touch['ema200'] + tol) and
-                confirm['close'] > confirm['ema200']
-            ):
-                side = "LONG"
-                entry = curr['close']
-                sl = touch['low'] * 0.998
-                tp = entry + (entry - sl) * Config.RR_RATIO
-
-            if side:
-                setup = {"side": side, "entry": entry, "sl": sl, "tp": tp}
-                
+            if side: setup = {"side": side, "entry": entry, "sl": sl, "tp": tp}
         except: pass
         finally:
             if 'df' in locals(): del df
         return setup
 
 # ==========================================
-# 6. المدير التنفيذي (نظام التقطير المنيع)
+# 6. المدير التنفيذي
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -307,18 +264,15 @@ class TradingSystem:
 
     async def initialize(self):
         await self.tg.start(); await self.mexc.load_markets()
-        
-        # ⚠️ جلب قواعد WEEX قبل أي شيء
         await self.weex.fetch_exchange_rules()
         
         for sym in Config.WHITELIST:
             base = sym[:-4] 
             mexc_sym = f"{base}/USDT:USDT"
-            if mexc_sym in self.mexc.markets:
-                self.mexc_symbols.append(mexc_sym)
+            if mexc_sym in self.mexc.markets: self.mexc_symbols.append(mexc_sym)
                 
         Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
-        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Coins\n🧠 <b>Strategy:</b> Holy Grail (30m LinReg TV)\n🛡️ <b>Rules:</b> Dynamic WEEX Precision\n🏦 <b>Balance Check:</b> ACTIVE")
+        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Coins\n⚔️ <b>Mode:</b> No Fear (Forced Orders)")
 
     def save_state(self):
         try:
@@ -331,10 +285,8 @@ class TradingSystem:
         data = res.get('data') if isinstance(res, dict) and 'data' in res else res
         if isinstance(data, list):
             for item in data:
-                if item.get('asset') == 'USDT':
-                    return float(item.get('availableBalance', 0))
-        if isinstance(res, dict) and res.get('asset') == 'USDT':
-            return float(res.get('availableBalance', 0))
+                if item.get('asset') == 'USDT': return float(item.get('availableBalance', 0))
+        if isinstance(res, dict) and res.get('asset') == 'USDT': return float(res.get('availableBalance', 0))
         return None
 
     async def execute_trade(self, symbol, setup):
@@ -342,30 +294,31 @@ class TradingSystem:
         Log.print(f"💡 إشارة {setup['side']} على {symbol}!", Log.GREEN)
         clean_name = symbol.split(':')[0].replace('/', '')
         
-        # ⚠️ النظام الذكي لحساب الكميات والكسور بناءً على قواعد WEEX
         rule = self.weex.rules.get(clean_name)
         if not rule:
-            Log.print(f"⚠️ لا توجد قواعد مسجلة لعملة {clean_name}، سيتم تجاهل الإشارة لحماية الحساب.", Log.YELLOW)
+            Log.print(f"⚠️ لا توجد قواعد مسجلة لعملة {clean_name}، تجاهل.", Log.YELLOW)
             return
 
+        # ⚔️ الهجوم الإجباري بالحد الأدنى
         raw_size = (Config.FIXED_MARGIN_USDT * Config.FIXED_LEVERAGE) / setup['entry']
-        
         if raw_size < rule['min_qty']:
-            Log.print(f"⏭️ تخطي {clean_name}: الكمية المحسوبة ({raw_size}) أقل من الحد الأدنى لـ WEEX ({rule['min_qty']}).", Log.YELLOW)
-            return
+            raw_size = rule['min_qty']
+            Log.print(f"⚔️ إجبار الكمية لـ {clean_name} إلى الحد الأدنى ({raw_size}).", Log.YELLOW)
 
         q_prec = rule['qty_prec']
         p_prec = rule['price_prec']
 
-        # تقريب الكمية بقطع الكسور الزائدة (Floor) لتجنب نقص الرصيد
         factor_q = 10 ** q_prec
-        final_size = math.floor(raw_size * factor_q) / factor_q
+        final_size = math.ceil(raw_size * factor_q) / factor_q
+        
+        if final_size < rule['min_qty']: final_size = rule['min_qty']
+            
         size_str = f"{final_size:.{q_prec}f}"
+        actual_margin = (final_size * setup['entry']) / Config.FIXED_LEVERAGE
         
         tp_str = f"{setup['tp']:.{p_prec}f}"
         sl_str = f"{setup['sl']:.{p_prec}f}"
         entry_str = f"{setup['entry']:.{p_prec}f}"
-        actual_margin = (final_size * setup['entry']) / Config.FIXED_LEVERAGE
         
         success, response, final_size_str, margin_used = await self.weex.execute_full_flow(
             symbol=clean_name, side=setup['side'], size_str=size_str, 
@@ -381,11 +334,11 @@ class TradingSystem:
                 f"⚡ <b>Side:</b> {setup['side']}\n"
                 f"🛒 <b>Entry:</b> <code>{entry_str}</code>\n"
                 f"⚖️ <b>Lev:</b> {Config.FIXED_LEVERAGE}x\n"
+                f"💰 <b>Margin Used:</b> <code>${margin_used:.2f}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🎯 <b>Target:</b> <code>{tp_str}</code> (1:2)\n"
                 f"🛑 <b>Stop:</b> <code>{sl_str}</code>\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"🛡️ <i>API: Order Placed Successfully</i>"
+                f"━━━━━━━━━━━━━━━"
             )
             msg_id = await self.tg.send(msg)
             if msg_id:
@@ -420,8 +373,8 @@ class TradingSystem:
                 balance = await self.check_weex_balance()
                 
                 if balance is not None:
-                    if balance < Config.FIXED_MARGIN_USDT:
-                        Log.print(f"⏳ الرصيد المتاح ({balance:.4f} USDT) غير كافٍ. سيتم الانتظار 5 دقائق...", Log.YELLOW)
+                    if balance <= 0.02: # ⚔️ تخفيض حاجز الإيقاف لمستوى الصفر تقريباً
+                        Log.print(f"⏳ الرصيد فارغ تقريباً ({balance:.4f} USDT). سيتم الانتظار...", Log.YELLOW)
                         await asyncio.sleep(300)
                         continue
                 else:
@@ -433,7 +386,7 @@ class TradingSystem:
                 del tickers 
 
                 if valid: 
-                    Log.print(f"🏦 الرصيد: {balance:.2f}$ | تحليل {len(valid)} عملة (Holy Grail - 30m)...")
+                    Log.print(f"🏦 الرصيد اللحظي: {balance:.2f}$ | تحليل {len(valid)} عملة (No Fear Mode)...")
                 
                 for sym in valid:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
@@ -442,8 +395,7 @@ class TradingSystem:
                         setup = await asyncio.to_thread(StrategyEngine.analyze, ohlcv)
                         if setup: 
                             await self.execute_trade(sym, setup)
-                    except Exception:
-                        pass
+                    except Exception: pass
                     finally:
                         if 'ohlcv' in locals(): del ohlcv
                         if 'setup' in locals(): del setup
@@ -452,7 +404,7 @@ class TradingSystem:
                 gc.collect() 
                 await asyncio.sleep(15) 
             except Exception as e: 
-                Log.print(f"❌ خطأ عام: {str(e)}", Log.RED)
+                Log.print(f"❌ خطأ عام: {str(e)}\n{traceback.format_exc()}", Log.RED)
                 await asyncio.sleep(10)
 
 async def keep_alive_pinger():
@@ -462,8 +414,7 @@ async def keep_alive_pinger():
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 url = f"http://127.0.0.1:{os.environ.get('PORT', 10000)}/ping"
-                async with session.get(url) as resp:
-                    pass
+                async with session.get(url) as resp: pass
         except: pass
 
 bot = TradingSystem()
@@ -478,12 +429,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/ping")
-async def ping(): 
-    return JSONResponse(content={"status": "online", "message": "PONG", "time": time.time()})
+async def ping(): return JSONResponse(content={"status": "online", "message": "PONG", "time": time.time()})
 
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
 async def catch_all(path_name: str):
-    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#00ff00;padding:50px;font-family:monospace;'><h1>VIP FORTS {Config.VERSION}</h1><p>Status: All Systems Operational (200 OK)</p></body></html>", status_code=200)
+    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#00ff00;padding:50px;font-family:monospace;'><h1>VIP FORTS {Config.VERSION}</h1><p>Status: All Systems Operational</p></body></html>", status_code=200)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
