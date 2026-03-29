@@ -34,7 +34,7 @@ class Config:
     WEEX_SECRET_KEY = "263f6868f81b6d9dd4af394c6f07d8798b5d4ba220b42c1a598893acb95bbc12"
     WEEX_PASSPHRASE = "MOMOmax264"
     
-    TF_MICRO = '30m'  # ⚠️ فريم 30 دقيقة الذهبي
+    TF_MICRO = '30m'  # فريم 30 دقيقة الذهبي
     MAX_TRADES_AT_ONCE = 5  
     
     FIXED_MARGIN_USDT = 0.15  # مخاطرة 0.15 دولار
@@ -57,7 +57,7 @@ class Config:
         "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
     ]
     
-    VERSION = "Holy Grail V11.0 (Exact 30m TV Match)"
+    VERSION = "Holy Grail V12.0 (WEEX Precision Match)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -67,7 +67,7 @@ class Log:
         print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
 
 # =========================================
-# 2. Linear Regression (دالة محمد الذهبية المطابقة لـ TV)
+# 2. Linear Regression (مطابق TV)
 # =========================================
 def linreg_tv(close, length=100, mult=2.0):
     lr, upper, lower = [], [], []
@@ -90,7 +90,7 @@ def linreg_tv(close, length=100, mult=2.0):
     return np.array(lr), np.array(upper), np.array(lower)
 
 # ==========================================
-# 3. محرك WEEX المتطور
+# 3. محرك WEEX (مزود بنظام القواعد الدقيقة)
 # ==========================================
 class WeexExecutor:
     def __init__(self):
@@ -98,6 +98,7 @@ class WeexExecutor:
         self.secret_key = Config.WEEX_SECRET_KEY
         self.passphrase = Config.WEEX_PASSPHRASE
         self.base_url = "https://api-contract.weex.com" 
+        self.rules = {}  # ⚠️ قاموس قواعد المنصة
 
     def get_signature(self, timestamp, method, path, body_str):
         message = str(timestamp) + method.upper() + path + body_str
@@ -132,7 +133,27 @@ class WeexExecutor:
                 await asyncio.sleep(1)
         return None
 
-    async def execute_full_flow(self, symbol, side, size, sl_price_str, tp_price_str, entry_price):
+    # ⚠️ جلب قواعد المنصة وتخزينها
+    async def fetch_exchange_rules(self):
+        Log.print("📥 جاري جلب قواعد المنصة (Contract Sizes) من WEEX...", Log.YELLOW)
+        res = await self.send_request("GET", "/capi/v3/market/exchangeInfo")
+        if res and 'data' in res and 'symbols' in res['data']:
+            symbols_data = res['data']['symbols']
+        elif res and 'symbols' in res:
+            symbols_data = res['symbols']
+        else:
+            Log.print("❌ فشل جلب القواعد، سنعتمد على التقريب الافتراضي.", Log.RED)
+            return
+
+        for sym in symbols_data:
+            self.rules[sym['symbol']] = {
+                'qty_prec': int(sym.get('quantityPrecision', 4)),
+                'price_prec': int(sym.get('pricePrecision', 4)),
+                'min_qty': float(sym.get('minOrderSize', 0.0001))
+            }
+        Log.print(f"✅ تم تحميل قواعد {len(self.rules)} عملة بنجاح.", Log.GREEN)
+
+    async def execute_full_flow(self, symbol, side, size_str, sl_price_str, tp_price_str, actual_margin):
         Log.print(f"=========================================", Log.BLUE)
         Log.print(f"🚀 بدء التنفيذ لعملة {symbol} ({side})", Log.BLUE)
         
@@ -146,49 +167,31 @@ class WeexExecutor:
         await self.send_request("POST", "/capi/v3/account/leverage", leverage_payload)
         await asyncio.sleep(0.5)
 
-        Log.print(f"🛒 2. جاري فتح صفقة MARKET بكمية {size}...", Log.YELLOW)
+        Log.print(f"🛒 2. جاري فتح صفقة MARKET بكمية {size_str}...", Log.YELLOW)
         order_payload = {
             "symbol": symbol, "side": "BUY" if side == "LONG" else "SELL", "positionSide": side,
-            "type": "MARKET", "quantity": str(size), "newClientOrderId": f"VIP_{int(time.time()*1000)}"
+            "type": "MARKET", "quantity": size_str, "newClientOrderId": f"VIP_{int(time.time()*1000)}"
         }
         order_res = await self.send_request("POST", "/capi/v3/order", order_payload)
-
-        actual_margin = (float(size) * entry_price) / Config.FIXED_LEVERAGE
-
-        if order_res and order_res.get('code') == -1054:
-            msg_str = order_res.get('msg', '')
-            match = re.search(r"stepSize '([0-9.]+)' requirement", msg_str)
-            if match:
-                step_size = float(match.group(1))
-                new_size = math.floor(float(size) / step_size) * step_size
-                if new_size <= 0:
-                    Log.print(f"❌ الحد الأدنى لعملة {symbol} يتطلب هامش أعلى من المسموح. تم الإلغاء.", Log.RED)
-                    return False, order_res, size, actual_margin
-
-                actual_margin = (new_size * entry_price) / Config.FIXED_LEVERAGE
-                new_size_str = str(int(new_size)) if step_size.is_integer() or step_size >= 1 else f"{new_size:.{len(str(step_size).split('.')[1])}f}"
-
-                Log.print(f"♻️ تم التعديل الصارم للكمية إلى {new_size_str}...", Log.YELLOW)
-                order_payload['quantity'] = new_size_str
-                order_res = await self.send_request("POST", "/capi/v3/order", order_payload)
-                size = new_size_str
         
         if not order_res or (not order_res.get('success') and order_res.get('code') != '00000'):
-            Log.print(f"❌ فشل فتح الصفقة.", Log.RED)
-            return False, order_res, size, actual_margin
+            # طباعة الخطأ الفعلي من المنصة عشان لو في حاجة جديدة نفهمها
+            error_msg = order_res.get('msg', 'Unknown Error') if order_res else 'No Response'
+            Log.print(f"❌ فشل فتح الصفقة. السبب من WEEX: {error_msg}", Log.RED)
+            return False, order_res, size_str, actual_margin
 
         Log.print(f"✅ تم فتح الصفقة، جاري وضع الحماية...", Log.GREEN)
         await asyncio.sleep(1)
 
-        tp_payload = {"symbol": symbol, "clientAlgoId": f"TP_{int(time.time()*1000)}", "planType": "TAKE_PROFIT", "triggerPrice": tp_price_str, "executePrice": tp_price_str, "quantity": str(size), "positionSide": side, "triggerPriceType": "MARK_PRICE"}
+        tp_payload = {"symbol": symbol, "clientAlgoId": f"TP_{int(time.time()*1000)}", "planType": "TAKE_PROFIT", "triggerPrice": tp_price_str, "executePrice": tp_price_str, "quantity": size_str, "positionSide": side, "triggerPriceType": "MARK_PRICE"}
         await self.send_request("POST", "/capi/v3/placeTpSlOrder", tp_payload)
         await asyncio.sleep(0.5)
 
-        sl_payload = {"symbol": symbol, "clientAlgoId": f"SL_{int(time.time()*1000)}", "planType": "STOP_LOSS", "triggerPrice": sl_price_str, "executePrice": sl_price_str, "quantity": str(size), "positionSide": side, "triggerPriceType": "MARK_PRICE"}
+        sl_payload = {"symbol": symbol, "clientAlgoId": f"SL_{int(time.time()*1000)}", "planType": "STOP_LOSS", "triggerPrice": sl_price_str, "executePrice": sl_price_str, "quantity": size_str, "positionSide": side, "triggerPriceType": "MARK_PRICE"}
         await self.send_request("POST", "/capi/v3/placeTpSlOrder", sl_payload)
 
         Log.print(f"✅✅ تمت الدورة بنجاح لعملة {symbol}!", Log.GREEN)
-        return True, "Success", size, actual_margin
+        return True, "Success", size_str, actual_margin
 
 # ==========================================
 # 4. نظام الإشعارات
@@ -209,7 +212,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 5. محرك الاستراتيجية (تطبيق كود الباك تست الحرفي)
+# 5. محرك الاستراتيجية (Exact TV Match)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -217,9 +220,7 @@ class StrategyEngine:
         setup = None
         try:
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            
-            # ⚠️ إزالة الشمعة الجارية لضمان إغلاق الشموع تماماً كما في الباك تست
-            df = df[:-1]
+            df = df[:-1] # إزالة الشمعة غير المكتملة
             
             df['ema200'] = ta.ema(df['close'], length=200)
             
@@ -230,7 +231,6 @@ class StrategyEngine:
             df.dropna(inplace=True)
             if len(df) < 3: return setup 
             
-            # الشموع المطلوبة بدقة بناءً على الكود الخاص بك
             touch = df.iloc[-3]
             confirm = df.iloc[-2]
             curr = df.iloc[-1]
@@ -289,14 +289,13 @@ class StrategyEngine:
             if side:
                 setup = {"side": side, "entry": entry, "sl": sl, "tp": tp}
                 
-        except: 
-            pass
+        except: pass
         finally:
             if 'df' in locals(): del df
         return setup
 
 # ==========================================
-# 6. المدير التنفيذي (النظام المالي والتقطير المنيع)
+# 6. المدير التنفيذي (نظام التقطير المنيع)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -309,6 +308,9 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start(); await self.mexc.load_markets()
         
+        # ⚠️ جلب قواعد WEEX قبل أي شيء
+        await self.weex.fetch_exchange_rules()
+        
         for sym in Config.WHITELIST:
             base = sym[:-4] 
             mexc_sym = f"{base}/USDT:USDT"
@@ -316,7 +318,7 @@ class TradingSystem:
                 self.mexc_symbols.append(mexc_sym)
                 
         Log.print(f"🚀 VIP ENGINE {Config.VERSION} STARTED", Log.GREEN)
-        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Coins\n🧠 <b>Strategy:</b> Holy Grail (30m LinReg TV)\n🏦 <b>Balance Check:</b> ACTIVE\n🛡️ <b>Anti-Crash:</b> ACTIVE")
+        await self.tg.send(f"⚡ <b>VIP ENGINE {Config.VERSION} ONLINE</b>\n━━━━━━━━━━━━━━━\n💎 <b>Targets:</b> {len(self.mexc_symbols)} Coins\n🧠 <b>Strategy:</b> Holy Grail (30m LinReg TV)\n🛡️ <b>Rules:</b> Dynamic WEEX Precision\n🏦 <b>Balance Check:</b> ACTIVE")
 
     def save_state(self):
         try:
@@ -340,22 +342,34 @@ class TradingSystem:
         Log.print(f"💡 إشارة {setup['side']} على {symbol}!", Log.GREEN)
         clean_name = symbol.split(':')[0].replace('/', '')
         
+        # ⚠️ النظام الذكي لحساب الكميات والكسور بناءً على قواعد WEEX
+        rule = self.weex.rules.get(clean_name)
+        if not rule:
+            Log.print(f"⚠️ لا توجد قواعد مسجلة لعملة {clean_name}، سيتم تجاهل الإشارة لحماية الحساب.", Log.YELLOW)
+            return
+
         raw_size = (Config.FIXED_MARGIN_USDT * Config.FIXED_LEVERAGE) / setup['entry']
-        try: size = self.mexc.amount_to_precision(symbol, raw_size)
-        except: size = f"{raw_size:.4f}"
         
-        try:
-            clean_tp_str = self.mexc.price_to_precision(symbol, setup['tp'])
-            clean_sl_str = self.mexc.price_to_precision(symbol, setup['sl'])
-            clean_entry_str = self.mexc.price_to_precision(symbol, setup['entry'])
-        except:
-            clean_tp_str = f"{setup['tp']:.4f}".rstrip('0').rstrip('.')
-            clean_sl_str = f"{setup['sl']:.4f}".rstrip('0').rstrip('.')
-            clean_entry_str = f"{setup['entry']:.4f}".rstrip('0').rstrip('.')
+        if raw_size < rule['min_qty']:
+            Log.print(f"⏭️ تخطي {clean_name}: الكمية المحسوبة ({raw_size}) أقل من الحد الأدنى لـ WEEX ({rule['min_qty']}).", Log.YELLOW)
+            return
+
+        q_prec = rule['qty_prec']
+        p_prec = rule['price_prec']
+
+        # تقريب الكمية بقطع الكسور الزائدة (Floor) لتجنب نقص الرصيد
+        factor_q = 10 ** q_prec
+        final_size = math.floor(raw_size * factor_q) / factor_q
+        size_str = f"{final_size:.{q_prec}f}"
         
-        success, response, final_size, actual_margin = await self.weex.execute_full_flow(
-            symbol=clean_name, side=setup['side'], size=size, 
-            sl_price_str=clean_sl_str, tp_price_str=clean_tp_str, entry_price=setup['entry']
+        tp_str = f"{setup['tp']:.{p_prec}f}"
+        sl_str = f"{setup['sl']:.{p_prec}f}"
+        entry_str = f"{setup['entry']:.{p_prec}f}"
+        actual_margin = (final_size * setup['entry']) / Config.FIXED_LEVERAGE
+        
+        success, response, final_size_str, margin_used = await self.weex.execute_full_flow(
+            symbol=clean_name, side=setup['side'], size_str=size_str, 
+            sl_price_str=sl_str, tp_price_str=tp_str, actual_margin=actual_margin
         )
         
         if success:
@@ -365,17 +379,17 @@ class TradingSystem:
                 f"━━━━━━━━━━━━━━━\n"
                 f"🪙 <b>Coin:</b> <code>{clean_name}</code>\n"
                 f"⚡ <b>Side:</b> {setup['side']}\n"
-                f"🛒 <b>Entry:</b> <code>{clean_entry_str}</code>\n"
+                f"🛒 <b>Entry:</b> <code>{entry_str}</code>\n"
                 f"⚖️ <b>Lev:</b> {Config.FIXED_LEVERAGE}x\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🎯 <b>Target:</b> <code>{clean_tp_str}</code> (1:2)\n"
-                f"🛑 <b>Stop:</b> <code>{clean_sl_str}</code>\n"
+                f"🎯 <b>Target:</b> <code>{tp_str}</code> (1:2)\n"
+                f"🛑 <b>Stop:</b> <code>{sl_str}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🛡️ <i>API: Order Placed Successfully</i>"
             )
             msg_id = await self.tg.send(msg)
             if msg_id:
-                self.active_trades[symbol] = {**setup, "msg_id": msg_id, "size": final_size, "margin": actual_margin}
+                self.active_trades[symbol] = {**setup, "msg_id": msg_id, "size": final_size_str, "margin": margin_used}
                 self.stats["signals"] += 1; self.cooldown[symbol] = time.time(); self.save_state()
 
     async def monitor(self):
