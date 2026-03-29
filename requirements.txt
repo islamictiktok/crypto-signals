@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-pandas
-pandas-ta
-ccxt
+websockets
 aiohttp
+nest-asyncio
