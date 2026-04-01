@@ -12,7 +12,7 @@ import uvicorn
 from contextlib import asynccontextmanager
 
 # ==========================================
-# 1. الإعدادات الإحصائية (Statistical HFT Config)
+# 1. إعدادات خوارزمية المومنتوم (Momentum HFT Config)
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
@@ -23,20 +23,21 @@ class Config:
     MARGIN_USDT = 0.15          
     LEVERAGE = 50               
     
-    # رسوم المنصة الحقيقية
     MAKER_FEE = 0.0002          
     TAKER_FEE = 0.0006          
     
-    # ⚠️ الفلاتر الإحصائية اللحظية (The Math)
-    MAX_TRADES_MEMORY = 1500    # حجم العينة الإحصائية
-    Z_SCORE_ENTRY = 2.0         # الدخول عند 2 انحراف معياري (شذوذ بنسبة 95%)
+    # ⚠️ إعدادات الزخم (Momentum Logic)
+    MAX_TRADES_MEMORY = 2000    # عينة أكبر لفلترة الضوضاء
+    MIN_CVD_DOMINANCE = 65.0    # يجب أن يكون حجم الشراء الفعلي 65% من السوق
+    MIN_IMBALANCE = 60.0        # جدار الدعم في الدفتر
+    BAILOUT_IMBALANCE = 35.0    # الهروب لو الجدار انهار
     
-    # ⚠️ فلاتر السيولة (Order Flow)
-    CVD_DOMINANCE = 65.0        # سيطرة الصفقات المطلوبة
-    MIN_IMBALANCE = 65.0        # جدار الدفتر المطلوب للدخول
-    BAILOUT_IMBALANCE = 40.0    # نسبة الجدار التي تسبب الهروب الفوري (Micro-Bailout)
+    # ⚠️ الوقف المتحرك (Trailing Stop) 
+    ACTIVATION_PCT = 0.002      # تفعيل الوقف المتحرك بعد ربح 0.2%
+    TRAIL_PCT = 0.0015          # مسافة الوقف المتحرك (0.15%)
+    HARD_SL_PCT = 0.0025        # الستوب الأساسي (0.25%) لحماية رأس المال
     
-    STATE_FILE = "stat_hft_state.json"
+    STATE_FILE = "momentum_hft_state.json"
 
 # ==========================================
 # 2. نظام التليجرام
@@ -46,247 +47,226 @@ class TelegramNotifier:
         self.url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
         self.session = None
         
-    async def start(self): self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
+    async def start(self): 
+        if not self.session: self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5))
     async def stop(self): 
         if self.session: await self.session.close()
         
     async def send(self, text):
         if not self.session: return
-        payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML"}
-        try:
-            async with self.session.post(self.url, json=payload) as resp: await resp.json()
+        try: await self.session.post(self.url, json={"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML"})
         except: pass
 
 tg = TelegramNotifier()
 
 # ==========================================
-# 3. الوسيط الإحصائي (Smart Broker)
+# 3. الوسيط الذكي (Momentum Broker with Trailing)
 # ==========================================
-class SmartBroker:
+class MomentumBroker:
     def __init__(self):
         self.equity = Config.STARTING_EQUITY
         self.wins = 0; self.losses = 0; self.trades = 0
         self.pending_order = None   
         self.active_position = None 
         self.cooldown_until = 0
+        self.rule = {'qty_prec': 4, 'min_qty': 0.0001} 
+        self.load_state()
 
-    async def place_limit_order(self, side, price, vwap, std_dev, cvd_dom):
-        if self.pending_order or self.active_position or time.time() < self.cooldown_until: return
+    def save_state(self):
+        try:
+            with open(Config.STATE_FILE, "w") as f:
+                json.dump({"equity": self.equity, "wins": self.wins, "losses": self.losses}, f)
+        except: pass
 
-        size = (Config.MARGIN_USDT * Config.LEVERAGE) / price
-        self.pending_order = {"side": side, "price": price, "size": size, "time": time.time(), "vwap": vwap}
+    def load_state(self):
+        if os.path.exists(Config.STATE_FILE):
+            try:
+                with open(Config.STATE_FILE, "r") as f:
+                    data = json.load(f)
+                    self.equity = data.get("equity", Config.STARTING_EQUITY)
+                    self.wins = data.get("wins", 0); self.losses = data.get("losses", 0)
+                    self.trades = self.wins + self.losses
+            except: pass
+
+    async def fetch_rules(self):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://api-contract.weex.com/capi/v3/market/exchangeInfo") as resp:
+                    res = await resp.json()
+                    symbols = res.get('data', {}).get('symbols', []) if 'data' in res else res.get('symbols', [])
+                    for sym in symbols:
+                        if sym['symbol'] == Config.SYMBOL:
+                            self.rule['qty_prec'] = int(sym.get('quantityPrecision', 4))
+                            self.rule['min_qty'] = float(sym.get('minOrderSize', 0.0001))
+        except: pass
+
+    async def place_order(self, side, price):
+        if self.active_position or time.time() < self.cooldown_until: return
+        raw_size = (Config.MARGIN_USDT * Config.LEVERAGE) / price
+        final_size = max(self.rule['min_qty'], round(raw_size, self.rule['qty_prec']))
         
-        icon = "🟢" if side == "LONG" else "🔴"
-        print(f"\n{icon} [STAT-SNIPER] وضع فخ LIMIT {side} @ {price:.2f} | σ(StdDev): {std_dev:.2f} | CVD: {cvd_dom:.1f}%")
+        # الدخول الماركت لضمان ركوب الموجة (الزخم لا ينتظر)
+        self.active_position = {
+            "side": side, "entry": price, "size": final_size, 
+            "highest": price, "lowest": price, "trailing_active": False
+        }
+        
+        icon = "🚀" if side == "LONG" else "☄️"
+        print(f"\n{icon} [MOMENTUM] دخول MARKET {side} @ {price:.2f} | Size: {final_size}")
 
-    async def force_close_position(self, last_price, reason):
-        """هروب ذكي فوري ماركت عند زوال السيولة أو تحقيق التوازن"""
+    async def close_position(self, last_price, reason):
         if not self.active_position: return
-        
         ap = self.active_position
         price_diff_pct = abs(last_price - ap["entry"]) / ap["entry"]
         
-        # خصم رسوم صانع سوق (دخول LIMIT) ورسوم Taker (خروج ماركت للهروب)
-        fee_penalty = (ap["size"] * last_price) * (Config.MAKER_FEE + Config.TAKER_FEE)
+        # خصم رسوم Taker كاملة لأن الدخول والخروج ماركت لضمان السرعة
+        fee_penalty = (ap["size"] * last_price) * (Config.TAKER_FEE * 2)
+        win = (ap["side"] == "LONG" and last_price > ap["entry"]) or (ap["side"] == "SHORT" and last_price < ap["entry"])
         
-        win = False
-        if ap["side"] == "LONG" and last_price > ap["entry"]: win = True
-        elif ap["side"] == "SHORT" and last_price < ap["entry"]: win = True
-
         pnl = (ap["size"] * last_price * price_diff_pct) - fee_penalty if win else -(ap["size"] * last_price * price_diff_pct) - fee_penalty
         
         self.equity += pnl
         if pnl > 0: self.wins += 1
         else: self.losses += 1
         self.trades += 1
+        self.save_state()
         
-        winrate = (self.wins / self.trades) * 100
-        icon = "⚡🏆" if pnl > 0 else "⚡🛑"
+        winrate = (self.wins / self.trades) * 100 if self.trades > 0 else 0
+        icon = "🏆" if pnl > 0 else "🛑"
         
-        msg = (f"{icon} <b>SMART EXIT: {reason}</b>\n"
+        msg = (f"{icon} <b>EXIT: {reason}</b>\n"
                f"💵 <b>PnL (Net):</b> ${pnl:+.4f}\n"
                f"🏦 <b>Equity:</b> ${self.equity:.4f}\n"
                f"📈 <b>Win Rate:</b> {winrate:.1f}%")
-        print(f"\n{msg}\n⏳ تبريد إستراتيجي 10 ثواني...\n")
         await tg.send(msg)
-        
+        print(f"\n{msg}\n⏳ تبريد 10 ثواني...")
         self.active_position = None
         self.cooldown_until = time.time() + 10
 
-    async def check_fills_and_exits(self, best_bid, best_ask, last_price, bid_imb, vwap):
-        # 1. فحص تنفيذ الفخاخ
-        if self.pending_order:
-            po = self.pending_order
-            if po["side"] == "LONG" and last_price <= po["price"]:
-                self.active_position = {"side": "LONG", "entry": po["price"], "size": po["size"]}
-                self.pending_order = None
-                print(f"✅ [FILLED] LONG @ {po['price']:.2f}")
-                
-            elif po["side"] == "SHORT" and last_price >= po["price"]:
-                self.active_position = {"side": "SHORT", "entry": po["price"], "size": po["size"]}
-                self.pending_order = None
-                print(f"✅ [FILLED] SHORT @ {po['price']:.2f}")
+    async def monitor_trailing_stop(self, last_price, bid_imb):
+        if not self.active_position: return
+        ap = self.active_position
+        
+        # 1. تحديث القمم والقيعان للـ Trailing Stop
+        if ap["side"] == "LONG":
+            if last_price > ap["highest"]: ap["highest"] = last_price
+            # تفعيل الوقف المتحرك لو الربح تخطى نقطة التفعيل
+            if last_price >= ap["entry"] * (1 + Config.ACTIVATION_PCT):
+                ap["trailing_active"] = True
+        else:
+            if last_price < ap["lowest"]: ap["lowest"] = last_price
+            if last_price <= ap["entry"] * (1 - Config.ACTIVATION_PCT):
+                ap["trailing_active"] = True
 
-            elif time.time() - po["time"] > 8:
-                self.pending_order = None
-                self.cooldown_until = time.time() + 2
+        # 2. فحص ضرب الـ Trailing Stop
+        if ap["trailing_active"]:
+            if ap["side"] == "LONG" and last_price <= ap["highest"] * (1 - Config.TRAIL_PCT):
+                await self.close_position(last_price, "Trailing Stop Hit (Secured Profit)")
+                return
+            elif ap["side"] == "SHORT" and last_price >= ap["lowest"] * (1 + Config.TRAIL_PCT):
+                await self.close_position(last_price, "Trailing Stop Hit (Secured Profit)")
+                return
 
-        # 2. فحص الخروج الذكي (الميزة النووية الجديدة)
-        if self.active_position:
-            ap = self.active_position
-            
-            # أ. الهروب بسبب اختفاء جدار السيولة (Micro-Bailout)
-            if ap["side"] == "LONG" and bid_imb < Config.BAILOUT_IMBALANCE:
-                await self.force_close_position(last_price, "Wall Collapsed (Bailout)")
-                return
-            elif ap["side"] == "SHORT" and (100 - bid_imb) < Config.BAILOUT_IMBALANCE:
-                await self.force_close_position(last_price, "Wall Collapsed (Bailout)")
-                return
-                
-            # ب. جني الأرباح الإحصائي (العودة لخط الـ VWAP العادل)
-            if ap["side"] == "LONG" and last_price >= vwap:
-                await self.force_close_position(last_price, "Mean Reverted (VWAP Hit)")
-                return
-            elif ap["side"] == "SHORT" and last_price <= vwap:
-                await self.force_close_position(last_price, "Mean Reverted (VWAP Hit)")
-                return
-                
-            # ج. الستوب لوز النهائي للطوارئ القصوى (0.3% كحماية للرصيد)
-            price_diff = abs(last_price - ap["entry"]) / ap["entry"]
-            if price_diff >= 0.003:
-                if ap["side"] == "LONG" and last_price < ap["entry"]:
-                    await self.force_close_position(last_price, "Emergency Hard SL")
-                elif ap["side"] == "SHORT" and last_price > ap["entry"]:
-                    await self.force_close_position(last_price, "Emergency Hard SL")
+        # 3. فحص ضرب الستوب لوز الأساسي (Hard SL)
+        if ap["side"] == "LONG" and last_price <= ap["entry"] * (1 - Config.HARD_SL_PCT):
+            await self.close_position(last_price, "Hard SL Hit")
+            return
+        elif ap["side"] == "SHORT" and last_price >= ap["entry"] * (1 + Config.HARD_SL_PCT):
+            await self.close_position(last_price, "Hard SL Hit")
+            return
 
-broker = SmartBroker()
+        # 4. الهروب التكتيكي لو الدفتر انهار
+        if (ap["side"] == "LONG" and bid_imb < Config.BAILOUT_IMBALANCE) or \
+           (ap["side"] == "SHORT" and (100 - bid_imb) < Config.BAILOUT_IMBALANCE):
+            await self.close_position(last_price, "Orderbook Wall Collapsed (Bailout)")
+
+broker = MomentumBroker()
 
 # ==========================================
-# 4. محرك الرياضيات اللحظية (Statistical Engine)
+# 4. محرك الزخم (Momentum Flow Logic)
 # ==========================================
-market = {"last_price": 0.0, "best_bid": 0.0, "best_ask": 0.0, "bid_vol": 0.0, "ask_vol": 0.0}
+market = {"last_price": 0.0, "bid_vol": 0.0, "ask_vol": 0.0}
 recent_trades = deque(maxlen=Config.MAX_TRADES_MEMORY) 
 
-async def run_statistical_logic():
+async def run_momentum_logic():
     if len(recent_trades) < 500: return
     
-    # حساب سريع بـ Native Python (O(N) Optimization)
-    total_vol = 0.0
-    vol_price_product = 0.0
-    buy_vol = 0.0
-    sell_vol = 0.0
-    
-    for t in recent_trades:
-        v = t['qty']
-        p = t['price']
-        total_vol += v
-        vol_price_product += (p * v)
-        if t['is_sell']: sell_vol += v
-        else: buy_vol += v
-
+    total_vol = sum(t['qty'] for t in recent_trades)
     if total_vol == 0: return
+    vwap = sum(t['price'] * t['qty'] for t in recent_trades) / total_vol
     
-    # 1. حساب الـ Micro-VWAP
-    vwap = vol_price_product / total_vol
-    
-    # 2. حساب التباين والانحراف المعياري بدقة (Variance & StdDev)
-    variance_sum = 0.0
-    for t in recent_trades:
-        variance_sum += t['qty'] * ((t['price'] - vwap) ** 2)
-    std_dev = math.sqrt(variance_sum / total_vol)
-    
-    # 3. حساب سيطرة المشترين والسيولة
-    buy_dominance = (buy_vol / total_vol) * 100
-    sell_dominance = (sell_vol / total_vol) * 100
+    buy_vol = sum(t['qty'] for t in recent_trades if not t['is_sell'])
+    buy_dom = (buy_vol / total_vol) * 100
     
     depth_vol = market["bid_vol"] + market["ask_vol"]
     bid_imb = (market["bid_vol"] / depth_vol) * 100 if depth_vol > 0 else 50
     
     if market["last_price"] > 0:
-        # فحص التنفيذ والخروج الذكي باستمرار
-        await broker.check_fills_and_exits(market["best_bid"], market["best_ask"], market["last_price"], bid_imb, vwap)
-
-        if broker.position is not None: return
+        await broker.monitor_trailing_stop(market["last_price"], bid_imb)
         
-        # طباعة الرادار المخفف
-        if int(time.time() * 10) % 5 == 0: # تحديث الشاشة كل نصف ثانية
-            print(f"[{time.strftime('%H:%M:%S')}] P: {market['last_price']:.1f} | VWAP: {vwap:.1f} | σ: {std_dev:.1f} | Buys: {buy_dominance:.1f}%", end="\r")
+        if broker.active_position: return
+        
+        if int(time.time() * 10) % 5 == 0:
+            print(f"[{time.strftime('%H:%M:%S')}] P: {market['last_price']:.1f} | VWAP: {vwap:.1f} | Buys: {buy_dom:.1f}%", end="\r")
 
-        # 🔫 شروط القنص الإحصائية (Statistical Entry)
-        if not broker.active_position and not broker.pending_order and std_dev > 0:
+        # 🚀 إشارة المومنتوم LONG: السعر يرتفع فوق الـ VWAP بقوة (اختراق) + شراء حيتان + دعم في الدفتر
+        if market["last_price"] > vwap and buy_dom >= Config.MIN_CVD_DOMINANCE and bid_imb >= Config.MIN_IMBALANCE:
+            await broker.place_order("LONG", market["last_price"])
             
-            # الدخول LONG: السعر أسفل الـ VWAP بمقدار 2 انحراف معياري + المشتريين دخلوا بقوة + جدار ساند
-            lower_band = vwap - (Config.Z_SCORE_ENTRY * std_dev)
-            if market["last_price"] <= lower_band and buy_dominance >= Config.CVD_DOMINANCE and bid_imb >= Config.MIN_IMBALANCE:
-                await broker.place_limit_order("LONG", market["best_bid"], vwap, std_dev, buy_dominance)
-                
-            # الدخول SHORT: السعر أعلى الـ VWAP بمقدار 2 انحراف معياري + البائعين دخلوا بقوة + جدار بيع ساند
-            upper_band = vwap + (Config.Z_SCORE_ENTRY * std_dev)
-            if market["last_price"] >= upper_band and sell_dominance >= Config.CVD_DOMINANCE and bid_imb <= (100 - Config.MIN_IMBALANCE):
-                await broker.place_limit_order("SHORT", market["best_ask"], vwap, std_dev, sell_dominance)
+        # ☄️ إشارة المومنتوم SHORT: السعر يهبط تحت الـ VWAP بقوة + بيع حيتان + مقاومة في الدفتر
+        elif market["last_price"] < vwap and (100 - buy_dom) >= Config.MIN_CVD_DOMINANCE and bid_imb <= (100 - Config.MIN_IMBALANCE):
+            await broker.place_order("SHORT", market["last_price"])
 
 # ==========================================
-# 5. اتصال WEEX 
+# 5. محرك الـ WebSockets
 # ==========================================
 async def weex_ws_engine():
     url = "wss://ws-contract.weex.com/v3/ws/public"
     while True:
         try:
-            print("\n⏳ جاري تحميل المحرك الإحصائي (Statistical Matrix)...")
+            print("\n⏳ جاري تحميل محرك الزخم (Momentum Tracker)...")
             async for ws in websockets.connect(url, ping_interval=20, ping_timeout=20):
-                print(f"✅ STAT-ENGINE ONLINE - TARGET: {Config.SYMBOL}")
-                await tg.send(f"🤖 <b>Statistical HFT Started!</b>\n🏦 <b>Equity:</b> ${broker.equity:.2f}\n🔬 <b>Logic:</b> VWAP + 2σ StdDev + Smart Exit")
-                
+                print(f"✅ MOMENTUM ENGINE ONLINE")
                 await ws.send(json.dumps({"method": "SUBSCRIBE", "params": [f"{Config.SYMBOL}@depth15", f"{Config.SYMBOL}@trade", f"{Config.SYMBOL}@ticker"], "id": 1}))
                 
                 async for msg in ws:
                     data = json.loads(msg)
                     if "event" in data and data["event"] == "ping":
-                        await ws.send(json.dumps({"method": "PONG", "id": 1}))
-                        continue
+                        await ws.send(json.dumps({"method": "PONG", "id": 1})); continue
                     
                     if "e" in data:
-                        if data["e"] == "ticker":
-                            market["last_price"] = float(data["d"][0]["c"])
-                            
+                        if data["e"] == "ticker": market["last_price"] = float(data["d"][0]["c"])
                         elif data["e"] == "depth":
-                            bids = data.get("b", [])
-                            asks = data.get("a", [])
-                            if bids and asks:
-                                market["best_bid"] = float(bids[0][0])
-                                market["best_ask"] = float(asks[0][0])
-                                market["bid_vol"] = sum(float(b[1]) for b in bids)
-                                market["ask_vol"] = sum(float(a[1]) for a in asks)
-                            
+                            b = data.get("b", []); a = data.get("a", [])
+                            if b and a:
+                                market["bid_vol"] = sum(float(x[1]) for x in b); market["ask_vol"] = sum(float(x[1]) for x in a)
                         elif data["e"] == "trade":
                             for t in data.get("d", []):
                                 recent_trades.append({"price": float(t["p"]), "qty": float(t["q"]), "is_sell": t["m"]})
                                 market["last_price"] = float(t["p"])
-
-                        await run_statistical_logic()
-
-        except Exception as e:
-            print(f"\n⚠️ إعادة الاتصال: {e}")
+                                
+                        await run_momentum_logic()
+        except:
+            print("\n⚠️ إعادة الاتصال...")
             await asyncio.sleep(2)
 
 # ==========================================
-# 6. خادم Render 
+# 6. خادم Render (FastAPI)
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await tg.start()
+    await broker.fetch_rules()
+    await tg.send(f"🤖 <b>Momentum HFT Started!</b>\n🏦 <b>Equity:</b> ${broker.equity:.2f}\n🌊 <b>Logic:</b> VWAP Breakout + Trailing Stop")
     asyncio.create_task(weex_ws_engine())
     yield
     await tg.stop()
 
 app = FastAPI(lifespan=lifespan)
-
 @app.get("/ping")
 async def ping(): return JSONResponse(content={"status": "online", "equity": broker.equity})
-
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
-async def catch_all(path_name: str):
-    return HTMLResponse(content="<html><body style='background:#000;color:#0ff;padding:50px;'><h1>STATISTICAL HFT ENGINE</h1></body></html>", status_code=200)
+async def catch_all(path_name: str): return HTMLResponse(content="<html><body style='background:#000;color:#f0f;padding:50px;'><h1>MOMENTUM HFT V5.0</h1></body></html>", status_code=200)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
