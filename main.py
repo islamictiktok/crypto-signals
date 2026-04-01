@@ -32,27 +32,25 @@ class Config:
     WEEX_SECRET_KEY = "263f6868f81b6d9dd4af394c6f07d8798b5d4ba220b42c1a598893acb95bbc12"
     WEEX_PASSPHRASE = "MOMOmax264"
     
-    TF_MICRO = '30m'  
+    TF_MICRO = '5m'            # ⚠️ تم النزول لفريم 5 دقائق
     EMA_FAST = 20
     EMA_SLOW = 50
     RSI_PERIOD = 14
     ATR_PERIOD = 14
     
-    MAX_TRADES_AT_ONCE = 3     # ⚠️ أقصى عدد صفقات 3 (لأننا بنراقب 3 عملات فقط)
-    FIXED_MARGIN_USDT = 0.09   # ⚠️ الدخول بـ 0.09 دولار
-    FIXED_LEVERAGE = 100       # ⚠️ تم رفع الرافعة لـ 100x بناءً على طلبك
+    MAX_TRADES_AT_ONCE = 3     
+    FIXED_MARGIN_USDT = 0.09   
+    FIXED_LEVERAGE = 100       
     
-    # ⚠️ إعدادات الستوب المتحرك الذكي (مبني على ATR)
     ATR_TRAIL_ACTIVATION = 1.5   
     ATR_TRAIL_DISTANCE = 1.0     
     
-    COOLDOWN_SECONDS = 1800   
-    STATE_FILE = "bot_v19_1_sniper.json"
+    COOLDOWN_SECONDS = 300     # ⚠️ تبريد 5 دقائق فقط ليناسب الفريم الجديد
+    STATE_FILE = "bot_v19_2.json"
 
-    # ⚠️ تم تحديد 3 عملات فقط
     WHITELIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
     
-    VERSION = "V19.1 (Top 3 Sniper - 100x)"
+    VERSION = "V19.2 (5m Live Scanner)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -110,7 +108,6 @@ class WeexExecutor:
         Log.print(f"✅ تم تحميل قواعد العملات.", Log.GREEN)
 
     async def check_balance(self):
-        """فحص الرصيد اللحظي المتاح"""
         res = await self.send_request("GET", "/capi/v3/account/balance")
         if not res: return 0.0
         data = res.get('data') if isinstance(res, dict) and 'data' in res else res
@@ -134,13 +131,13 @@ class WeexExecutor:
             "tpTriggerPrice": tp_str, "slTriggerPrice": sl_str, 
             "newClientOrderId": f"LIM_{int(time.time()*1000)}"
         }
-        Log.print(f"🛒 جاري تعليق فخ LIMIT لـ {symbol} برافعة 100x...", Log.YELLOW)
+        Log.print(f"🛒 إرسال فخ LIMIT لـ {symbol} برافعة 100x...", Log.YELLOW)
         res = await self.send_request("POST", "/capi/v3/order", order_payload)
         if res and res.get('success'): return res.get('orderId')
         return None
 
 # ==========================================
-# 3. نظام الإشعارات (تليجرام)
+# 3. نظام الإشعارات
 # ==========================================
 class TelegramNotifier:
     def __init__(self):
@@ -160,7 +157,7 @@ class TelegramNotifier:
         
     async def send_balance_warning(self, balance):
         if time.time() - self.last_balance_warning > 900:
-            await self.send(f"⚠️ <b>تنبيه رصيد غير كافي!</b>\nالرصيد المتاح: <code>${balance:.4f}</code>\nتم تجاهل إشارات الدخول حتى يتوفر <code>${Config.FIXED_MARGIN_USDT}</code>.")
+            await self.send(f"⚠️ <b>تنبيه رصيد غير كافي!</b>\nالرصيد المتاح: <code>${balance:.4f}</code>")
             self.last_balance_warning = time.time()
 
 # ==========================================
@@ -170,6 +167,7 @@ class StrategyEngine:
     @staticmethod
     def analyze(ohlcv_data):
         setup = None
+        info_str = "خطأ في التحليل"
         try:
             df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             df['close'] = df['close'].astype(float)
@@ -195,6 +193,9 @@ class StrategyEngine:
             prev = df.iloc[-2]; curr = df.iloc[-1]
             side = None
             
+            # ⚠️ تجهيز رسالة التقرير اللي بتطبع على الشاشة
+            info_str = f"P: {curr['close']:.2f} | EMA20: {curr['ema20']:.2f} | EMA50: {curr['ema50']:.2f} | RSI: {curr['rsi']:.1f}"
+            
             if prev['ema20'] <= prev['ema50'] and curr['ema20'] > curr['ema50'] and curr['rsi'] > 50:
                 side = "LONG"
                 limit_price = curr['close'] - (curr['atr'] * 0.1)
@@ -214,7 +215,7 @@ class StrategyEngine:
         except Exception: pass
         finally:
             if 'df' in locals(): del df 
-        return setup
+        return setup, info_str
 
 # ==========================================
 # 5. المدير التنفيذي
@@ -235,7 +236,7 @@ class TradingSystem:
             mexc_sym = f"{sym[:-4]}/USDT:USDT"
             if mexc_sym in self.mexc.markets: self.mexc_symbols.append(mexc_sym)
         Log.print(f"🚀 {Config.VERSION} STARTED", Log.GREEN)
-        await self.tg.send(f"🤖 <b>{Config.VERSION} ONLINE</b>\n🎯 <b>Targets:</b> BTC, ETH, SOL\n⚡ <b>Leverage:</b> 100x")
+        await self.tg.send(f"🤖 <b>{Config.VERSION} ONLINE</b>\n⏱️ <b>Timeframe:</b> 5m\n🔍 <b>Mode:</b> Live Scanner")
 
     async def main_loop(self):
         while self.running:
@@ -244,7 +245,7 @@ class TradingSystem:
                 Log.print(f"🏦 الرصيد اللحظي المتاح: {balance:.4f} USDT", Log.BLUE)
 
                 if balance < Config.FIXED_MARGIN_USDT:
-                    Log.print(f"⚠️ الرصيد غير كافي. سيتم الانتظار...", Log.YELLOW)
+                    Log.print(f"⚠️ الرصيد لا يكفي. سيتم الانتظار...", Log.YELLOW)
                     await self.tg.send_balance_warning(balance)
                     await asyncio.sleep(60) 
                     continue
@@ -257,12 +258,17 @@ class TradingSystem:
                     if len(self.pending_orders) + len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     weex_sym = mexc_sym.replace('/USDT:USDT', 'USDT')
                     try:
-                        ohlcv = await self.mexc.fetch_ohlcv(mexc_sym, Config.TF_MICRO, limit=120)
-                        setup = await asyncio.to_thread(StrategyEngine.analyze, ohlcv)
+                        ohlcv = await self.mexc.fetch_ohlcv(mexc_sym, Config.TF_MICRO, limit=100)
+                        
+                        # ⚠️ هنا بنسحب التحليل ومعاه رسالة التقرير (info)
+                        setup, info_str = await asyncio.to_thread(StrategyEngine.analyze, ohlcv)
+                        
+                        # ⚠️ طباعة التقرير اللحظي لكل عملة على شاشة السيرفر
+                        Log.print(f"🔎 فحص {weex_sym} ➔ {info_str}", Log.RESET)
+                        
                         if setup:
                             current_balance = await self.weex.check_balance()
-                            if current_balance < Config.FIXED_MARGIN_USDT:
-                                break 
+                            if current_balance < Config.FIXED_MARGIN_USDT: break 
                             
                             rule = self.weex.rules.get(weex_sym)
                             if not rule: continue
@@ -313,20 +319,18 @@ class TradingSystem:
                             }
                             
                             icon = "🟢" if t['side'] == "LONG" else "🔴"
-                            msg = (f"{icon} <b>SNIPER TRADE FILLED!</b>\n"
+                            msg = (f"{icon} <b>TRADE FILLED! (5m)</b>\n"
                                    f"━━━━━━━━━━━━━━━\n"
                                    f"🪙 <b>Coin:</b> <code>{sym}</code>\n"
                                    f"⚡ <b>Side:</b> {t['side']}\n"
                                    f"🛒 <b>Entry:</b> <code>{actual_entry:.4f}</code>\n"
-                                   f"⚖️ <b>Leverage:</b> <code>100x</code>\n"
-                                   f"🌪️ <b>Dynamic ATR:</b> <code>{t['atr']:.4f}</code>\n"
+                                   f"🌪️ <b>ATR:</b> <code>{t['atr']:.4f}</code>\n"
                                    f"🛡️ <b>Smart Trail:</b> After {activation_dist:.4f} profit\n"
                                    f"━━━━━━━━━━━━━━━\n"
                                    f"🛑 <b>Hard SL:</b> <code>{t['sl']:.4f}</code>")
                             await self.tg.send(msg)
-                            Log.print(f"✅ تفعلت صفقة {sym} بنجاح!", Log.GREEN)
                     
-                    elif time.time() - self.pending_orders[sym]['time'] > 3600:
+                    elif time.time() - self.pending_orders[sym]['time'] > 1800: # ⚠️ إلغاء الطلب بعد نص ساعة لو متنفذش
                         await self.weex.send_request("DELETE", f"/capi/v3/order?orderId={self.pending_orders[sym]['orderId']}")
                         del self.pending_orders[sym]
 
@@ -351,7 +355,7 @@ class TradingSystem:
                         if trail_hit:
                             await self.weex.send_request("POST", "/capi/v3/closePositions", {"symbol": sym}) 
                             profit_pct = abs(curr_price - trade['entry']) / trade['entry'] * 100 * Config.FIXED_LEVERAGE
-                            await self.tg.send(f"🧠 <b>Smart Dynamic Trail Hit!</b>\n🪙 {sym}\n💰 Net ROE: +{profit_pct:.2f}%\n🌪️ Volatility Mastered.")
+                            await self.tg.send(f"🧠 <b>Smart Dynamic Trail Hit!</b>\n🪙 {sym}\n💰 Net ROE: +{profit_pct:.2f}%")
                             del self.active_trades[sym]
                             
                         elif int(time.time()) % 60 == 0:
@@ -387,7 +391,7 @@ app = FastAPI(lifespan=lifespan)
 async def ping(): return JSONResponse(content={"status": "online"})
 @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
 async def catch_all(path_name: str):
-    return HTMLResponse(content=f"<html><body style='background:#111;color:#0f0;padding:50px;'><h1>Sniper V19.1 (BTC, ETH, SOL) - 100x</h1></body></html>", status_code=200)
+    return HTMLResponse(content=f"<html><body style='background:#111;color:#0f0;padding:50px;'><h1>Sniper V19.2 (5m Scanner)</h1></body></html>", status_code=200)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
