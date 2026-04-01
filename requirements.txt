@@ -1,5 +1,8 @@
+pandas
+numpy
+ccxt
+aiohttp
 fastapi
 uvicorn
 websockets
-aiohttp
-nest-asyncio
+nest_asyncio
