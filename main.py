@@ -16,34 +16,49 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 from contextlib import asynccontextmanager
 
+# Disable pandas chained assignment warnings
 pd.options.mode.chained_assignment = None
 
+# ==========================================
+# 1. CORE CONFIGURATION
+# ==========================================
 class Config:
-    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN")
-    CHAT_ID = os.getenv("CHAT_ID", "YOUR_CHAT_ID")
+    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg")
+    CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     
+    # Strategy Timeframes (Fixed MEXC Parameter Error)
     TF_HTF = '1h'       
     TF_MID = '15m'      
-    TF_ENTRY = '10m'    
+    TF_ENTRY = '5m'     # ⚠️ تم التعديل إلى 5 دقائق لأن MEXC لا تدعم 10m
     
     TARGET_COINS = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT", "AVAX/USDT:USDT"]
     
-    TRADE_TIMEOUT_MINUTES = 360    
-    MAX_SPREAD_PCT = 0.002         
+    # Risk & Execution Constraints
+    MIN_RR_RATIO = 2.5
+    MAX_CONCURRENT_TRADES = 5
+    TRADE_TIMEOUT_MINUTES = 360    # 6 hours
+    MAX_SPREAD_PCT = 0.002         # 0.2% max spread
     
-    MIN_SL_PCT = 0.002             
-    MAX_SL_PCT = 0.050             
+    # SL Limits
+    MIN_SL_PCT = 0.002             # 0.2%
+    MAX_SL_PCT = 0.050             # 5.0%
     
+    # Dynamic Leverage Bounds
     MAX_LEVERAGE = 50
     MIN_LEVERAGE = 5
     
+    # System Stability
     CACHE_TTL = 45                 
     SAVE_STATE_INTERVAL = 300      
     MAX_STORED_SIGNALS = 20        
     API_CONCURRENCY = 3            
     
     STATE_FILE = "production_state.json"
+    VERSION = "V-PRO (Anonymous Engine)"
 
+# ==========================================
+# 2. PRODUCTION LOGGER
+# ==========================================
 class Logger:
     @staticmethod
     def info(msg: str):
@@ -63,6 +78,9 @@ class Logger:
         if exc:
             print(f"\033[91m{traceback.format_exc()}\033[0m", flush=True)
 
+# ==========================================
+# 3. TELEGRAM CLIENT (Anonymous)
+# ==========================================
 class TelegramClient:
     def __init__(self):
         self.url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
@@ -89,6 +107,9 @@ class TelegramClient:
             Logger.error("Telegram send failed", e)
             return False
 
+# ==========================================
+# 4. EXCHANGE CLIENT (Rate-Limited, Cached)
+# ==========================================
 class ExchangeClient:
     def __init__(self):
         self.exchange = ccxt.mexc({'enableRateLimit': False, 'options': {'defaultType': 'swap'}})
@@ -99,6 +120,7 @@ class ExchangeClient:
         await self.exchange.close()
 
     async def fetch_ticker_spread(self, symbol: str) -> float:
+        """Fetches ticker to check bid/ask spread %"""
         for attempt in range(3):
             try:
                 async with self.semaphore:
@@ -109,7 +131,7 @@ class ExchangeClient:
                             return (ask - bid) / ask
             except Exception:
                 await asyncio.sleep(1)
-        return 1.0
+        return 1.0 # High spread on failure to reject
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200) -> Optional[pd.DataFrame]:
         now = time.time()
@@ -132,6 +154,9 @@ class ExchangeClient:
                 break
         return None
 
+# ==========================================
+# 5. QUANT STRATEGY ENGINE
+# ==========================================
 class QuantStrategy:
     @staticmethod
     def calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -156,6 +181,7 @@ class QuantStrategy:
     @staticmethod
     def analyze(df_htf: pd.DataFrame, df_mid: pd.DataFrame, df_entry: pd.DataFrame) -> Optional[Dict[str, Any]]:
         try:
+            # 1. Market Session Filter (Only London/NY: 07:00 to 21:00 UTC)
             current_utc_hour = datetime.utcnow().hour
             if not (7 <= current_utc_hour <= 21):
                 return None 
@@ -163,7 +189,7 @@ class QuantStrategy:
             df_htf, df_mid, df_entry = df_htf.iloc[:-1], df_mid.iloc[:-1], df_entry.iloc[:-1]
 
             # ---------------------------------------------------------
-            # HTF LAYER (1 Hour)
+            # LAYER 1: HTF (1 Hour) - Trend, ADX & Sideways Filter
             # ---------------------------------------------------------
             df_htf['ema50'] = df_htf['close'].ewm(span=50, adjust=False).mean()
             df_htf['ema200'] = df_htf['close'].ewm(span=200, adjust=False).mean()
@@ -171,12 +197,14 @@ class QuantStrategy:
             
             curr_htf = df_htf.iloc[-1]
             
+            # Trend Strength & Sideways Check
             ema_diff_pct = abs(curr_htf['ema50'] - curr_htf['ema200']) / curr_htf['ema200']
             if ema_diff_pct < 0.0008 or curr_htf['adx'] < 15: 
-                return None 
+                return None # Reject sideways or weak trend
 
             trend = "BULLISH" if curr_htf['ema50'] > curr_htf['ema200'] and curr_htf['close'] > curr_htf['ema50'] else "BEARISH"
 
+            # Improved BOS (Momentum Break)
             recent_high_htf = df_htf['high'].rolling(20).max().shift(1).iloc[-1]
             recent_low_htf = df_htf['low'].rolling(20).min().shift(1).iloc[-1]
             
@@ -188,35 +216,38 @@ class QuantStrategy:
             bos_bear = curr_htf['close'] < recent_low_htf and htf_momentum
 
             # ---------------------------------------------------------
-            # MID LAYER (15 Min)
+            # LAYER 2: MID TF (15 Min) - Liquidity & Volatility
             # ---------------------------------------------------------
             df_mid['atr'] = QuantStrategy.calc_atr(df_mid)
             curr_mid = df_mid.iloc[-1]
             
+            # Volatility Extreme Check
             atr_pct = (curr_mid['atr'] / curr_mid['close'])
-            if atr_pct < 0.0005 or atr_pct > 0.06: 
-                return None 
+            if atr_pct < 0.0005 or atr_pct > 0.06: return None # Reject dead or extremely chaotic zones
 
+            # FVG
             df_mid['fvg_bull'] = df_mid['low'] > df_mid['high'].shift(2)
             df_mid['fvg_bear'] = df_mid['high'] < df_mid['low'].shift(2)
             has_fvg_bull = df_mid['fvg_bull'].iloc[-3:-1].any()
             has_fvg_bear = df_mid['fvg_bear'].iloc[-3:-1].any()
 
             # ---------------------------------------------------------
-            # ENTRY LAYER (10 Min)
+            # LAYER 3: ENTRY TF (5 Min) - Cross, RSI, Smart Volume
             # ---------------------------------------------------------
             curr_entry = df_entry.iloc[-1]
             prev_entry = df_entry.iloc[-2]
             prev2_entry = df_entry.iloc[-3]
 
+            # Candle Strength Filter
             entry_body = abs(curr_entry['close'] - curr_entry['open'])
             entry_range = curr_entry['high'] - curr_entry['low']
-            if entry_range == 0 or (entry_body / entry_range < 0.5): 
-                return None 
+            if entry_range == 0 or (entry_body / entry_range < 0.5): return None # Reject weak candle
 
+            # Smart Volume Filter
             df_entry['vol_sma'] = df_entry['vol'].rolling(20).mean()
             vol_boost = 5 if curr_entry['vol'] > df_entry['vol_sma'].iloc[-1] else 0
 
+            # Indicators
             df_entry['ema9'] = df_entry['close'].ewm(span=9, adjust=False).mean()
             df_entry['ema21'] = df_entry['close'].ewm(span=21, adjust=False).mean()
             
@@ -255,7 +286,7 @@ class QuantStrategy:
                     if has_fvg_bear: confidence += 10
 
             # ---------------------------------------------------------
-            # RISK & LEVERAGE MANAGEMENT
+            # DYNAMIC LEVERAGE & RISK ENGINE
             # ---------------------------------------------------------
             if side and confidence >= 65:
                 entry_price = curr_entry['close']
@@ -264,16 +295,18 @@ class QuantStrategy:
                 sl_dist = atr_val * 1.5
                 sl = entry_price - sl_dist if side == "LONG" else entry_price + sl_dist
                 
+                # SL Distance Safety
                 sl_pct_dist = abs(entry_price - sl) / entry_price
-                if not (Config.MIN_SL_PCT <= sl_pct_dist <= Config.MAX_SL_PCT): 
-                    return None
+                if not (Config.MIN_SL_PCT <= sl_pct_dist <= Config.MAX_SL_PCT): return None
                 
+                # Smarter Dynamic Leverage
                 base_lev = (1.0 / sl_pct_dist) * 0.4
                 leverage = int(base_lev)
                 leverage = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE, leverage))
                 
                 risk_level = "Low" if leverage > 25 else ("Medium" if leverage >= 10 else "High")
                 
+                # Targets
                 tp1 = entry_price + sl_dist if side == "LONG" else entry_price - sl_dist
                 tp2 = entry_price + (sl_dist * 2) if side == "LONG" else entry_price - (sl_dist * 2)
                 tp3 = entry_price + (sl_dist * 3) if side == "LONG" else entry_price - (sl_dist * 3)
@@ -290,6 +323,9 @@ class QuantStrategy:
             Logger.error("Strategy Engine Error", e)
         return None
 
+# ==========================================
+# 6. ORCHESTRATOR
+# ==========================================
 class TradingSystem:
     def __init__(self):
         self.client = ExchangeClient()
@@ -376,7 +412,7 @@ class TradingSystem:
                             f"TP2: {setup['tp2']:.4f}\n"
                             f"TP3: {setup['tp3']:.4f}\n"
                             f"SL: {setup['sl']:.4f}\n\n"
-                            f"Leverage: {setup['leverage']}\n"
+                            f"Leverage: {setup['leverage']}x\n"
                             f"Risk: {setup['risk_level']}\n"
                             f"Confidence: {setup['confidence']}%"
                         )
@@ -409,6 +445,7 @@ class TradingSystem:
                 for sym, trade in list(self.active_signals.items()):
                     curr_price = tickers.get(sym, {}).get('last')
                     if not curr_price: continue
+                    clean_sym = sym.replace('/USDT:USDT', '')
 
                     side = trade['side']
                     stage = trade['stage']
@@ -443,10 +480,12 @@ class TradingSystem:
                         trade['stage'] = 1
                         trade['sl'] = trade['entry'] 
                         if sym in self.last_signal: self.last_signal[sym]['max_stage'] = max(self.last_signal[sym]['max_stage'], 1)
+                        await self.tg.send(f"✅ TP1 | {clean_sym}")
                     
                     if hit_tp2:
                         trade['stage'] = 2
                         if sym in self.last_signal: self.last_signal[sym]['max_stage'] = max(self.last_signal[sym]['max_stage'], 2)
+                        await self.tg.send(f"✅ TP2 | {clean_sym}")
 
                     if hit_tp3:
                         self.daily_stats['wins'] += 1
@@ -454,9 +493,11 @@ class TradingSystem:
                         self.daily_stats['r_profit'] += 3.0
                         self.daily_stats['best'] = max(self.daily_stats['best'], 3.0)
                         if sym in self.last_signal: self.last_signal[sym]['max_stage'] = 3
+                        await self.tg.send(f"🎯 Full TP | {clean_sym}")
                         del self.active_signals[sym]
                         continue
                         
+                    # ADVANCED TRAILING STOP
                     if stage >= 1:
                         trail_offset = trade['atr_val'] * 0.8
                         min_improvement = trade['entry'] * 0.002
