@@ -1,15 +1,12 @@
 import asyncio
 import os
 import json
-import warnings
-import traceback
-import gc  
-import hmac
-import hashlib
-import base64
+import gc
 import time
-import math
+import traceback
 from datetime import datetime
+from typing import Dict, Any, List, Optional, Tuple
+
 import pandas as pd
 import numpy as np
 import ccxt.async_support as ccxt
@@ -19,379 +16,512 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 from contextlib import asynccontextmanager
 
-warnings.filterwarnings("ignore")
+pd.options.mode.chained_assignment = None
 
-# ==========================================
-# 1. الإعدادات المركزية (CONFIG)
-# ==========================================
 class Config:
-    TELEGRAM_TOKEN = "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg"
-    CHAT_ID = "-1003653652451"
+    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_TELEGRAM_TOKEN")
+    CHAT_ID = os.getenv("CHAT_ID", "YOUR_CHAT_ID")
     
-    WEEX_API_KEY = "weex_64531a2b79748e202623fe9cd96ff478"
-    WEEX_SECRET_KEY = "263f6868f81b6d9dd4af394c6f07d8798b5d4ba220b42c1a598893acb95bbc12"
-    WEEX_PASSPHRASE = "MOMOmax264"
+    TF_HTF = '1h'       
+    TF_MID = '15m'      
+    TF_ENTRY = '10m'    
     
-    TF_MICRO = '5m'            # ⚠️ تم النزول لفريم 5 دقائق
-    EMA_FAST = 20
-    EMA_SLOW = 50
-    RSI_PERIOD = 14
-    ATR_PERIOD = 14
+    TARGET_COINS = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT", "AVAX/USDT:USDT"]
     
-    MAX_TRADES_AT_ONCE = 3     
-    FIXED_MARGIN_USDT = 0.09   
-    FIXED_LEVERAGE = 100       
+    TRADE_TIMEOUT_MINUTES = 360    
+    MAX_SPREAD_PCT = 0.002         
     
-    ATR_TRAIL_ACTIVATION = 1.5   
-    ATR_TRAIL_DISTANCE = 1.0     
+    MIN_SL_PCT = 0.002             
+    MAX_SL_PCT = 0.050             
     
-    COOLDOWN_SECONDS = 300     # ⚠️ تبريد 5 دقائق فقط ليناسب الفريم الجديد
-    STATE_FILE = "bot_v19_2.json"
+    MAX_LEVERAGE = 50
+    MIN_LEVERAGE = 5
+    
+    CACHE_TTL = 45                 
+    SAVE_STATE_INTERVAL = 300      
+    MAX_STORED_SIGNALS = 20        
+    API_CONCURRENCY = 3            
+    
+    STATE_FILE = "production_state.json"
 
-    WHITELIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-    
-    VERSION = "V19.2 (5m Live Scanner)"
-
-class Log:
-    GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
+class Logger:
     @staticmethod
-    def print(msg, color=RESET):
-        ts = datetime.now().strftime("%H:%M:%S")
-        print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
-
-# ==========================================
-# 2. محرك WEEX (Native API)
-# ==========================================
-class WeexExecutor:
-    def __init__(self):
-        self.api_key = Config.WEEX_API_KEY; self.secret_key = Config.WEEX_SECRET_KEY
-        self.passphrase = Config.WEEX_PASSPHRASE; self.base_url = "https://api-contract.weex.com" 
-        self.rules = {}  
-
-    def get_signature(self, timestamp, method, path, body_str):
-        message = str(timestamp) + method.upper() + path + body_str
-        mac = hmac.new(bytes(self.secret_key, 'utf8'), bytes(message, 'utf-8'), digestmod=hashlib.sha256)
-        return base64.b64encode(mac.digest()).decode('utf-8')
-
-    async def send_request(self, method, path, payload=None):
-        timestamp = str(int(time.time() * 1000))
-        body_str = json.dumps(payload) if payload else ""
-        if method.upper() in ["GET", "DELETE"]: body_str = ""
-            
-        headers = {
-            "Content-Type": "application/json", "ACCESS-KEY": self.api_key, 
-            "ACCESS-SIGN": self.get_signature(timestamp, method, path, body_str), 
-            "ACCESS-TIMESTAMP": timestamp, "ACCESS-PASSPHRASE": self.passphrase
-        }
-        url = self.base_url + path
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
-                if method.upper() == "GET":
-                    async with session.get(url, headers=headers) as resp: return await resp.json()
-                elif method.upper() == "DELETE":
-                    async with session.delete(url, headers=headers, json=payload) as resp: return await resp.json()
-                else:
-                    async with session.post(url, headers=headers, json=payload) as resp: return await resp.json()
-        except: return None
-
-    async def fetch_exchange_rules(self):
-        Log.print("📥 جاري جلب قواعد المنصة...", Log.YELLOW)
-        res = await self.send_request("GET", "/capi/v3/market/exchangeInfo")
-        if not res: return
-        symbols_data = res.get('data', {}).get('symbols', []) if 'data' in res else res.get('symbols', [])
-        for sym in symbols_data:
-            self.rules[sym['symbol']] = {
-                'qty_prec': int(sym.get('quantityPrecision', 4)),
-                'price_prec': int(sym.get('pricePrecision', 4)),
-                'min_qty': float(sym.get('minOrderSize', 0.0001))
-            }
-        Log.print(f"✅ تم تحميل قواعد العملات.", Log.GREEN)
-
-    async def check_balance(self):
-        res = await self.send_request("GET", "/capi/v3/account/balance")
-        if not res: return 0.0
-        data = res.get('data') if isinstance(res, dict) and 'data' in res else res
-        if isinstance(data, list):
-            for item in data:
-                if item.get('asset') == 'USDT': return float(item.get('availableBalance', 0))
-        return 0.0
-
-    async def place_smart_limit_order(self, symbol, side, size_str, limit_price_str, sl_str, tp_str):
-        lev_payload = {
-            "symbol": symbol, "marginType": "ISOLATED",
-            "isolatedLongLeverage": str(Config.FIXED_LEVERAGE),
-            "isolatedShortLeverage": str(Config.FIXED_LEVERAGE)
-        }
-        await self.send_request("POST", "/capi/v3/account/leverage", lev_payload)
-        await asyncio.sleep(0.5)
-
-        order_payload = {
-            "symbol": symbol, "side": "BUY" if side == "LONG" else "SELL", "positionSide": side,
-            "type": "LIMIT", "timeInForce": "GTC", "quantity": size_str, "price": limit_price_str,
-            "tpTriggerPrice": tp_str, "slTriggerPrice": sl_str, 
-            "newClientOrderId": f"LIM_{int(time.time()*1000)}"
-        }
-        Log.print(f"🛒 إرسال فخ LIMIT لـ {symbol} برافعة 100x...", Log.YELLOW)
-        res = await self.send_request("POST", "/capi/v3/order", order_payload)
-        if res and res.get('success'): return res.get('orderId')
-        return None
-
-# ==========================================
-# 3. نظام الإشعارات
-# ==========================================
-class TelegramNotifier:
-    def __init__(self):
-        self.url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"; self.session = None
-        self.last_balance_warning = 0 
-
-    async def start(self): self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
-    async def stop(self): 
-        if self.session: await self.session.close()
-
-    async def send(self, text):
-        if not self.session: return None
-        try:
-            async with self.session.post(self.url, json={"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}) as resp:
-                d = await resp.json(); return d.get('result', {}).get('message_id')
-        except: return None
+    def info(msg: str):
+        print(f"\033[94m[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}] [INFO] {msg}\033[0m", flush=True)
         
-    async def send_balance_warning(self, balance):
-        if time.time() - self.last_balance_warning > 900:
-            await self.send(f"⚠️ <b>تنبيه رصيد غير كافي!</b>\nالرصيد المتاح: <code>${balance:.4f}</code>")
-            self.last_balance_warning = time.time()
-
-# ==========================================
-# 4. محرك التحليل (Pandas)
-# ==========================================
-class StrategyEngine:
     @staticmethod
-    def analyze(ohlcv_data):
-        setup = None
-        info_str = "خطأ في التحليل"
-        try:
-            df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            df['close'] = df['close'].astype(float)
-            df['high'] = df['high'].astype(float)
-            df['low'] = df['low'].astype(float)
-            df = df[:-1] 
-            
-            df['ema20'] = df['close'].ewm(span=Config.EMA_FAST, adjust=False).mean()
-            df['ema50'] = df['close'].ewm(span=Config.EMA_SLOW, adjust=False).mean()
-            
-            df['tr0'] = abs(df['high'] - df['low'])
-            df['tr1'] = abs(df['high'] - df['close'].shift())
-            df['tr2'] = abs(df['low'] - df['close'].shift())
-            df['tr'] = df[['tr0', 'tr1', 'tr2']].max(axis=1)
-            df['atr'] = df['tr'].rolling(window=Config.ATR_PERIOD).mean()
-            
-            delta = df['close'].diff()
-            gain = (delta.where(delta > 0, 0)).rolling(window=Config.RSI_PERIOD).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=Config.RSI_PERIOD).mean()
-            rs = gain / loss
-            df['rsi'] = 100 - (100 / (1 + rs))
-            
-            prev = df.iloc[-2]; curr = df.iloc[-1]
-            side = None
-            
-            # ⚠️ تجهيز رسالة التقرير اللي بتطبع على الشاشة
-            info_str = f"P: {curr['close']:.2f} | EMA20: {curr['ema20']:.2f} | EMA50: {curr['ema50']:.2f} | RSI: {curr['rsi']:.1f}"
-            
-            if prev['ema20'] <= prev['ema50'] and curr['ema20'] > curr['ema50'] and curr['rsi'] > 50:
-                side = "LONG"
-                limit_price = curr['close'] - (curr['atr'] * 0.1)
-                sl = limit_price - (curr['atr'] * 2.0) 
-                tp = limit_price + (curr['atr'] * 6.0) 
-                
-            elif prev['ema20'] >= prev['ema50'] and curr['ema20'] < curr['ema50'] and curr['rsi'] < 50:
-                side = "SHORT"
-                limit_price = curr['close'] + (curr['atr'] * 0.1)
-                sl = limit_price + (curr['atr'] * 2.0)
-                tp = limit_price - (curr['atr'] * 6.0)
+    def success(msg: str):
+        print(f"\033[92m[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}] [SUCCESS] {msg}\033[0m", flush=True)
+        
+    @staticmethod
+    def warning(msg: str):
+        print(f"\033[93m[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}] [WARNING] {msg}\033[0m", flush=True)
+        
+    @staticmethod
+    def error(msg: str, exc: Optional[Exception] = None):
+        print(f"\033[91m[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}] [ERROR] {msg}\033[0m", flush=True)
+        if exc:
+            print(f"\033[91m{traceback.format_exc()}\033[0m", flush=True)
 
-            if side: 
-                setup = {
-                    "side": side, "limit_price": limit_price, "sl": sl, "tp": tp, "atr": curr['atr'] 
-                }
-        except Exception: pass
-        finally:
-            if 'df' in locals(): del df 
-        return setup, info_str
-
-# ==========================================
-# 5. المدير التنفيذي
-# ==========================================
-class TradingSystem:
+class TelegramClient:
     def __init__(self):
-        self.mexc = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
-        self.weex = WeexExecutor(); self.tg = TelegramNotifier()
-        self.pending_orders = {} 
-        self.active_trades = {}  
-        self.cooldown = {}; self.running = True
-        self.mexc_symbols = [] 
+        self.url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
+        self.session: Optional[aiohttp.ClientSession] = None
 
     async def initialize(self):
-        await self.tg.start(); await self.mexc.load_markets()
-        await self.weex.fetch_exchange_rules()
-        for sym in Config.WHITELIST:
-            mexc_sym = f"{sym[:-4]}/USDT:USDT"
-            if mexc_sym in self.mexc.markets: self.mexc_symbols.append(mexc_sym)
-        Log.print(f"🚀 {Config.VERSION} STARTED", Log.GREEN)
-        await self.tg.send(f"🤖 <b>{Config.VERSION} ONLINE</b>\n⏱️ <b>Timeframe:</b> 5m\n🔍 <b>Mode:</b> Live Scanner")
+        if not self.session:
+            self.session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10),
+                connector=aiohttp.TCPConnector(limit_per_host=10)
+            )
 
-    async def main_loop(self):
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
+
+    async def send(self, text: str) -> bool:
+        if not self.session: return False
+        try:
+            payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+            async with self.session.post(self.url, json=payload) as resp:
+                return resp.status == 200
+        except Exception as e:
+            Logger.error("Telegram send failed", e)
+            return False
+
+class ExchangeClient:
+    def __init__(self):
+        self.exchange = ccxt.mexc({'enableRateLimit': False, 'options': {'defaultType': 'swap'}})
+        self.semaphore = asyncio.Semaphore(Config.API_CONCURRENCY)
+        self.cache: Dict[str, Dict[str, Tuple[float, List]]] = {} 
+
+    async def close(self):
+        await self.exchange.close()
+
+    async def fetch_ticker_spread(self, symbol: str) -> float:
+        for attempt in range(3):
+            try:
+                async with self.semaphore:
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    if ticker and ticker.get('ask') and ticker.get('bid'):
+                        ask, bid = ticker['ask'], ticker['bid']
+                        if ask > 0:
+                            return (ask - bid) / ask
+            except Exception:
+                await asyncio.sleep(1)
+        return 1.0
+
+    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200) -> Optional[pd.DataFrame]:
+        now = time.time()
+        if symbol in self.cache and timeframe in self.cache[symbol]:
+            cached_time, cached_data = self.cache[symbol][timeframe]
+            if now - cached_time < Config.CACHE_TTL:
+                return pd.DataFrame(cached_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+
+        for attempt in range(3):
+            try:
+                async with self.semaphore:
+                    data = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+                    if symbol not in self.cache: self.cache[symbol] = {}
+                    self.cache[symbol][timeframe] = (now, data)
+                    return pd.DataFrame(data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            except ccxt.NetworkError:
+                await asyncio.sleep(2 ** attempt)
+            except Exception as e:
+                Logger.error(f"OHLCV fetch failed {symbol}", e)
+                break
+        return None
+
+class QuantStrategy:
+    @staticmethod
+    def calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        high_low = df['high'] - df['low']
+        high_close = np.abs(df['high'] - df['close'].shift())
+        low_close = np.abs(df['low'] - df['close'].shift())
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        return tr.rolling(window=period).mean()
+
+    @staticmethod
+    def calc_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        up = df['high'] - df['high'].shift(1)
+        down = df['low'].shift(1) - df['low']
+        plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+        minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+        atr = QuantStrategy.calc_atr(df, period)
+        plus_di = 100 * (pd.Series(plus_dm).ewm(span=period, adjust=False).mean() / atr)
+        minus_di = 100 * (pd.Series(minus_dm).ewm(span=period, adjust=False).mean() / atr)
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+        return dx.ewm(span=period, adjust=False).mean()
+
+    @staticmethod
+    def analyze(df_htf: pd.DataFrame, df_mid: pd.DataFrame, df_entry: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        try:
+            current_utc_hour = datetime.utcnow().hour
+            if not (7 <= current_utc_hour <= 21):
+                return None 
+
+            df_htf, df_mid, df_entry = df_htf.iloc[:-1], df_mid.iloc[:-1], df_entry.iloc[:-1]
+
+            # ---------------------------------------------------------
+            # HTF LAYER (1 Hour)
+            # ---------------------------------------------------------
+            df_htf['ema50'] = df_htf['close'].ewm(span=50, adjust=False).mean()
+            df_htf['ema200'] = df_htf['close'].ewm(span=200, adjust=False).mean()
+            df_htf['adx'] = QuantStrategy.calc_adx(df_htf)
+            
+            curr_htf = df_htf.iloc[-1]
+            
+            ema_diff_pct = abs(curr_htf['ema50'] - curr_htf['ema200']) / curr_htf['ema200']
+            if ema_diff_pct < 0.0008 or curr_htf['adx'] < 15: 
+                return None 
+
+            trend = "BULLISH" if curr_htf['ema50'] > curr_htf['ema200'] and curr_htf['close'] > curr_htf['ema50'] else "BEARISH"
+
+            recent_high_htf = df_htf['high'].rolling(20).max().shift(1).iloc[-1]
+            recent_low_htf = df_htf['low'].rolling(20).min().shift(1).iloc[-1]
+            
+            htf_body = abs(curr_htf['close'] - curr_htf['open'])
+            htf_range = curr_htf['high'] - curr_htf['low']
+            htf_momentum = (htf_body / htf_range > 0.5) if htf_range > 0 else False
+            
+            bos_bull = curr_htf['close'] > recent_high_htf and htf_momentum
+            bos_bear = curr_htf['close'] < recent_low_htf and htf_momentum
+
+            # ---------------------------------------------------------
+            # MID LAYER (15 Min)
+            # ---------------------------------------------------------
+            df_mid['atr'] = QuantStrategy.calc_atr(df_mid)
+            curr_mid = df_mid.iloc[-1]
+            
+            atr_pct = (curr_mid['atr'] / curr_mid['close'])
+            if atr_pct < 0.0005 or atr_pct > 0.06: 
+                return None 
+
+            df_mid['fvg_bull'] = df_mid['low'] > df_mid['high'].shift(2)
+            df_mid['fvg_bear'] = df_mid['high'] < df_mid['low'].shift(2)
+            has_fvg_bull = df_mid['fvg_bull'].iloc[-3:-1].any()
+            has_fvg_bear = df_mid['fvg_bear'].iloc[-3:-1].any()
+
+            # ---------------------------------------------------------
+            # ENTRY LAYER (10 Min)
+            # ---------------------------------------------------------
+            curr_entry = df_entry.iloc[-1]
+            prev_entry = df_entry.iloc[-2]
+            prev2_entry = df_entry.iloc[-3]
+
+            entry_body = abs(curr_entry['close'] - curr_entry['open'])
+            entry_range = curr_entry['high'] - curr_entry['low']
+            if entry_range == 0 or (entry_body / entry_range < 0.5): 
+                return None 
+
+            df_entry['vol_sma'] = df_entry['vol'].rolling(20).mean()
+            vol_boost = 5 if curr_entry['vol'] > df_entry['vol_sma'].iloc[-1] else 0
+
+            df_entry['ema9'] = df_entry['close'].ewm(span=9, adjust=False).mean()
+            df_entry['ema21'] = df_entry['close'].ewm(span=21, adjust=False).mean()
+            
+            delta = df_entry['close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            df_entry['rsi'] = 100 - (100 / (1 + (gain / loss)))
+            
+            cross_up = (prev2_entry['ema9'] <= prev2_entry['ema21'] and prev_entry['ema9'] > prev_entry['ema21']) or \
+                       (prev_entry['ema9'] <= prev_entry['ema21'] and curr_entry['ema9'] > curr_entry['ema21'])
+                       
+            cross_down = (prev2_entry['ema9'] >= prev2_entry['ema21'] and prev_entry['ema9'] < prev_entry['ema21']) or \
+                         (prev_entry['ema9'] >= prev_entry['ema21'] and curr_entry['ema9'] < curr_entry['ema21'])
+                         
+            mom_up = curr_entry['ema9'] > curr_entry['ema21'] and curr_entry['close'] > curr_entry['ema9']
+            mom_down = curr_entry['ema9'] < curr_entry['ema21'] and curr_entry['close'] < curr_entry['ema9']
+            
+            side = None
+            confidence = 50 + vol_boost
+            
+            if curr_htf['adx'] > 30: 
+                confidence += 10
+            
+            # LONG SETUP
+            if trend == "BULLISH" and df_entry['rsi'].iloc[-1] < 70:
+                if cross_up or (curr_htf['adx'] > 30 and mom_up):
+                    side = "LONG"
+                    if bos_bull: confidence += 15
+                    if has_fvg_bull: confidence += 10
+
+            # SHORT SETUP
+            elif trend == "BEARISH" and df_entry['rsi'].iloc[-1] > 30:
+                if cross_down or (curr_htf['adx'] > 30 and mom_down):
+                    side = "SHORT"
+                    if bos_bear: confidence += 15
+                    if has_fvg_bear: confidence += 10
+
+            # ---------------------------------------------------------
+            # RISK & LEVERAGE MANAGEMENT
+            # ---------------------------------------------------------
+            if side and confidence >= 65:
+                entry_price = curr_entry['close']
+                atr_val = curr_mid['atr']
+                
+                sl_dist = atr_val * 1.5
+                sl = entry_price - sl_dist if side == "LONG" else entry_price + sl_dist
+                
+                sl_pct_dist = abs(entry_price - sl) / entry_price
+                if not (Config.MIN_SL_PCT <= sl_pct_dist <= Config.MAX_SL_PCT): 
+                    return None
+                
+                base_lev = (1.0 / sl_pct_dist) * 0.4
+                leverage = int(base_lev)
+                leverage = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE, leverage))
+                
+                risk_level = "Low" if leverage > 25 else ("Medium" if leverage >= 10 else "High")
+                
+                tp1 = entry_price + sl_dist if side == "LONG" else entry_price - sl_dist
+                tp2 = entry_price + (sl_dist * 2) if side == "LONG" else entry_price - (sl_dist * 2)
+                tp3 = entry_price + (sl_dist * 3) if side == "LONG" else entry_price - (sl_dist * 3)
+                
+                return {
+                    "side": side, "entry": entry_price, "sl": sl,
+                    "tp1": tp1, "tp2": tp2, "tp3": tp3,
+                    "leverage": leverage, "risk_level": risk_level,
+                    "confidence": min(100, int(confidence)),
+                    "atr_val": atr_val
+                }
+                
+        except Exception as e:
+            Logger.error("Strategy Engine Error", e)
+        return None
+
+class TradingSystem:
+    def __init__(self):
+        self.client = ExchangeClient()
+        self.tg = TelegramClient()
+        self.active_signals: Dict[str, Dict[str, Any]] = {}
+        self.daily_stats = {"total": 0, "wins": 0, "losses": 0, "r_profit": 0.0, "best": 0.0, "worst": 0.0}
+        self.last_signal: Dict[str, Dict[str, Any]] = {} 
+        self.running = True
+        self.loop_counter = 0
+        self.load_state()
+
+    def load_state(self):
+        try:
+            if os.path.exists(Config.STATE_FILE):
+                with open(Config.STATE_FILE, 'r') as f:
+                    data = json.load(f)
+                    self.active_signals = data.get("active", {})
+                    self.daily_stats = data.get("stats", self.daily_stats)
+                    self.last_signal = data.get("last_signal", {})
+        except Exception: pass
+
+    def save_state(self):
+        try:
+            if len(self.active_signals) > Config.MAX_STORED_SIGNALS:
+                oldest = sorted(self.active_signals.items(), key=lambda x: x[1]['timestamp'])
+                for k, _ in oldest[:-Config.MAX_STORED_SIGNALS]: del self.active_signals[k]
+            with open(Config.STATE_FILE, 'w') as f:
+                json.dump({"active": self.active_signals, "stats": self.daily_stats, "last_signal": self.last_signal}, f)
+        except Exception as e:
+            Logger.error("State save failed", e)
+
+    async def start(self):
+        await self.tg.initialize()
+        Logger.info("Engine Booting.")
+
+    async def stop(self):
+        self.running = False
+        await self.tg.close()
+        await self.client.close()
+
+    async def radar_loop(self):
         while self.running:
             try:
-                balance = await self.weex.check_balance()
-                Log.print(f"🏦 الرصيد اللحظي المتاح: {balance:.4f} USDT", Log.BLUE)
+                for symbol in Config.TARGET_COINS:
+                    if symbol in self.active_signals: continue
 
-                if balance < Config.FIXED_MARGIN_USDT:
-                    Log.print(f"⚠️ الرصيد لا يكفي. سيتم الانتظار...", Log.YELLOW)
-                    await self.tg.send_balance_warning(balance)
-                    await asyncio.sleep(60) 
+                    last_sig = self.last_signal.get(symbol)
+                    
+                    spread = await self.client.fetch_ticker_spread(symbol)
+                    if spread > Config.MAX_SPREAD_PCT: continue
+
+                    dfs = await asyncio.gather(
+                        self.client.fetch_ohlcv(symbol, Config.TF_HTF, 250),
+                        self.client.fetch_ohlcv(symbol, Config.TF_MID, 100),
+                        self.client.fetch_ohlcv(symbol, Config.TF_ENTRY, 100)
+                    )
+
+                    if any(df is None or df.empty for df in dfs): continue
+                    
+                    setup = await asyncio.to_thread(QuantStrategy.analyze, dfs[0], dfs[1], dfs[2])
+                    
+                    if setup:
+                        if last_sig:
+                            time_passed = time.time() - last_sig['time']
+                            if time_passed < 900: 
+                                if not (last_sig.get('max_stage', 0) >= 2 and last_sig['dir'] == setup['side']):
+                                    continue 
+
+                        clean_sym = symbol.replace('/USDT:USDT', '')
+                        
+                        self.active_signals[symbol] = {
+                            "side": setup['side'], "entry": setup['entry'], "sl": setup['sl'],
+                            "tp1": setup['tp1'], "tp2": setup['tp2'], "tp3": setup['tp3'],
+                            "stage": 0, "timestamp": time.time(), "atr_val": setup['atr_val']
+                        }
+                        self.last_signal[symbol] = {"time": time.time(), "dir": setup['side'], "max_stage": 0}
+                        
+                        icon = "🟢 LONG" if setup['side'] == "LONG" else "🔴 SHORT"
+                        msg = (
+                            f"{clean_sym}\n"
+                            f"{icon}\n\n"
+                            f"Entry: {setup['entry']:.4f}\n"
+                            f"TP1: {setup['tp1']:.4f}\n"
+                            f"TP2: {setup['tp2']:.4f}\n"
+                            f"TP3: {setup['tp3']:.4f}\n"
+                            f"SL: {setup['sl']:.4f}\n\n"
+                            f"Leverage: {setup['leverage']}\n"
+                            f"Risk: {setup['risk_level']}\n"
+                            f"Confidence: {setup['confidence']}%"
+                        )
+                        await self.tg.send(msg)
+                        Logger.success(f"Signal sent: {clean_sym}")
+
+                self.loop_counter += 1
+                if self.loop_counter % 5 == 0: gc.collect()
+                
+                await asyncio.sleep(15)
+
+            except Exception as e:
+                Logger.error("Radar Loop Crash", e)
+                await asyncio.sleep(10)
+
+    async def monitor_loop(self):
+        while self.running:
+            try:
+                if not self.active_signals:
+                    await asyncio.sleep(5)
                     continue
 
-                tickers = await self.mexc.fetch_tickers(self.mexc_symbols)
-                valid = [s for s, d in tickers.items() if s.replace('/USDT:USDT', 'USDT') not in self.pending_orders and s.replace('/USDT:USDT', 'USDT') not in self.active_trades and (time.time() - self.cooldown.get(s, 0)) > Config.COOLDOWN_SECONDS]
-                del tickers
-                
-                for mexc_sym in valid:
-                    if len(self.pending_orders) + len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    weex_sym = mexc_sym.replace('/USDT:USDT', 'USDT')
-                    try:
-                        ohlcv = await self.mexc.fetch_ohlcv(mexc_sym, Config.TF_MICRO, limit=100)
-                        
-                        # ⚠️ هنا بنسحب التحليل ومعاه رسالة التقرير (info)
-                        setup, info_str = await asyncio.to_thread(StrategyEngine.analyze, ohlcv)
-                        
-                        # ⚠️ طباعة التقرير اللحظي لكل عملة على شاشة السيرفر
-                        Log.print(f"🔎 فحص {weex_sym} ➔ {info_str}", Log.RESET)
-                        
-                        if setup:
-                            current_balance = await self.weex.check_balance()
-                            if current_balance < Config.FIXED_MARGIN_USDT: break 
-                            
-                            rule = self.weex.rules.get(weex_sym)
-                            if not rule: continue
-                            
-                            raw_size = (Config.FIXED_MARGIN_USDT * Config.FIXED_LEVERAGE) / setup['limit_price']
-                            final_size = max(rule['min_qty'], round(raw_size, rule['qty_prec']))
-                            
-                            p_prec, q_prec = rule['price_prec'], rule['qty_prec']
-                            limit_str = f"{setup['limit_price']:.{p_prec}f}"
-                            sl_str = f"{setup['sl']:.{p_prec}f}"
-                            tp_str = f"{setup['tp']:.{p_prec}f}"
-                            size_str = f"{final_size:.{q_prec}f}"
-                            
-                            order_id = await self.weex.place_smart_limit_order(weex_sym, setup['side'], size_str, limit_str, sl_str, tp_str)
-                            if order_id:
-                                self.pending_orders[weex_sym] = {
-                                    "orderId": order_id, "side": setup['side'], "entry": setup['limit_price'], 
-                                    "size": final_size, "sl": setup['sl'], "tp": setup['tp'], "atr": setup['atr'], "time": time.time()
-                                }
-                                self.cooldown[mexc_sym] = time.time()
-                    except: pass
-                    finally:
-                        if 'ohlcv' in locals(): del ohlcv 
-                    await asyncio.sleep(0.5)
-                
-                gc.collect() 
-                await asyncio.sleep(15)
-            except Exception: await asyncio.sleep(5)
+                active_symbols = list(self.active_signals.keys())
+                try:
+                    tickers = await self.client.exchange.fetch_tickers(active_symbols)
+                except Exception:
+                    await asyncio.sleep(5)
+                    continue
 
-    async def monitor_orders_and_dynamic_trailing(self):
-        while self.running:
-            try:
-                for sym in list(self.pending_orders.keys()):
-                    res = await self.weex.send_request("GET", f"/capi/v3/account/position/singlePosition?symbol={sym}")
-                    if res and isinstance(res, list) and len(res) > 0:
-                        pos = res[0]
-                        if float(pos.get("size", 0)) > 0:
-                            t = self.pending_orders.pop(sym)
-                            actual_entry = float(pos.get("avgPrice", t['entry']))
-                            
-                            activation_dist = t['atr'] * Config.ATR_TRAIL_ACTIVATION
-                            trail_dist = t['atr'] * Config.ATR_TRAIL_DISTANCE
-                            
-                            self.active_trades[sym] = {
-                                "side": t['side'], "entry": actual_entry, "size": t['size'], "atr": t['atr'],
-                                "highest": actual_entry, "lowest": actual_entry, "trailing_active": False,
-                                "activation_dist": activation_dist, "trail_dist": trail_dist
-                            }
-                            
-                            icon = "🟢" if t['side'] == "LONG" else "🔴"
-                            msg = (f"{icon} <b>TRADE FILLED! (5m)</b>\n"
-                                   f"━━━━━━━━━━━━━━━\n"
-                                   f"🪙 <b>Coin:</b> <code>{sym}</code>\n"
-                                   f"⚡ <b>Side:</b> {t['side']}\n"
-                                   f"🛒 <b>Entry:</b> <code>{actual_entry:.4f}</code>\n"
-                                   f"🌪️ <b>ATR:</b> <code>{t['atr']:.4f}</code>\n"
-                                   f"🛡️ <b>Smart Trail:</b> After {activation_dist:.4f} profit\n"
-                                   f"━━━━━━━━━━━━━━━\n"
-                                   f"🛑 <b>Hard SL:</b> <code>{t['sl']:.4f}</code>")
-                            await self.tg.send(msg)
+                for sym, trade in list(self.active_signals.items()):
+                    curr_price = tickers.get(sym, {}).get('last')
+                    if not curr_price: continue
+
+                    side = trade['side']
+                    stage = trade['stage']
                     
-                    elif time.time() - self.pending_orders[sym]['time'] > 1800: # ⚠️ إلغاء الطلب بعد نص ساعة لو متنفذش
-                        await self.weex.send_request("DELETE", f"/capi/v3/order?orderId={self.pending_orders[sym]['orderId']}")
-                        del self.pending_orders[sym]
+                    hit_sl, hit_tp1, hit_tp2, hit_tp3 = False, False, False, False
 
-                if self.active_trades:
-                    mexc_syms = [f"{s[:-4]}/USDT:USDT" for s in self.active_trades.keys()]
-                    tickers = await self.mexc.fetch_tickers(mexc_syms)
+                    if side == "LONG":
+                        if curr_price <= trade['sl']: hit_sl = True
+                        if curr_price >= trade['tp1'] and stage < 1: hit_tp1 = True
+                        if curr_price >= trade['tp2'] and stage < 2: hit_tp2 = True
+                        if curr_price >= trade['tp3']: hit_tp3 = True
+                    else:
+                        if curr_price >= trade['sl']: hit_sl = True
+                        if curr_price <= trade['tp1'] and stage < 1: hit_tp1 = True
+                        if curr_price <= trade['tp2'] and stage < 2: hit_tp2 = True
+                        if curr_price <= trade['tp3']: hit_tp3 = True
+
+                    if time.time() - trade['timestamp'] > (Config.TRADE_TIMEOUT_MINUTES * 60):
+                        del self.active_signals[sym]
+                        continue
+
+                    if hit_sl:
+                        if stage == 0:
+                            self.daily_stats['losses'] += 1
+                            self.daily_stats['total'] += 1
+                            self.daily_stats['r_profit'] -= 1.0
+                            self.daily_stats['worst'] = min(self.daily_stats['worst'], -1.0)
+                        del self.active_signals[sym]
+                        continue
+
+                    if hit_tp1:
+                        trade['stage'] = 1
+                        trade['sl'] = trade['entry'] 
+                        if sym in self.last_signal: self.last_signal[sym]['max_stage'] = max(self.last_signal[sym]['max_stage'], 1)
                     
-                    for sym, trade in list(self.active_trades.items()):
-                        curr_price = tickers.get(f"{sym[:-4]}/USDT:USDT", {}).get('last')
-                        if not curr_price: continue
+                    if hit_tp2:
+                        trade['stage'] = 2
+                        if sym in self.last_signal: self.last_signal[sym]['max_stage'] = max(self.last_signal[sym]['max_stage'], 2)
 
-                        trail_hit = False
-                        if trade['side'] == 'LONG':
-                            if curr_price > trade['highest']: trade['highest'] = curr_price
-                            if curr_price >= trade['entry'] + trade['activation_dist']: trade['trailing_active'] = True
-                            if trade['trailing_active'] and curr_price <= trade['highest'] - trade['trail_dist']: trail_hit = True
+                    if hit_tp3:
+                        self.daily_stats['wins'] += 1
+                        self.daily_stats['total'] += 1
+                        self.daily_stats['r_profit'] += 3.0
+                        self.daily_stats['best'] = max(self.daily_stats['best'], 3.0)
+                        if sym in self.last_signal: self.last_signal[sym]['max_stage'] = 3
+                        del self.active_signals[sym]
+                        continue
+                        
+                    if stage >= 1:
+                        trail_offset = trade['atr_val'] * 0.8
+                        min_improvement = trade['entry'] * 0.002
+                        if side == "LONG":
+                            new_sl = curr_price - trail_offset
+                            if new_sl - trade['sl'] >= min_improvement:
+                                trade['sl'] = new_sl
                         else:
-                            if curr_price < trade['lowest']: trade['lowest'] = curr_price
-                            if curr_price <= trade['entry'] - trade['activation_dist']: trade['trailing_active'] = True
-                            if trade['trailing_active'] and curr_price >= trade['lowest'] + trade['trail_dist']: trail_hit = True
+                            new_sl = curr_price + trail_offset
+                            if trade['sl'] - new_sl >= min_improvement:
+                                trade['sl'] = new_sl
 
-                        if trail_hit:
-                            await self.weex.send_request("POST", "/capi/v3/closePositions", {"symbol": sym}) 
-                            profit_pct = abs(curr_price - trade['entry']) / trade['entry'] * 100 * Config.FIXED_LEVERAGE
-                            await self.tg.send(f"🧠 <b>Smart Dynamic Trail Hit!</b>\n🪙 {sym}\n💰 Net ROE: +{profit_pct:.2f}%")
-                            del self.active_trades[sym]
-                            
-                        elif int(time.time()) % 60 == 0:
-                            res = await self.weex.send_request("GET", f"/capi/v3/account/position/singlePosition?symbol={sym}")
-                            if res and isinstance(res, list) and len(res) > 0 and float(res[0].get("size", 0)) == 0:
-                                del self.active_trades[sym]
-                                await self.tg.send(f"ℹ️ <b>Position Closed</b>\n🪙 {sym} hit Native Hard SL/TP.")
-
-            except Exception: pass
+            except Exception as e:
+                Logger.error("Monitor Loop Crash", e)
+                await asyncio.sleep(5)
             await asyncio.sleep(5)
 
-async def keep_alive_pinger():
-    while True:
-        try:
-            await asyncio.sleep(120)  
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                url = f"http://127.0.0.1:{os.environ.get('PORT', 10000)}/ping"
-                async with session.get(url) as resp: pass
-        except: pass
+    async def report_state_loop(self):
+        while self.running:
+            try:
+                await asyncio.sleep(Config.SAVE_STATE_INTERVAL)
+                self.save_state()
+                
+                now = datetime.utcnow()
+                if now.hour == 0 and now.minute < 6: 
+                    if self.daily_stats['total'] > 0:
+                        winrate = (self.daily_stats['wins'] / self.daily_stats['total']) * 100
+                        msg = (
+                            f"Daily Report\n"
+                            f"Trades: {self.daily_stats['total']}\n"
+                            f"W/L: {self.daily_stats['wins']}/{self.daily_stats['losses']}\n"
+                            f"Winrate: {winrate:.1f}%\n"
+                            f"Est PnL: {self.daily_stats['r_profit']:+.1f} R\n"
+                            f"Best: +{self.daily_stats['best']} R | Worst: {self.daily_stats['worst']} R"
+                        )
+                        await self.tg.send(msg)
+                    self.daily_stats = {"total": 0, "wins": 0, "losses": 0, "r_profit": 0.0, "best": 0.0, "worst": 0.0}
+                    self.save_state()
+                    await asyncio.sleep(360) 
+
+            except Exception as e:
+                Logger.error("State Loop Crash", e)
+                await asyncio.sleep(10)
 
 bot = TradingSystem()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await bot.initialize()
-    asyncio.create_task(bot.main_loop())
-    asyncio.create_task(bot.monitor_orders_and_dynamic_trailing())
-    asyncio.create_task(keep_alive_pinger())
+    await bot.start()
+    tasks = [
+        asyncio.create_task(bot.radar_loop()),
+        asyncio.create_task(bot.monitor_loop()),
+        asyncio.create_task(bot.report_state_loop())
+    ]
     yield
-    bot.running = False
+    await bot.stop()
+    for task in tasks: task.cancel()
+
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/ping")
-async def ping(): return JSONResponse(content={"status": "online"})
-@app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"])
+async def health_check(): return JSONResponse(content={"status": "online"})
+@app.api_route("/{path_name:path}", methods=["GET"])
 async def catch_all(path_name: str):
-    return HTMLResponse(content=f"<html><body style='background:#111;color:#0f0;padding:50px;'><h1>Sniper V19.2 (5m Scanner)</h1></body></html>", status_code=200)
+    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#58a6ff;padding:40px;font-family:monospace;'><h2>Engine Running</h2></body></html>", status_code=200)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), log_level="warning")
