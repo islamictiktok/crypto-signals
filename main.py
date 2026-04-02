@@ -3,8 +3,9 @@ import os
 import json
 import gc
 import time
+import random
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
 import pandas as pd
@@ -16,99 +17,136 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 from contextlib import asynccontextmanager
 
-# Disable pandas chained assignment warnings
+warnings = __import__('warnings')
+warnings.filterwarnings("ignore")
 pd.options.mode.chained_assignment = None
 
 # ==========================================
-# 1. CORE CONFIGURATION
+# 1. CENTRAL CONFIGURATION
 # ==========================================
 class Config:
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg")
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     
-    # Strategy Timeframes (Fixed MEXC Parameter Error)
     TF_HTF = '1h'       
     TF_MID = '15m'      
-    TF_ENTRY = '5m'     # ⚠️ تم التعديل إلى 5 دقائق لأن MEXC لا تدعم 10m
+    TF_ENTRY = '5m'     
     
-    TARGET_COINS = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT", "AVAX/USDT:USDT"]
+    MAX_TRADES_AT_ONCE = 5  
+    COOLDOWN_SECONDS = 1800  
     
-    # Risk & Execution Constraints
+    # Risk Management & Constraints
+    TARGET_SL_ROE_PCT = 25.0  
+    MAX_LEVERAGE = 100        
+    MIN_LEVERAGE = 5          
     MIN_RR_RATIO = 2.5
-    MAX_CONCURRENT_TRADES = 5
-    TRADE_TIMEOUT_MINUTES = 360    # 6 hours
-    MAX_SPREAD_PCT = 0.002         # 0.2% max spread
     
-    # SL Limits
-    MIN_SL_PCT = 0.002             # 0.2%
-    MAX_SL_PCT = 0.050             # 5.0%
+    MAX_SPREAD_PCT = 0.002
+    MIN_SL_PCT = 0.002
+    MAX_SL_PCT = 0.050
+    TRADE_TIMEOUT_MINUTES = 360
     
-    # Dynamic Leverage Bounds
-    MAX_LEVERAGE = 50
-    MIN_LEVERAGE = 5
-    
-    # System Stability
+    # Stability
     CACHE_TTL = 45                 
-    SAVE_STATE_INTERVAL = 300      
-    MAX_STORED_SIGNALS = 20        
     API_CONCURRENCY = 3            
+    MAX_STORED_SIGNALS = 20        
     
-    STATE_FILE = "production_state.json"
-    VERSION = "V-PRO (Anonymous Engine)"
+    STATE_FILE = "production_signals_state.json"
+
+    WHITELIST = [
+        "AAVEUSDT", "ADAUSDT", "AEROUSDT", "AGLDUSDT", "APEUSDT", "APTUSDT", "ARKMUSDT", "ATOMUSDT", 
+        "AVAXUSDT", "AXSUSDT", "BANDUSDT", "BCHUSDT", "BNBUSDT", "BTCUSDT", "COMPUSDT", "COWUSDT", 
+        "CRVUSDT", "CVXUSDT", "DASHUSDT", "DOGEUSDT", "DOTUSDT", "DUSKUSDT", "ENSUSDT", "ETCUSDT", 
+        "ETHUSDT", "FARTCOINUSDT", "HBARUSDT", "HYPEUSDT", "ICPUSDT", "IPUSDT", "JASMYUSDT", 
+        "JELLYJELLYUSDT", "JTOUSDT", "KASUSDT", "LDOUSDT", "LINKUSDT", "LTCUSDT", "LYNUSDT", 
+        "NEARUSDT", "NEOUSDT", "ONDOUSDT", "OPUSDT", "ORDIUSDT", "PAXGUSDT", "PENGUUSDT", 
+        "PUMPUSDT", "QNTUSDT", "RENDERUSDT", "SEIUSDT", "SOLUSDT", "SSVUSDT", "SUIUSDT", 
+        "TAOUSDT", "THETAUSDT", "TIAUSDT", "TONUSDT", "TRBUSDT", "TRUMPUSDT", "TRXUSDT", 
+        "UNIUSDT", "VETUSDT", "VIRTUALUSDT", "WIFUSDT", "WLDUSDT", "XAGUSDT", "XAUTUSDT", 
+        "XLMUSDT", "XRPUSDT", "YFIUSDT", "YGGUSDT", "ZECUSDT", "ZENUSDT"
+    ]
+    
+    VERSION = "Production Hedge-Fund Engine V25.0"
 
 # ==========================================
 # 2. PRODUCTION LOGGER
 # ==========================================
 class Logger:
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BLUE = '\033[94m'
+    RESET = '\033[0m'
+    
+    @staticmethod
+    def _timestamp():
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
     @staticmethod
     def info(msg: str):
-        print(f"\033[94m[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}] [INFO] {msg}\033[0m", flush=True)
-        
+        print(f"{Logger.BLUE}[{Logger._timestamp()}] [INFO] {msg}{Logger.RESET}", flush=True)
+
     @staticmethod
     def success(msg: str):
-        print(f"\033[92m[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}] [SUCCESS] {msg}\033[0m", flush=True)
-        
+        print(f"{Logger.GREEN}[{Logger._timestamp()}] [SUCCESS] {msg}{Logger.RESET}", flush=True)
+
     @staticmethod
     def warning(msg: str):
-        print(f"\033[93m[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}] [WARNING] {msg}\033[0m", flush=True)
-        
+        print(f"{Logger.YELLOW}[{Logger._timestamp()}] [WARN] {msg}{Logger.RESET}", flush=True)
+
     @staticmethod
     def error(msg: str, exc: Optional[Exception] = None):
-        print(f"\033[91m[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}] [ERROR] {msg}\033[0m", flush=True)
+        print(f"{Logger.RED}[{Logger._timestamp()}] [ERROR] {msg}{Logger.RESET}", flush=True)
         if exc:
-            print(f"\033[91m{traceback.format_exc()}\033[0m", flush=True)
+            print(f"{Logger.RED}{traceback.format_exc()}{Logger.RESET}", flush=True)
+
+def format_price(price: float) -> str:
+    if price < 0.001: return f"{price:.6f}"
+    elif price < 1: return f"{price:.4f}"
+    elif price < 100: return f"{price:.3f}"
+    return f"{price:.2f}"
 
 # ==========================================
-# 3. TELEGRAM CLIENT (Anonymous)
+# 3. ROBUST TELEGRAM CLIENT
 # ==========================================
-class TelegramClient:
+class TelegramNotifier:
     def __init__(self):
         self.url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
         self.session: Optional[aiohttp.ClientSession] = None
-
-    async def initialize(self):
-        if not self.session:
-            self.session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=10),
-                connector=aiohttp.TCPConnector(limit_per_host=10)
-            )
-
-    async def close(self):
+        
+    async def start(self): 
+        self.session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15),
+            connector=aiohttp.TCPConnector(limit_per_host=10)
+        )
+        
+    async def stop(self): 
         if self.session and not self.session.closed:
             await self.session.close()
-
-    async def send(self, text: str) -> bool:
-        if not self.session: return False
-        try:
-            payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-            async with self.session.post(self.url, json=payload) as resp:
-                return resp.status == 200
-        except Exception as e:
-            Logger.error("Telegram send failed", e)
-            return False
+        
+    async def send(self, text: str, reply_to: Optional[int] = None) -> Optional[int]:
+        if not self.session: return None
+        payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        if reply_to: 
+            payload["reply_to_message_id"] = reply_to
+            
+        for attempt in range(2):
+            try:
+                async with self.session.post(self.url, json=payload) as resp:
+                    if resp.status == 200:
+                        d = await resp.json()
+                        return d.get('result', {}).get('message_id')
+                    else:
+                        Logger.warning(f"Telegram API returned {resp.status}")
+            except asyncio.TimeoutError:
+                Logger.warning(f"Telegram timeout (Attempt {attempt+1})")
+            except Exception as e: 
+                Logger.error("Telegram error", e)
+            await asyncio.sleep(2)
+        return None
 
 # ==========================================
-# 4. EXCHANGE CLIENT (Rate-Limited, Cached)
+# 4. CACHED & RATE-LIMITED EXCHANGE CLIENT
 # ==========================================
 class ExchangeClient:
     def __init__(self):
@@ -120,18 +158,17 @@ class ExchangeClient:
         await self.exchange.close()
 
     async def fetch_ticker_spread(self, symbol: str) -> float:
-        """Fetches ticker to check bid/ask spread %"""
         for attempt in range(3):
             try:
                 async with self.semaphore:
                     ticker = await self.exchange.fetch_ticker(symbol)
                     if ticker and ticker.get('ask') and ticker.get('bid'):
                         ask, bid = ticker['ask'], ticker['bid']
-                        if ask > 0:
-                            return (ask - bid) / ask
-            except Exception:
-                await asyncio.sleep(1)
-        return 1.0 # High spread on failure to reject
+                        if ask > 0: return (ask - bid) / ask
+            except Exception as e:
+                Logger.warning(f"Spread fetch warning {symbol}: {e}")
+                await asyncio.sleep(2 ** attempt)
+        return 1.0 
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 200) -> Optional[pd.DataFrame]:
         now = time.time()
@@ -147,7 +184,8 @@ class ExchangeClient:
                     if symbol not in self.cache: self.cache[symbol] = {}
                     self.cache[symbol][timeframe] = (now, data)
                     return pd.DataFrame(data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            except ccxt.NetworkError:
+            except ccxt.NetworkError as e:
+                Logger.warning(f"Network error {symbol} {timeframe}: {e}")
                 await asyncio.sleep(2 ** attempt)
             except Exception as e:
                 Logger.error(f"OHLCV fetch failed {symbol}", e)
@@ -155,9 +193,9 @@ class ExchangeClient:
         return None
 
 # ==========================================
-# 5. QUANT STRATEGY ENGINE
+# 5. MULTI-LAYER STRATEGY ENGINE
 # ==========================================
-class QuantStrategy:
+class StrategyEngine:
     @staticmethod
     def calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
         high_low = df['high'] - df['low']
@@ -172,7 +210,7 @@ class QuantStrategy:
         down = df['low'].shift(1) - df['low']
         plus_dm = np.where((up > down) & (up > 0), up, 0.0)
         minus_dm = np.where((down > up) & (down > 0), down, 0.0)
-        atr = QuantStrategy.calc_atr(df, period)
+        atr = StrategyEngine.calc_atr(df, period)
         plus_di = 100 * (pd.Series(plus_dm).ewm(span=period, adjust=False).mean() / atr)
         minus_di = 100 * (pd.Series(minus_dm).ewm(span=period, adjust=False).mean() / atr)
         dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
@@ -180,74 +218,55 @@ class QuantStrategy:
 
     @staticmethod
     def analyze(df_htf: pd.DataFrame, df_mid: pd.DataFrame, df_entry: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        setup = None
         try:
-            # 1. Market Session Filter (Only London/NY: 07:00 to 21:00 UTC)
-            current_utc_hour = datetime.utcnow().hour
-            if not (7 <= current_utc_hour <= 21):
-                return None 
+            df_htf, df_mid, df_entry = df_htf.iloc[:-1].copy(), df_mid.iloc[:-1].copy(), df_entry.iloc[:-1].copy()
 
-            df_htf, df_mid, df_entry = df_htf.iloc[:-1], df_mid.iloc[:-1], df_entry.iloc[:-1]
-
-            # ---------------------------------------------------------
-            # LAYER 1: HTF (1 Hour) - Trend, ADX & Sideways Filter
-            # ---------------------------------------------------------
+            # --- LAYER 1: HTF (1H) ---
             df_htf['ema50'] = df_htf['close'].ewm(span=50, adjust=False).mean()
             df_htf['ema200'] = df_htf['close'].ewm(span=200, adjust=False).mean()
-            df_htf['adx'] = QuantStrategy.calc_adx(df_htf)
+            df_htf['adx'] = StrategyEngine.calc_adx(df_htf)
             
             curr_htf = df_htf.iloc[-1]
             
-            # Trend Strength & Sideways Check
             ema_diff_pct = abs(curr_htf['ema50'] - curr_htf['ema200']) / curr_htf['ema200']
             if ema_diff_pct < 0.0008 or curr_htf['adx'] < 15: 
-                return None # Reject sideways or weak trend
+                return None 
 
             trend = "BULLISH" if curr_htf['ema50'] > curr_htf['ema200'] and curr_htf['close'] > curr_htf['ema50'] else "BEARISH"
 
-            # Improved BOS (Momentum Break)
-            recent_high_htf = df_htf['high'].rolling(20).max().shift(1).iloc[-1]
-            recent_low_htf = df_htf['low'].rolling(20).min().shift(1).iloc[-1]
-            
-            htf_body = abs(curr_htf['close'] - curr_htf['open'])
-            htf_range = curr_htf['high'] - curr_htf['low']
-            htf_momentum = (htf_body / htf_range > 0.5) if htf_range > 0 else False
-            
-            bos_bull = curr_htf['close'] > recent_high_htf and htf_momentum
-            bos_bear = curr_htf['close'] < recent_low_htf and htf_momentum
-
-            # ---------------------------------------------------------
-            # LAYER 2: MID TF (15 Min) - Liquidity & Volatility
-            # ---------------------------------------------------------
-            df_mid['atr'] = QuantStrategy.calc_atr(df_mid)
+            # --- LAYER 2: MID TF (15m) ---
+            df_mid['atr'] = StrategyEngine.calc_atr(df_mid)
             curr_mid = df_mid.iloc[-1]
             
-            # Volatility Extreme Check
             atr_pct = (curr_mid['atr'] / curr_mid['close'])
-            if atr_pct < 0.0005 or atr_pct > 0.06: return None # Reject dead or extremely chaotic zones
+            if atr_pct < 0.0005 or atr_pct > 0.06: 
+                return None 
 
-            # FVG
+            # Liquidity Sweep Detection
+            recent_low = df_mid['low'].rolling(10).min().shift(1).iloc[-1]
+            recent_high = df_mid['high'].rolling(10).max().shift(1).iloc[-1]
+            liq_sweep_bull = curr_mid['low'] < recent_low and curr_mid['close'] > recent_low
+            liq_sweep_bear = curr_mid['high'] > recent_high and curr_mid['close'] < recent_high
+
             df_mid['fvg_bull'] = df_mid['low'] > df_mid['high'].shift(2)
             df_mid['fvg_bear'] = df_mid['high'] < df_mid['low'].shift(2)
             has_fvg_bull = df_mid['fvg_bull'].iloc[-3:-1].any()
             has_fvg_bear = df_mid['fvg_bear'].iloc[-3:-1].any()
 
-            # ---------------------------------------------------------
-            # LAYER 3: ENTRY TF (5 Min) - Cross, RSI, Smart Volume
-            # ---------------------------------------------------------
+            # --- LAYER 3: ENTRY TF (5m/15m) ---
             curr_entry = df_entry.iloc[-1]
             prev_entry = df_entry.iloc[-2]
             prev2_entry = df_entry.iloc[-3]
 
-            # Candle Strength Filter
             entry_body = abs(curr_entry['close'] - curr_entry['open'])
             entry_range = curr_entry['high'] - curr_entry['low']
-            if entry_range == 0 or (entry_body / entry_range < 0.5): return None # Reject weak candle
+            if entry_range == 0 or (entry_body / entry_range < 0.5): 
+                return None 
 
-            # Smart Volume Filter
             df_entry['vol_sma'] = df_entry['vol'].rolling(20).mean()
             vol_boost = 5 if curr_entry['vol'] > df_entry['vol_sma'].iloc[-1] else 0
 
-            # Indicators
             df_entry['ema9'] = df_entry['close'].ewm(span=9, adjust=False).mean()
             df_entry['ema21'] = df_entry['close'].ewm(span=21, adjust=False).mean()
             
@@ -271,23 +290,19 @@ class QuantStrategy:
             if curr_htf['adx'] > 30: 
                 confidence += 10
             
-            # LONG SETUP
             if trend == "BULLISH" and df_entry['rsi'].iloc[-1] < 70:
                 if cross_up or (curr_htf['adx'] > 30 and mom_up):
                     side = "LONG"
-                    if bos_bull: confidence += 15
                     if has_fvg_bull: confidence += 10
+                    if liq_sweep_bull: confidence += 15
 
-            # SHORT SETUP
             elif trend == "BEARISH" and df_entry['rsi'].iloc[-1] > 30:
                 if cross_down or (curr_htf['adx'] > 30 and mom_down):
                     side = "SHORT"
-                    if bos_bear: confidence += 15
                     if has_fvg_bear: confidence += 10
+                    if liq_sweep_bear: confidence += 15
 
-            # ---------------------------------------------------------
-            # DYNAMIC LEVERAGE & RISK ENGINE
-            # ---------------------------------------------------------
+            # --- DYNAMIC LEVERAGE & RISK ---
             if side and confidence >= 65:
                 entry_price = curr_entry['close']
                 atr_val = curr_mid['atr']
@@ -295,274 +310,293 @@ class QuantStrategy:
                 sl_dist = atr_val * 1.5
                 sl = entry_price - sl_dist if side == "LONG" else entry_price + sl_dist
                 
-                # SL Distance Safety
-                sl_pct_dist = abs(entry_price - sl) / entry_price
-                if not (Config.MIN_SL_PCT <= sl_pct_dist <= Config.MAX_SL_PCT): return None
+                sl_dist_pct = abs(entry_price - sl) / entry_price
+                if not (Config.MIN_SL_PCT <= sl_dist_pct <= Config.MAX_SL_PCT): 
+                    return None
                 
-                # Smarter Dynamic Leverage
-                base_lev = (1.0 / sl_pct_dist) * 0.4
-                leverage = int(base_lev)
+                # Upgraded Auto Leverage Formula
+                # Leverage = Target Risk / SL_Pct, adjusted by Trend strength
+                raw_leverage = (Config.TARGET_SL_ROE_PCT / 100.0) / sl_dist_pct
+                trend_modifier = 1.2 if curr_htf['adx'] > 35 else (0.8 if curr_htf['adx'] < 25 else 1.0)
+                
+                leverage = int(raw_leverage * trend_modifier)
                 leverage = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE, leverage))
+
+                risk_level = "Low" if leverage > 30 else ("Medium" if leverage >= 15 else "High")
                 
-                risk_level = "Low" if leverage > 25 else ("Medium" if leverage >= 10 else "High")
-                
-                # Targets
                 tp1 = entry_price + sl_dist if side == "LONG" else entry_price - sl_dist
                 tp2 = entry_price + (sl_dist * 2) if side == "LONG" else entry_price - (sl_dist * 2)
                 tp3 = entry_price + (sl_dist * 3) if side == "LONG" else entry_price - (sl_dist * 3)
-                
-                return {
-                    "side": side, "entry": entry_price, "sl": sl,
+
+                # Ensure minimum RR
+                if (abs(tp3 - entry_price) / abs(entry_price - sl)) < Config.MIN_RR_RATIO:
+                    return None
+
+                roe_tp1 = (abs(tp1 - entry_price) / entry_price) * 100 * leverage
+                roe_tp2 = (abs(tp2 - entry_price) / entry_price) * 100 * leverage
+                roe_tp3 = (abs(tp3 - entry_price) / entry_price) * 100 * leverage
+                roe_sl = - (sl_dist_pct * 100 * leverage)
+
+                setup = {
+                    "side": side, "entry": entry_price, "sl": sl, 
                     "tp1": tp1, "tp2": tp2, "tp3": tp3,
                     "leverage": leverage, "risk_level": risk_level,
                     "confidence": min(100, int(confidence)),
-                    "atr_val": atr_val
+                    "atr_val": atr_val,
+                    "roe_tp1": roe_tp1, "roe_tp2": roe_tp2, "roe_tp3": roe_tp3, "roe_sl": roe_sl
                 }
                 
         except Exception as e:
-            Logger.error("Strategy Engine Error", e)
-        return None
+            Logger.error("Strategy Engine Analysis Error", e)
+        finally:
+            if 'df_htf' in locals(): del df_htf
+            if 'df_mid' in locals(): del df_mid
+            if 'df_entry' in locals(): del df_entry
+        return setup
 
 # ==========================================
-# 6. ORCHESTRATOR
+# 6. SIGNAL ORCHESTRATOR
 # ==========================================
 class TradingSystem:
     def __init__(self):
         self.client = ExchangeClient()
-        self.tg = TelegramClient()
+        self.tg = TelegramNotifier()
         self.active_signals: Dict[str, Dict[str, Any]] = {}
-        self.daily_stats = {"total": 0, "wins": 0, "losses": 0, "r_profit": 0.0, "best": 0.0, "worst": 0.0}
-        self.last_signal: Dict[str, Dict[str, Any]] = {} 
+        self.last_signal_time: Dict[str, float] = {}
         self.running = True
-        self.loop_counter = 0
+        self.mexc_symbols = [] 
+        self.loop_cycles = 0
+
+    async def initialize(self):
+        await self.tg.start()
+        try:
+            markets = await self.client.exchange.load_markets()
+            for sym in Config.WHITELIST:
+                mexc_sym = f"{sym[:-4]}/USDT:USDT"
+                if mexc_sym in markets:
+                    self.mexc_symbols.append(mexc_sym)
+        except Exception as e:
+            Logger.error("Error loading markets", e)
+        
         self.load_state()
+        Logger.success(f"🚀 {Config.VERSION} STARTED")
 
     def load_state(self):
         try:
             if os.path.exists(Config.STATE_FILE):
-                with open(Config.STATE_FILE, 'r') as f:
+                with open(Config.STATE_FILE, "r") as f:
                     data = json.load(f)
                     self.active_signals = data.get("active", {})
-                    self.daily_stats = data.get("stats", self.daily_stats)
-                    self.last_signal = data.get("last_signal", {})
-        except Exception: pass
+                    self.last_signal_time = data.get("cooldown", {})
+        except Exception as e:
+            Logger.error("State load failed", e)
 
     def save_state(self):
         try:
             if len(self.active_signals) > Config.MAX_STORED_SIGNALS:
-                oldest = sorted(self.active_signals.items(), key=lambda x: x[1]['timestamp'])
-                for k, _ in oldest[:-Config.MAX_STORED_SIGNALS]: del self.active_signals[k]
-            with open(Config.STATE_FILE, 'w') as f:
-                json.dump({"active": self.active_signals, "stats": self.daily_stats, "last_signal": self.last_signal}, f)
+                oldest = sorted(self.active_signals.items(), key=lambda x: x[1]['time'])
+                for k, _ in oldest[:-Config.MAX_STORED_SIGNALS]: 
+                    del self.active_signals[k]
+
+            with open(Config.STATE_FILE, "w") as f: 
+                json.dump({"active": self.active_signals, "cooldown": self.last_signal_time}, f)
         except Exception as e:
             Logger.error("State save failed", e)
 
-    async def start(self):
-        await self.tg.initialize()
-        Logger.info("Engine Booting.")
-
-    async def stop(self):
-        self.running = False
-        await self.tg.close()
-        await self.client.close()
-
     async def radar_loop(self):
+        """Scans for new setups adaptively"""
         while self.running:
             try:
-                for symbol in Config.TARGET_COINS:
-                    if symbol in self.active_signals: continue
-
-                    last_sig = self.last_signal.get(symbol)
-                    
-                    spread = await self.client.fetch_ticker_spread(symbol)
-                    if spread > Config.MAX_SPREAD_PCT: continue
-
-                    dfs = await asyncio.gather(
-                        self.client.fetch_ohlcv(symbol, Config.TF_HTF, 250),
-                        self.client.fetch_ohlcv(symbol, Config.TF_MID, 100),
-                        self.client.fetch_ohlcv(symbol, Config.TF_ENTRY, 100)
-                    )
-
-                    if any(df is None or df.empty for df in dfs): continue
-                    
-                    setup = await asyncio.to_thread(QuantStrategy.analyze, dfs[0], dfs[1], dfs[2])
-                    
-                    if setup:
-                        if last_sig:
-                            time_passed = time.time() - last_sig['time']
-                            if time_passed < 900: 
-                                if not (last_sig.get('max_stage', 0) >= 2 and last_sig['dir'] == setup['side']):
-                                    continue 
-
-                        clean_sym = symbol.replace('/USDT:USDT', '')
-                        
-                        self.active_signals[symbol] = {
-                            "side": setup['side'], "entry": setup['entry'], "sl": setup['sl'],
-                            "tp1": setup['tp1'], "tp2": setup['tp2'], "tp3": setup['tp3'],
-                            "stage": 0, "timestamp": time.time(), "atr_val": setup['atr_val']
-                        }
-                        self.last_signal[symbol] = {"time": time.time(), "dir": setup['side'], "max_stage": 0}
-                        
-                        icon = "🟢 LONG" if setup['side'] == "LONG" else "🔴 SHORT"
-                        msg = (
-                            f"{clean_sym}\n"
-                            f"{icon}\n\n"
-                            f"Entry: {setup['entry']:.4f}\n"
-                            f"TP1: {setup['tp1']:.4f}\n"
-                            f"TP2: {setup['tp2']:.4f}\n"
-                            f"TP3: {setup['tp3']:.4f}\n"
-                            f"SL: {setup['sl']:.4f}\n\n"
-                            f"Leverage: {setup['leverage']}x\n"
-                            f"Risk: {setup['risk_level']}\n"
-                            f"Confidence: {setup['confidence']}%"
-                        )
-                        await self.tg.send(msg)
-                        Logger.success(f"Signal sent: {clean_sym}")
-
-                self.loop_counter += 1
-                if self.loop_counter % 5 == 0: gc.collect()
+                # Adaptive sleep mapping
+                active_count = len(self.active_signals)
+                sleep_time = 15 if active_count == 0 else 30
                 
+                valid_symbols = [s for s in self.mexc_symbols if s not in self.active_signals and (time.time() - self.last_signal_time.get(s, 0)) > Config.COOLDOWN_SECONDS]
+
+                if valid_symbols:
+                    for sym in valid_symbols:
+                        if len(self.active_signals) >= Config.MAX_TRADES_AT_ONCE: break
+                        
+                        try:
+                            spread = await self.client.fetch_ticker_spread(sym)
+                            if spread > Config.MAX_SPREAD_PCT: continue
+
+                            dfs = await asyncio.gather(
+                                self.client.fetch_ohlcv(sym, Config.TF_HTF, 250),
+                                self.client.fetch_ohlcv(sym, Config.TF_MID, 100),
+                                self.client.fetch_ohlcv(sym, Config.TF_ENTRY, 100)
+                            )
+
+                            if any(df is None or df.empty for df in dfs): continue
+                            
+                            setup = await asyncio.to_thread(StrategyEngine.analyze, dfs[0], dfs[1], dfs[2])
+                            
+                            if setup:
+                                clean_name = sym.replace('/USDT:USDT', '')
+                                icon = "🟢 LONG" if setup['side'] == "LONG" else "🔴 SHORT"
+                                
+                                msg = (
+                                    f"<b>{clean_name}</b>\n"
+                                    f"{icon}\n"
+                                    f"━━━━━━━━━━━━━━━\n"
+                                    f"Entry: <code>{format_price(setup['entry'])}</code>\n"
+                                    f"━━━━━━━━━━━━━━━\n"
+                                    f"TP 1: <code>{format_price(setup['tp1'])}</code> (+{setup['roe_tp1']:.1f}%)\n"
+                                    f"TP 2: <code>{format_price(setup['tp2'])}</code> (+{setup['roe_tp2']:.1f}%)\n"
+                                    f"TP 3: <code>{format_price(setup['tp3'])}</code> (+{setup['roe_tp3']:.1f}%)\n"
+                                    f"━━━━━━━━━━━━━━━\n"
+                                    f"SL: <code>{format_price(setup['sl'])}</code> ({setup['roe_sl']:.1f}%)\n"
+                                    f"━━━━━━━━━━━━━━━\n"
+                                    f"Leverage: {setup['leverage']}x\n"
+                                    f"Risk: {setup['risk_level']}\n"
+                                    f"Confidence: {setup['confidence']}%"
+                                )
+                                
+                                msg_id = await self.tg.send(msg)
+                                if msg_id:
+                                    self.active_signals[sym] = {
+                                        **setup, 
+                                        "msg_id": msg_id, 
+                                        "stage": 0,
+                                        "time": time.time()
+                                    }
+                                    self.last_signal_time[sym] = time.time()
+                                    Logger.success(f"Signal sent: {clean_name}")
+                                    
+                        except Exception as inner_e:
+                            Logger.error(f"Radar loop internal error for {sym}", inner_e)
+                        
+                        await asyncio.sleep(0.5) 
+                
+                # Controlled Garbage Collection
+                self.loop_cycles += 1
+                if self.loop_cycles % 10 == 0:
+                    gc.collect()
+                    self.save_state()
+
+                await asyncio.sleep(sleep_time)
+
+            except Exception as e: 
+                Logger.error("Radar Loop Global Crash", e)
                 await asyncio.sleep(15)
 
-            except Exception as e:
-                Logger.error("Radar Loop Crash", e)
-                await asyncio.sleep(10)
-
     async def monitor_loop(self):
+        """Monitors active signals, updates SL and handles TPs cleanly"""
         while self.running:
             try:
-                if not self.active_signals:
-                    await asyncio.sleep(5)
+                if not self.active_signals: 
+                    await asyncio.sleep(10)
                     continue
-
-                active_symbols = list(self.active_signals.keys())
-                try:
-                    tickers = await self.client.exchange.fetch_tickers(active_symbols)
-                except Exception:
-                    await asyncio.sleep(5)
-                    continue
-
-                for sym, trade in list(self.active_signals.items()):
-                    curr_price = tickers.get(sym, {}).get('last')
-                    if not curr_price: continue
-                    clean_sym = sym.replace('/USDT:USDT', '')
-
-                    side = trade['side']
-                    stage = trade['stage']
                     
-                    hit_sl, hit_tp1, hit_tp2, hit_tp3 = False, False, False, False
-
-                    if side == "LONG":
-                        if curr_price <= trade['sl']: hit_sl = True
-                        if curr_price >= trade['tp1'] and stage < 1: hit_tp1 = True
-                        if curr_price >= trade['tp2'] and stage < 2: hit_tp2 = True
-                        if curr_price >= trade['tp3']: hit_tp3 = True
-                    else:
-                        if curr_price >= trade['sl']: hit_sl = True
-                        if curr_price <= trade['tp1'] and stage < 1: hit_tp1 = True
-                        if curr_price <= trade['tp2'] and stage < 2: hit_tp2 = True
-                        if curr_price <= trade['tp3']: hit_tp3 = True
-
-                    if time.time() - trade['timestamp'] > (Config.TRADE_TIMEOUT_MINUTES * 60):
-                        del self.active_signals[sym]
-                        continue
-
+                tickers = await self.client.exchange.fetch_tickers(list(self.active_signals.keys()))
+                
+                for sym, t in list(self.active_signals.items()):
+                    curr = tickers.get(sym, {}).get('last')
+                    if not curr: continue
+                    
+                    clean_name = sym.replace('/USDT:USDT', '')
+                    side = t['side']
+                    stage = t['stage']
+                    msg_id = t['msg_id']
+                    
+                    # 1. Stop Loss Hit (Includes Trailing)
+                    hit_sl = False
+                    if (side == "LONG" and curr <= t['sl']) or (side == "SHORT" and curr >= t['sl']):
+                        hit_sl = True
+                        
                     if hit_sl:
                         if stage == 0:
-                            self.daily_stats['losses'] += 1
-                            self.daily_stats['total'] += 1
-                            self.daily_stats['r_profit'] -= 1.0
-                            self.daily_stats['worst'] = min(self.daily_stats['worst'], -1.0)
-                        del self.active_signals[sym]
-                        continue
-
-                    if hit_tp1:
-                        trade['stage'] = 1
-                        trade['sl'] = trade['entry'] 
-                        if sym in self.last_signal: self.last_signal[sym]['max_stage'] = max(self.last_signal[sym]['max_stage'], 1)
-                        await self.tg.send(f"✅ TP1 | {clean_sym}")
-                    
-                    if hit_tp2:
-                        trade['stage'] = 2
-                        if sym in self.last_signal: self.last_signal[sym]['max_stage'] = max(self.last_signal[sym]['max_stage'], 2)
-                        await self.tg.send(f"✅ TP2 | {clean_sym}")
-
-                    if hit_tp3:
-                        self.daily_stats['wins'] += 1
-                        self.daily_stats['total'] += 1
-                        self.daily_stats['r_profit'] += 3.0
-                        self.daily_stats['best'] = max(self.daily_stats['best'], 3.0)
-                        if sym in self.last_signal: self.last_signal[sym]['max_stage'] = 3
-                        await self.tg.send(f"🎯 Full TP | {clean_sym}")
-                        del self.active_signals[sym]
-                        continue
-                        
-                    # ADVANCED TRAILING STOP
-                    if stage >= 1:
-                        trail_offset = trade['atr_val'] * 0.8
-                        min_improvement = trade['entry'] * 0.002
-                        if side == "LONG":
-                            new_sl = curr_price - trail_offset
-                            if new_sl - trade['sl'] >= min_improvement:
-                                trade['sl'] = new_sl
+                            await self.tg.send(f"🛑 <b>Stop Loss Hit</b>", reply_to=msg_id)
+                            Logger.info(f"🛑 {clean_name} Hit SL")
                         else:
-                            new_sl = curr_price + trail_offset
-                            if trade['sl'] - new_sl >= min_improvement:
-                                trade['sl'] = new_sl
+                            await self.tg.send(f"🛡️ <b>Trailing Stop Hit</b>\nTrade closed safely.", reply_to=msg_id)
+                            Logger.info(f"🛡️ {clean_name} Stopped out in profit/BE")
+                            
+                        del self.active_signals[sym]
+                        continue
+
+                    # 2. Timeout Closure
+                    if time.time() - t.get("time", 0) > (Config.TRADE_TIMEOUT_MINUTES * 60):
+                        await self.tg.send(f"⏳ <b>Timeout Closure</b>\nTrade inactive for {Config.TRADE_TIMEOUT_MINUTES//60}h.", reply_to=msg_id)
+                        del self.active_signals[sym]
+                        continue
+
+                    # 3. Targets and Trailing
+                    hit_tp1 = (side == "LONG" and curr >= t['tp1']) or (side == "SHORT" and curr <= t['tp1'])
+                    hit_tp2 = (side == "LONG" and curr >= t['tp2']) or (side == "SHORT" and curr <= t['tp2'])
+                    hit_tp3 = (side == "LONG" and curr >= t['tp3']) or (side == "SHORT" and curr <= t['tp3'])
+
+                    if hit_tp1 and stage == 0:
+                        t['stage'] = 1
+                        t['sl'] = t['entry'] 
+                        await self.tg.send(f"✅ <b>TP1 HIT!</b> 🚀\nSL moved to Break-Even.", reply_to=msg_id)
+                        
+                    if hit_tp2 and stage == 1:
+                        t['stage'] = 2
+                        await self.tg.send(f"✅✅ <b>TP2 HIT!</b> 🚀🚀", reply_to=msg_id)
+                        
+                    if hit_tp3:
+                        await self.tg.send(f"🎯 <b>FULL TP3 HIT!</b> 👑\nTracking completed.", reply_to=msg_id)
+                        Logger.success(f"🎯 {clean_name} Full TP Hit!")
+                        del self.active_signals[sym]
+                        continue
+
+                    # 4. Advanced ATR Trailing Stop (After TP1)
+                    if stage >= 1:
+                        trail_offset = t['atr_val'] * 0.8
+                        min_improvement = t['entry'] * 0.002 # Must improve by at least 0.2% to avoid micro-updates
+                        
+                        if side == "LONG":
+                            new_sl = curr - trail_offset
+                            if new_sl - t['sl'] >= min_improvement:
+                                t['sl'] = new_sl
+                        else:
+                            new_sl = curr + trail_offset
+                            if t['sl'] - new_sl >= min_improvement:
+                                t['sl'] = new_sl
 
             except Exception as e:
-                Logger.error("Monitor Loop Crash", e)
-                await asyncio.sleep(5)
+                Logger.error("Monitor Loop Global Crash", e)
+                await asyncio.sleep(10)
+                
             await asyncio.sleep(5)
 
-    async def report_state_loop(self):
-        while self.running:
-            try:
-                await asyncio.sleep(Config.SAVE_STATE_INTERVAL)
-                self.save_state()
-                
-                now = datetime.utcnow()
-                if now.hour == 0 and now.minute < 6: 
-                    if self.daily_stats['total'] > 0:
-                        winrate = (self.daily_stats['wins'] / self.daily_stats['total']) * 100
-                        msg = (
-                            f"Daily Report\n"
-                            f"Trades: {self.daily_stats['total']}\n"
-                            f"W/L: {self.daily_stats['wins']}/{self.daily_stats['losses']}\n"
-                            f"Winrate: {winrate:.1f}%\n"
-                            f"Est PnL: {self.daily_stats['r_profit']:+.1f} R\n"
-                            f"Best: +{self.daily_stats['best']} R | Worst: {self.daily_stats['worst']} R"
-                        )
-                        await self.tg.send(msg)
-                    self.daily_stats = {"total": 0, "wins": 0, "losses": 0, "r_profit": 0.0, "best": 0.0, "worst": 0.0}
-                    self.save_state()
-                    await asyncio.sleep(360) 
-
-            except Exception as e:
-                Logger.error("State Loop Crash", e)
-                await asyncio.sleep(10)
+async def keep_alive_pinger():
+    """Jittered keep-alive ping to prevent Render sleep state"""
+    while True:
+        try:
+            jitter = random.uniform(120, 240)
+            await asyncio.sleep(jitter) 
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                url = f"http://127.0.0.1:{os.environ.get('PORT', 10000)}/ping"
+                async with session.get(url) as resp: pass
+        except Exception: pass
 
 bot = TradingSystem()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await bot.start()
+    await bot.initialize()
     tasks = [
         asyncio.create_task(bot.radar_loop()),
         asyncio.create_task(bot.monitor_loop()),
-        asyncio.create_task(bot.report_state_loop())
+        asyncio.create_task(keep_alive_pinger())
     ]
     yield
-    await bot.stop()
+    bot.running = False
     for task in tasks: task.cancel()
+    await bot.tg.stop()
+    await bot.client.close()
 
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/ping")
-async def health_check(): return JSONResponse(content={"status": "online"})
-@app.api_route("/{path_name:path}", methods=["GET"])
+async def ping(): 
+    return JSONResponse(content={"status": "online"})
+
+@app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def catch_all(path_name: str):
-    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#58a6ff;padding:40px;font-family:monospace;'><h2>Engine Running</h2></body></html>", status_code=200)
+    return HTMLResponse(content=f"<html><body style='background:#0d1117;color:#00ff00;padding:50px;font-family:monospace;'><h1>System Active</h1></body></html>", status_code=200)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), log_level="warning")
