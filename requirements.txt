@@ -1,6 +1,6 @@
+ccxt
 pandas
 numpy
-ccxt
 aiohttp
 fastapi
 uvicorn
