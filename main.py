@@ -1,14 +1,19 @@
 import asyncio
-import gc
 import os
 import json
+import gc
+import time
+import traceback
 import warnings
 from datetime import datetime, timezone
+from typing import Dict, Any, List
+
 import pandas as pd
 import pandas_ta as ta
+import numpy as np
 import ccxt.async_support as ccxt
 import aiohttp
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 from contextlib import asynccontextmanager
@@ -25,22 +30,21 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
     TIMEFRAME = '30m'            
-    TOP_COINS_LIMIT = 40         # مسح أفضل 40 عملة سيولة
+    TOP_COINS_LIMIT = 40         
     
-    MAX_TRADES_AT_ONCE = 3       # 👈 الحد الأقصى للصفقات النشطة في نفس الوقت
-    RR_RATIO = 2.0               # نسبة الهدف إلى الستوب (2:1)
+    MAX_TRADES_AT_ONCE = 3       # الحد الأقصى للصفقات (3 صفقات)
+    RR_RATIO = 2.0               # 👈 النسبة الصارمة للهدف والاستوب (2:1)
     
-    # إعدادات الرافعة الأوتوماتيكية وإدارة المخاطر
-    TARGET_SL_ROE_PCT = 25.0     # أقصى خسارة مقبولة كنسبة مئوية من الهامش (25%)
-    MAX_LEVERAGE = 50            # تم تقليل الحد الأقصى للرافعة إلى 50x للواقعية
+    TARGET_SL_ROE_PCT = 25.0     # أقصى خسارة مقبولة (ROE 25%)
+    MAX_LEVERAGE = 50            
     MIN_LEVERAGE = 5
     
-    COOLDOWN_SECONDS = 7200      # تبريد العملة لساعتين بعد الإشارة
-    TRADE_TIMEOUT_MINUTES = 720  # إلغاء المراقبة بعد 12 ساعة
+    COOLDOWN_SECONDS = 7200      
+    TRADE_TIMEOUT_MINUTES = 720  
     API_CONCURRENCY = 4
     
-    STATE_FILE = "smart_radar_30m_state.json"
-    VERSION = "VIP Radar V-3.55 (Max 3 Trades)"
+    STATE_FILE = "smart_radar_30m_v3650.json"
+    VERSION = "VIP Radar V-3650.0 (Strict 2:1 S/R)"
 
 # ==========================================
 # 2. نظام تسجيل الأخطاء والاستقرار (LOGGER & RETRY)
@@ -55,7 +59,7 @@ class Logger:
     @staticmethod
     def success(msg: str): print(f"{Logger.GREEN}[{Logger._timestamp()}] [SUCCESS] {msg}{Logger.RESET}", flush=True)
     @staticmethod
-    def error(msg: str, exc: Optional[Exception] = None):
+    def error(msg: str, exc: Exception = None):
         print(f"{Logger.RED}[{Logger._timestamp()}] [ERROR] {msg}{Logger.RESET}", flush=True)
         if exc: print(f"{Logger.RED}{traceback.format_exc()}{Logger.RESET}", flush=True)
 
@@ -81,7 +85,7 @@ def format_price(price: float) -> str:
 class TelegramNotifier:
     def __init__(self):
         self.url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.session = None
         
     async def start(self): 
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
@@ -89,7 +93,7 @@ class TelegramNotifier:
     async def stop(self): 
         if self.session and not self.session.closed: await self.session.close()
         
-    async def send(self, text: str, reply_to: Optional[int] = None) -> Optional[int]:
+    async def send(self, text: str, reply_to: int = None):
         if not self.session: return None
         payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         if reply_to: payload["reply_to_message_id"] = reply_to
@@ -106,38 +110,30 @@ class TelegramNotifier:
         return None
 
 # ==========================================
-# 4. محرك التحليل الكمي (S/R, RSI, FVG, OB)
+# 4. محرك التحليل الكمي (Strict Structural SL/TP)
 # ==========================================
 class QuantEngine:
     @staticmethod
-    def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-        delta = series.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        return 100 - (100 / (1 + rs))
-
-    @staticmethod
-    def analyze(df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    def analyze(df: pd.DataFrame) -> Dict[str, Any]:
         try:
-            df = df.iloc[:-1].copy() # إغفال الشمعة الحالية غير المكتملة
-            if len(df) < 50: return None
+            df = df.iloc[:-1].copy()
+            if len(df) < 200: return None
+            
+            df['rsi'] = ta.rsi(df['close'], length=14)
+            df['ema200'] = ta.ema(df['close'], length=200) # فلتر الاتجاه
             
             curr = df.iloc[-1]
-            
-            # 1. مؤشر RSI
-            df['rsi'] = QuantEngine.calc_rsi(df['close'])
             curr_rsi = df['rsi'].iloc[-1]
+            curr_ema200 = df['ema200'].iloc[-1]
             
-            # 2. تحديد الدعوم والمقاومات
-            recent_low = df['low'].rolling(20).min().iloc[-1]
-            recent_high = df['high'].rolling(20).max().iloc[-1]
+            # تحديد الدعوم والمقاومات
+            recent_low = df['low'].rolling(50).min().iloc[-1]
+            recent_high = df['high'].rolling(50).max().iloc[-1]
             
-            # 3. الفجوات السعرية (FVG)
+            # الفجوات السعرية (FVG) والأوردر بلوك (OB)
             df['fvg_bull'] = (df['low'] > df['high'].shift(2))
             df['fvg_bear'] = (df['high'] < df['low'].shift(2))
             
-            # 4. الأوردر بلوك (OB)
             df['bull_ob'] = (df['close'].shift(1) < df['open'].shift(1)) & (df['close'] > df['open']) & (df['close'] > df['high'].shift(1))
             df['bear_ob'] = (df['close'].shift(1) > df['open'].shift(1)) & (df['close'] < df['open']) & (df['close'] < df['low'].shift(1))
             
@@ -145,65 +141,67 @@ class QuantEngine:
             entry_price = 0.0
             sl_price = 0.0
             
-            # --- استراتيجية الشراء (LONG) ---
+            # --- 🟢 استراتيجية الشراء (LONG) ---
             dist_to_support = (curr['close'] - recent_low) / curr['close']
-            if 0 <= dist_to_support < 0.015 and curr_rsi <= 35:
+            if 0 <= dist_to_support < 0.02 and curr_rsi <= 35 and curr['close'] > curr_ema200:
                 side = "LONG"
-                
                 recent_fvgs = df[df['fvg_bull']].tail(5)
                 recent_obs = df[df['bull_ob']].tail(5)
                 
                 if not recent_fvgs.empty:
                     idx = recent_fvgs.index[-1]
                     entry_price = df['high'].iloc[idx-2] 
+                    # 👈 الستوب الهيكلي تحت الدعم الأخير
                     sl_price = recent_low * 0.995 
                 elif not recent_obs.empty:
                     idx = recent_obs.index[-1]
                     entry_price = df['high'].iloc[idx-1]
+                    # 👈 الستوب الهيكلي تحت الأوردر بلوك
                     sl_price = df['low'].iloc[idx-1] * 0.995 
                 else:
                     entry_price = recent_low * 1.002
                     sl_price = recent_low * 0.995
 
-            # --- استراتيجية البيع (SHORT) ---
+            # --- 🔴 استراتيجية البيع (SHORT) ---
             dist_to_resist = (recent_high - curr['close']) / curr['close']
-            if 0 <= dist_to_resist < 0.015 and curr_rsi >= 65:
+            if 0 <= dist_to_resist < 0.02 and curr_rsi >= 65 and curr['close'] < curr_ema200:
                 side = "SHORT"
-                
                 recent_fvgs = df[df['fvg_bear']].tail(5)
                 recent_obs = df[df['bear_ob']].tail(5)
                 
                 if not recent_fvgs.empty:
                     idx = recent_fvgs.index[-1]
                     entry_price = df['low'].iloc[idx-2]
+                    # 👈 الستوب الهيكلي فوق المقاومة الأخيرة
                     sl_price = recent_high * 1.005
                 elif not recent_obs.empty:
                     idx = recent_obs.index[-1]
                     entry_price = df['low'].iloc[idx-1]
+                    # 👈 الستوب الهيكلي فوق الأوردر بلوك
                     sl_price = df['high'].iloc[idx-1] * 1.005
                 else:
                     entry_price = recent_high * 0.998
                     sl_price = recent_high * 1.005
 
-            # --- الحسابات النهائية وتحديد الرافعة ---
+            # --- الحسابات النهائية (2:1 Strictly) ---
             if side and entry_price > 0 and sl_price > 0:
                 
-                # 👈 تحسين: التأكد من أن السعر الحالي ليس بعيداً جداً عن نقطة الدخول (Limit Order Viability)
+                # التأكد أن السعر الحالي لم يهرب
                 if (side == "LONG" and curr['close'] > entry_price * 1.015) or \
                    (side == "SHORT" and curr['close'] < entry_price * 0.985):
-                    return None # السعر هرب من نقطة الدخول المعلقة
+                    return None 
                 
                 sl_dist_pct = abs(entry_price - sl_price) / entry_price
-                if sl_dist_pct < 0.002 or sl_dist_pct > 0.06: return None # تصفية المخاطر العالية جداً أو القليلة جداً
+                if sl_dist_pct < 0.002 or sl_dist_pct > 0.08: return None 
                 
-                # الرافعة الأوتوماتيكية: Leverage = Target_ROE / SL_Percentage
                 raw_leverage = (Config.TARGET_SL_ROE_PCT / 100.0) / sl_dist_pct
                 leverage = int(raw_leverage)
                 leverage = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE, leverage))
                 
+                # 👈 مسافة الستوب لوز
                 risk_dist = abs(entry_price - sl_price)
                 
-                # هدف واحد (2R) كما في استراتيجيتك المحددة
+                # 👈 الهدف يعتمد على الستوب والدخول بنسبة 2:1 بدقة
                 tp_price = entry_price + (risk_dist * Config.RR_RATIO) if side == "LONG" else entry_price - (risk_dist * Config.RR_RATIO)
                 
                 roe_tp = (abs(tp_price - entry_price) / entry_price) * 100 * leverage
@@ -280,8 +278,8 @@ class TradingSystem:
     async def fetch_and_analyze(self, symbol: str):
         try:
             async with self.semaphore:
-                ohlcv = await fetch_with_retry(self.exchange.fetch_ohlcv, symbol, Config.TIMEFRAME, limit=100)
-            if not ohlcv or len(ohlcv) < 50: return
+                ohlcv = await fetch_with_retry(self.exchange.fetch_ohlcv, symbol, Config.TIMEFRAME, limit=250)
+            if not ohlcv or len(ohlcv) < 200: return
             
             df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             setup = await asyncio.to_thread(QuantEngine.analyze, df)
@@ -330,13 +328,16 @@ class TradingSystem:
         await fetch_with_retry(self.exchange.load_markets) 
         Logger.info(f"🚀 {Config.VERSION} System Booting...")
 
+    async def stop(self):
+        self.running = False
+        await self.tg.stop()
+        await self.exchange.close()
+
     async def radar_loop(self):
-        """دورة البحث والمسح"""
         while self.running:
             try:
-                # 👈 الحد الأقصى للصفقات (3 صفقات فقط)
                 if len(self.active_signals) >= Config.MAX_TRADES_AT_ONCE:
-                    await asyncio.sleep(30) # ينام 30 ثانية إذا كان العدد مكتمل
+                    await asyncio.sleep(30)
                     continue
 
                 top_coins = await self.get_top_liquid_coins()
@@ -346,14 +347,13 @@ class TradingSystem:
                 now = time.time()
                 coins_to_analyze = [sym for sym in top_coins if now - self.cooldowns.get(sym, 0) > Config.COOLDOWN_SECONDS and sym not in self.active_signals]
                 
-                # فحص العملات المطلوبة لإكمال العدد لـ 3
                 slots_available = Config.MAX_TRADES_AT_ONCE - len(self.active_signals)
-                tasks = [self.fetch_and_analyze(sym) for sym in coins_to_analyze[:slots_available * 5]] # نفحص عدد محدود لتوفير الجهد
+                tasks = [self.fetch_and_analyze(sym) for sym in coins_to_analyze[:slots_available * 5]] 
                 
                 if tasks:
                     chunk_size = 5
                     for i in range(0, len(tasks), chunk_size):
-                        if len(self.active_signals) >= Config.MAX_TRADES_AT_ONCE: break # التوقف فوراً إذا اكتمل العدد أثناء الفحص
+                        if len(self.active_signals) >= Config.MAX_TRADES_AT_ONCE: break 
                         chunk = tasks[i:i+chunk_size]
                         await asyncio.gather(*chunk)
                         await asyncio.sleep(1)
@@ -366,7 +366,6 @@ class TradingSystem:
                 await asyncio.sleep(15)
 
     async def monitor_loop(self):
-        """دورة مراقبة الصفقات المفتوحة والرد على رسالة التليجرام"""
         while self.running:
             try:
                 if not self.active_signals:
@@ -394,7 +393,7 @@ class TradingSystem:
                         is_win = hit_tp
                         roe = trade['roe_tp'] if is_win else trade['roe_sl']
                         icon = "✅" if is_win else "🛑"
-                        status = "تم ضرب الهدف بنجاح! 🎯" if is_win else "تم ضرب وقف الخسارة."
+                        status = "تم ضرب الهدف بنجاح!" if is_win else "تم ضرب وقف الخسارة."
                         
                         reply_msg = f"{icon} <b>{status}</b>\nالنتيجة: {roe:+.1f}%"
                         await self.tg.send(reply_msg, reply_to=msg_id)
@@ -418,7 +417,6 @@ class TradingSystem:
             await asyncio.sleep(5)
 
     async def daily_report_loop(self):
-        """إرسال التقرير اليومي في منتصف الليل"""
         while self.running:
             try:
                 now = datetime.utcnow()
@@ -427,7 +425,7 @@ class TradingSystem:
                         total_trades = len(self.daily_report_data)
                         wins = sum(1 for t in self.daily_report_data if t['win'])
                         losses = total_trades - wins
-                        winrate = (wins / total_trades) * 100
+                        winrate = (wins / total_trades) * 100 if total_trades > 0 else 0
                         net_roe = sum(t['roe'] for t in self.daily_report_data)
                         
                         report_msg = (
@@ -455,7 +453,6 @@ class TradingSystem:
             await asyncio.sleep(60)
 
 async def keep_alive_pinger():
-    """يحافظ على السيرفر مستيقظاً"""
     while True:
         try:
             await asyncio.sleep(180)
