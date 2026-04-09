@@ -1,18 +1,14 @@
 import asyncio
+import gc
 import os
 import json
-import gc
-import time
-import traceback
 import warnings
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
-
 import pandas as pd
-import numpy as np
+import pandas_ta as ta
 import ccxt.async_support as ccxt
 import aiohttp
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 from contextlib import asynccontextmanager
@@ -31,11 +27,12 @@ class Config:
     TIMEFRAME = '30m'            
     TOP_COINS_LIMIT = 40         # مسح أفضل 40 عملة سيولة
     
+    MAX_TRADES_AT_ONCE = 3       # 👈 الحد الأقصى للصفقات النشطة في نفس الوقت
     RR_RATIO = 2.0               # نسبة الهدف إلى الستوب (2:1)
     
     # إعدادات الرافعة الأوتوماتيكية وإدارة المخاطر
     TARGET_SL_ROE_PCT = 25.0     # أقصى خسارة مقبولة كنسبة مئوية من الهامش (25%)
-    MAX_LEVERAGE = 100
+    MAX_LEVERAGE = 50            # تم تقليل الحد الأقصى للرافعة إلى 50x للواقعية
     MIN_LEVERAGE = 5
     
     COOLDOWN_SECONDS = 7200      # تبريد العملة لساعتين بعد الإشارة
@@ -43,7 +40,7 @@ class Config:
     API_CONCURRENCY = 4
     
     STATE_FILE = "smart_radar_30m_state.json"
-    VERSION = "VIP Radar V-3.5 (30m + Clean UI)"
+    VERSION = "VIP Radar V-3.55 (Max 3 Trades)"
 
 # ==========================================
 # 2. نظام تسجيل الأخطاء والاستقرار (LOGGER & RETRY)
@@ -62,7 +59,6 @@ class Logger:
         print(f"{Logger.RED}[{Logger._timestamp()}] [ERROR] {msg}{Logger.RESET}", flush=True)
         if exc: print(f"{Logger.RED}{traceback.format_exc()}{Logger.RESET}", flush=True)
 
-# 🛡️ دالة الحماية المدمجة من الكود الآخر
 async def fetch_with_retry(coro, *args, retries=3, delay=1.5, **kwargs):
     for i in range(retries):
         try:
@@ -192,9 +188,15 @@ class QuantEngine:
             # --- الحسابات النهائية وتحديد الرافعة ---
             if side and entry_price > 0 and sl_price > 0:
                 
-                sl_dist_pct = abs(entry_price - sl_price) / entry_price
-                if sl_dist_pct < 0.001 or sl_dist_pct > 0.06: return None 
+                # 👈 تحسين: التأكد من أن السعر الحالي ليس بعيداً جداً عن نقطة الدخول (Limit Order Viability)
+                if (side == "LONG" and curr['close'] > entry_price * 1.015) or \
+                   (side == "SHORT" and curr['close'] < entry_price * 0.985):
+                    return None # السعر هرب من نقطة الدخول المعلقة
                 
+                sl_dist_pct = abs(entry_price - sl_price) / entry_price
+                if sl_dist_pct < 0.002 or sl_dist_pct > 0.06: return None # تصفية المخاطر العالية جداً أو القليلة جداً
+                
+                # الرافعة الأوتوماتيكية: Leverage = Target_ROE / SL_Percentage
                 raw_leverage = (Config.TARGET_SL_ROE_PCT / 100.0) / sl_dist_pct
                 leverage = int(raw_leverage)
                 leverage = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE, leverage))
@@ -285,14 +287,12 @@ class TradingSystem:
             setup = await asyncio.to_thread(QuantEngine.analyze, df)
             
             if setup:
-                # 💎 دمج نظام التسمية exact_app_name
                 market_info = self.exchange.markets.get(symbol, {})
                 base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
                 exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else symbol.replace('/USDT:USDT', '/USDT')
                 
                 icon = "🟢 LONG" if setup['side'] == "LONG" else "🔴 SHORT"
                 
-                # 💎 التنسيق النظيف المطابق لما طلبته (اسم قابل للنسخ بدون روابط)
                 msg = (
                     f"<code>{exact_app_name}</code>\n"
                     f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
@@ -308,7 +308,7 @@ class TradingSystem:
                 msg_id = await self.tg.send(msg)
                 if msg_id:
                     self.active_signals[symbol] = {
-                        "symbol": exact_app_name, # حفظ الاسم النظيف للمراقبة والتقرير
+                        "symbol": exact_app_name, 
                         "side": setup['side'],
                         "entry": setup['entry'],
                         "tp": setup['tp'],
@@ -327,19 +327,18 @@ class TradingSystem:
 
     async def start(self):
         await self.tg.start()
-        # تحميل بيانات الأسواق لجلب الـ baseCoinName لتطبيق الـ exact_app_name
         await fetch_with_retry(self.exchange.load_markets) 
         Logger.info(f"🚀 {Config.VERSION} System Booting...")
-
-    async def stop(self):
-        self.running = False
-        await self.tg.stop()
-        await self.exchange.close()
 
     async def radar_loop(self):
         """دورة البحث والمسح"""
         while self.running:
             try:
+                # 👈 الحد الأقصى للصفقات (3 صفقات فقط)
+                if len(self.active_signals) >= Config.MAX_TRADES_AT_ONCE:
+                    await asyncio.sleep(30) # ينام 30 ثانية إذا كان العدد مكتمل
+                    continue
+
                 top_coins = await self.get_top_liquid_coins()
                 if not top_coins:
                     await asyncio.sleep(10); continue
@@ -347,16 +346,20 @@ class TradingSystem:
                 now = time.time()
                 coins_to_analyze = [sym for sym in top_coins if now - self.cooldowns.get(sym, 0) > Config.COOLDOWN_SECONDS and sym not in self.active_signals]
                 
-                tasks = [self.fetch_and_analyze(sym) for sym in coins_to_analyze]
+                # فحص العملات المطلوبة لإكمال العدد لـ 3
+                slots_available = Config.MAX_TRADES_AT_ONCE - len(self.active_signals)
+                tasks = [self.fetch_and_analyze(sym) for sym in coins_to_analyze[:slots_available * 5]] # نفحص عدد محدود لتوفير الجهد
+                
                 if tasks:
                     chunk_size = 5
                     for i in range(0, len(tasks), chunk_size):
+                        if len(self.active_signals) >= Config.MAX_TRADES_AT_ONCE: break # التوقف فوراً إذا اكتمل العدد أثناء الفحص
                         chunk = tasks[i:i+chunk_size]
                         await asyncio.gather(*chunk)
                         await asyncio.sleep(1)
                 
                 gc.collect()
-                await asyncio.sleep(300) # يمسح السوق كل 5 دقائق
+                await asyncio.sleep(300) 
 
             except Exception as e:
                 Logger.error("Radar Loop Crash", e)
@@ -391,13 +394,11 @@ class TradingSystem:
                         is_win = hit_tp
                         roe = trade['roe_tp'] if is_win else trade['roe_sl']
                         icon = "✅" if is_win else "🛑"
-                        status = "تم ضرب الهدف بنجاح!" if is_win else "تم ضرب وقف الخسارة."
+                        status = "تم ضرب الهدف بنجاح! 🎯" if is_win else "تم ضرب وقف الخسارة."
                         
-                        # الرد على نفس الرسالة في التليجرام
                         reply_msg = f"{icon} <b>{status}</b>\nالنتيجة: {roe:+.1f}%"
                         await self.tg.send(reply_msg, reply_to=msg_id)
                         
-                        # إضافة للتقرير اليومي باستخدام الاسم النظيف
                         self.daily_report_data.append({
                             "symbol": exact_app_name,
                             "win": is_win,
@@ -408,7 +409,6 @@ class TradingSystem:
                         self.save_state()
                         continue
 
-                    # إلغاء الصفقات القديمة جداً
                     if time.time() - trade['timestamp'] > (Config.TRADE_TIMEOUT_MINUTES * 60):
                         del self.active_signals[sym]
                         self.save_state()
@@ -455,7 +455,7 @@ class TradingSystem:
             await asyncio.sleep(60)
 
 async def keep_alive_pinger():
-    """يحافظ على سيرفر ريندر مستيقظاً 24/7"""
+    """يحافظ على السيرفر مستيقظاً"""
     while True:
         try:
             await asyncio.sleep(180)
@@ -478,6 +478,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(keep_alive_pinger())
     ]
     yield
+    bot.running = False
     await bot.stop()
     for task in tasks: task.cancel()
 
