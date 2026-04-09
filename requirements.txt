@@ -1,5 +1,6 @@
 ccxt
 pandas
+pandas-ta
 numpy
 aiohttp
 fastapi
