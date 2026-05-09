@@ -1,9 +1,6 @@
 ccxt
 pandas
 pandas-ta
-numpy
 aiohttp
 fastapi
 uvicorn
-websockets
-nest_asyncio
