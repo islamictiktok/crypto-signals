@@ -30,8 +30,8 @@ class Config:
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_classic.json"
-    VERSION = "V3100.1 (Classic Stable Edition)"
+    STATE_FILE = "bot_state_rsi_sniper.json"
+    VERSION = "V3200.2 (Optimized Sniper + ROE)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -72,7 +72,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 3. محرك الاستراتيجيات (الكلاسيكي الخاص بك)
+# 2. محرك الاستراتيجية (Optimized RSI Hook)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -84,103 +84,74 @@ class StrategyEngine:
     @staticmethod
     def analyze_mtf(symbol, h1_data, m5_data):
         try:
+            # --- تحليل الفريم الكبير (1 ساعة) ---
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df_h1) < 100: return None 
+            if len(df_h1) < 200: return None 
             
-            df_h1['ema21'] = ta.ema(df_h1['close'], length=21)
             df_h1['ema50'] = ta.ema(df_h1['close'], length=50)
             df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
             df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
-            
-            adx_res = ta.adx(df_h1['high'], df_h1['low'], df_h1['close'], length=14)
-            df_h1['adx'] = adx_res.iloc[:, 0] if adx_res is not None and not adx_res.empty else 0
-            
-            df_h1['hh20'] = df_h1['high'].rolling(20).max().shift(1) 
-            df_h1['ll20'] = df_h1['low'].rolling(20).min().shift(1)  
-            df_h1['hh5'] = df_h1['high'].rolling(5).max().shift(1)   
-            df_h1['ll5'] = df_h1['low'].rolling(5).min().shift(1)
-            
-            macd_h1 = ta.macd(df_h1['close'])
-            if macd_h1 is not None and not macd_h1.empty:
-                macd_cols = [c for c in macd_h1.columns if c.startswith('MACDh')]
-                df_h1['macd_h'] = macd_h1[macd_cols[0]] if macd_cols else 0
-            else:
-                df_h1['macd_h'] = 0
-
             df_h1.dropna(inplace=True)
-            if len(df_h1) < 5: return None
+            if len(df_h1) < 2: return None
 
             h1 = df_h1.iloc[-2] 
-            h1_prev = df_h1.iloc[-3]
-
+            
+            # --- تحليل الفريم الصغير (5 دقائق) ---
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
             
             if h1['time'] > df_m5['time'].iloc[-1]: return None 
-            
             last_timestamp = int(df_m5['time'].iloc[-1])
             current_timestamp = int(datetime.now(timezone.utc).timestamp() * 1000)
             if current_timestamp - last_timestamp > 600000: return None 
             
-            df_m5['ema21'] = ta.ema(df_m5['close'], length=21)
+            df_m5['rsi'] = ta.rsi(df_m5['close'], length=14)
             df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
             df_m5['vol_ma'] = df_m5['vol'].rolling(10).mean()
-
-            df_m5['ll10'] = df_m5['low'].rolling(10).min().shift(1)
-            df_m5['hh10'] = df_m5['high'].rolling(10).max().shift(1)
-
             df_m5.dropna(inplace=True)
             if len(df_m5) < 5: return None
 
-            m5 = df_m5.iloc[-2] 
-            m5_prev = df_m5.iloc[-3]
-            entry = float(m5['close']) 
-            m5_atr = float(m5['atr'])
+            m5_curr = df_m5.iloc[-2] 
+            m5_prev = df_m5.iloc[-3] 
+            
+            entry = float(m5_curr['close']) 
+            m5_atr = float(m5_curr['atr'])
 
             if entry <= 0 or m5_atr <= 0: return None 
             atr_pct = m5_atr / entry
             if atr_pct < 0.0005 or atr_pct > 0.03: return None 
 
-            m5_body = abs(m5['close'] - m5['open'])
-            vol_surge = m5['vol'] > (m5['vol_ma'] * 1.3) if m5['vol_ma'] > 0 else False
+            m5_body = abs(m5_curr['close'] - m5_curr['open'])
+            # 👈 تعديل: تخفيف الفوليوم المطلوب لـ 1.2x لزيادة عدد الصفقات (10-15 يومياً)
+            vol_surge = m5_curr['vol'] > (m5_curr['vol_ma'] * 1.2) if m5_curr['vol_ma'] > 0 else False
             
-            m5_strong_green = (m5['close'] > m5['open']) and (m5_body > m5_atr * 0.5)
-            m5_strong_red = (m5['close'] < m5['open']) and (m5_body > m5_atr * 0.5)
-            
+            m5_strong_green = (m5_curr['close'] > m5_curr['open']) and (m5_body > m5_atr * 0.5)
+            m5_strong_red = (m5_curr['close'] < m5_curr['open']) and (m5_body > m5_atr * 0.5)
             if m5_body > (m5_atr * 2.0): return None 
-
-            macro_bullish = all(df_h1['ema21'].iloc[-i] > df_h1['ema50'].iloc[-i] > df_h1['ema200'].iloc[-i] for i in range(2, 5))
-            macro_bearish = all(df_h1['ema21'].iloc[-i] < df_h1['ema50'].iloc[-i] < df_h1['ema200'].iloc[-i] for i in range(2, 5))
 
             strat = ""; side = ""
             valid_setups = []
 
-            if macro_bullish and (m5['low'] <= h1['ema21']) and (m5['close'] > h1['ema21']) and m5_strong_green and vol_surge:
-                valid_setups.append((1, "Break & Retest", "LONG"))
-            if macro_bearish and (m5['high'] >= h1['ema21']) and (m5['close'] < h1['ema21']) and m5_strong_red and vol_surge:
-                valid_setups.append((1, "Break & Retest", "SHORT"))
+            # 🟢 شروط الشراء (LONG)
+            macro_bullish = (h1['ema50'] > h1['ema200']) and (h1['rsi'] > 50)
+            # 👈 تعديل: توسيع نطاق الخطاف لـ 35 عشان نصطاد فرص أكتر بجودة ممتازة
+            rsi_hook_up = (m5_prev['rsi'] <= 35) and (m5_curr['rsi'] > 35)
+            
+            if macro_bullish and rsi_hook_up and m5_strong_green and vol_surge:
+                valid_setups.append((1, "RSI Trend Hook", "LONG"))
 
-            if macro_bearish and (m5['open'] >= h1['ll20']) and (m5['close'] < h1['ll20']) and (h1['ll20'] - m5['close'] <= m5_atr * 1.2) and m5_strong_red and vol_surge:
-                valid_setups.append((2, "Support Breakdown", "SHORT"))
-
-            if macro_bullish and (m5['open'] <= h1['hh20']) and (m5['close'] > h1['hh20']) and (m5['close'] - h1['hh20'] <= m5_atr * 1.2) and m5_strong_green and vol_surge:
-                valid_setups.append((2, "Resistance Breakout", "LONG"))
-
-            if (h1_prev['rsi'] > 75) and (h1_prev['adx'] > 25) and (m5['close'] < m5['ema21']) and m5_strong_red and vol_surge:
-                valid_setups.append((3, "Bump & Run Reversal", "SHORT"))
-            if (h1_prev['rsi'] < 25) and (h1_prev['adx'] > 25) and (m5['close'] > m5['ema21']) and m5_strong_green and vol_surge:
-                valid_setups.append((3, "Bump & Run Reversal", "LONG"))
-
-            if macro_bearish and (h1['macd_h'] < h1_prev['macd_h']) and (m5['close'] < m5['ll10']) and m5_strong_red:
-                valid_setups.append((4, "Double Top / Breakdown", "SHORT"))
-
-            if macro_bullish and (h1['macd_h'] > h1_prev['macd_h']) and (m5['close'] > m5['hh10']) and m5_strong_green:
-                valid_setups.append((4, "Double Bottom / Breakout", "LONG"))
+            # 🔴 شروط البيع (SHORT)
+            macro_bearish = (h1['ema50'] < h1['ema200']) and (h1['rsi'] < 50)
+            # 👈 تعديل: توسيع نطاق الخطاف لـ 65 
+            rsi_hook_down = (m5_prev['rsi'] >= 65) and (m5_curr['rsi'] < 65)
+            
+            if macro_bearish and rsi_hook_down and m5_strong_red and vol_surge:
+                valid_setups.append((1, "RSI Trend Hook", "SHORT"))
 
             if not valid_setups: return None
-            valid_setups.sort(key=lambda x: x[0], reverse=True) 
             _, strat, side = valid_setups[0]
 
+            # --- الحسابات (SL, TP, Leverage) ---
             risk_distance = m5_atr * 1.5 
             sl = entry - risk_distance if side == "LONG" else entry + risk_distance
 
@@ -210,7 +181,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 4. مدير البوت
+# 3. مدير البوت (Orchestrator)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -222,11 +193,7 @@ class TradingSystem:
         self.last_cache_time = 0
         
         self.stats = {
-            "virtual_equity": 1000.0, 
-            "peak_equity": 1000.0,
-            "max_drawdown_pct": 0.0,
-            "signals": 0, "wins": 0, "losses": 0, "break_evens": 0, 
-            "total_r": 0.0
+            "signals": 0, "wins": 0, "losses": 0, "break_evens": 0
         } 
         self.running = True
 
@@ -264,7 +231,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nClassic Stability & Clean Copyable Signals Active 🎯")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nOptimized RSI Sniper & Daily Reports Active 🎯")
 
     async def shutdown(self):
         self.running = False
@@ -288,23 +255,23 @@ class TradingSystem:
             safe_entry = float(self.exchange.price_to_precision(sym, trade['entry']))
             safe_sl = float(self.exchange.price_to_precision(sym, trade['sl']))
             safe_tps = [float(self.exchange.price_to_precision(sym, tp)) for tp in trade['tps']]
+            safe_pnls = trade['pnls']
 
             trade['entry'] = safe_entry
             trade['sl'] = safe_sl
             trade['tps'] = safe_tps
             trade['original_sl'] = safe_sl 
             
-            # 💎 نظام التسميات الذي طلبته (exact_app_name) لنسخ سهل
             market_info = self.exchange.markets.get(sym, {})
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
             
             icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
             
-            # 💎 تنسيق الأهداف القابل للنسخ والمختصر
+            # 💎 عرض جميع الأهداف مع نسبة الـ ROE 
             targets_msg = ""
-            for idx, tp in enumerate(safe_tps[:3]): # يكتفي بأول 3 أهداف في الرسالة
-                targets_msg += f"🎯 TP {idx+1}: <code>{tp}</code>\n"
+            for idx, (tp, pnl) in enumerate(zip(safe_tps, safe_pnls)): 
+                targets_msg += f"🎯 TP {idx+1}: <code>{tp}</code> (+{pnl:.1f}% ROE)\n"
 
             msg = (
                 f"<code>{exact_app_name}</code>\n"
@@ -417,10 +384,13 @@ class TradingSystem:
                     if hit_sl:
                         if step == 0:
                             msg = f"🛑 <b>Trade Closed at SL</b>"
+                            self.stats['losses'] += 1 # تسجيل خسارة للتقرير
                         elif step == 1:
                             msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b>\n🎯 Last hit: TP{trade['last_tp_hit']}"
+                            self.stats['break_evens'] += 1 # تسجيل تعادل
                         else:
                             msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b>\n🎯 Last hit: TP{trade['last_tp_hit']}"
+                            self.stats['wins'] += 1 # تسجيل مكسب
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
                         Log.print(f"Trade Closed: {sym}", Log.YELLOW) 
@@ -449,6 +419,7 @@ class TradingSystem:
                             
                         if highest_tp_hit == 10: 
                             msg = f"🏆 <b>ALL 10 TARGETS SMASHED!</b> 🏦\nTrade Completed."
+                            self.stats['wins'] += 1 # تسجيل مكسب نهائي
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
                             
@@ -461,21 +432,35 @@ class TradingSystem:
             await asyncio.sleep(2) 
 
     async def daily_report(self):
+        # 👈 إصلاح التقرير: يرسل التقرير كل يوم الساعة 00:00 UTC (منتصف الليل)
+        last_sent_day = datetime.now(timezone.utc).day
         while self.running:
-            await asyncio.sleep(86400)
-            
-            total_trades = self.stats['wins'] + self.stats['losses'] + self.stats['break_evens']
-            wr = (self.stats['wins'] / total_trades * 100) if total_trades > 0 else 0
-            
-            msg = (
-                f"📈 <b>INSTITUTIONAL REPORT (24H)</b> 📉\n"
-                f"────────────────\n"
-                f"🎯 <b>Total Signals:</b> {self.stats['signals']}\n"
-                f"📊 <b>True Win Rate:</b> {wr:.1f}%\n"
-            )
-            await self.tg.send(msg)
-            self.stats['signals'] = 0; self.stats['wins'] = 0; self.stats['losses'] = 0
-            self.save_state()
+            try:
+                now = datetime.now(timezone.utc)
+                if now.hour == 0 and now.minute < 5 and now.day != last_sent_day:
+                    total_trades = self.stats['wins'] + self.stats['losses'] + self.stats['break_evens']
+                    wr = (self.stats['wins'] / total_trades * 100) if total_trades > 0 else 0
+                    
+                    msg = (
+                        f"📈 <b>INSTITUTIONAL REPORT (24H)</b> 📉\n"
+                        f"────────────────\n"
+                        f"🎯 <b>Total Signals:</b> {self.stats['signals']}\n"
+                        f"🏆 <b>Wins (In Profit):</b> {self.stats['wins']}\n"
+                        f"🛡️ <b>Break-Evens:</b> {self.stats['break_evens']}\n"
+                        f"🛑 <b>Losses:</b> {self.stats['losses']}\n"
+                        f"📊 <b>True Win Rate:</b> {wr:.1f}%\n"
+                        f"────────────────\n"
+                    )
+                    await self.tg.send(msg)
+                    
+                    # تصفير العدادات لليوم الجديد
+                    self.stats['signals'] = 0; self.stats['wins'] = 0; self.stats['losses'] = 0; self.stats['break_evens'] = 0
+                    last_sent_day = now.day
+                    self.save_state()
+            except Exception as e:
+                Log.print(f"Daily Report Error: {e}", Log.RED)
+                
+            await asyncio.sleep(60) # يفحص الوقت كل دقيقة
 
     async def keep_alive(self):
         while self.running:
