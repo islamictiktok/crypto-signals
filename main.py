@@ -33,8 +33,8 @@ class Config:
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_fib_sniper.json"
-    VERSION = "V7000.0 (Fibonacci Structure Sniper)"
+    STATE_FILE = "bot_state_extreme_rsi.json"
+    VERSION = "V8000.0 (Extreme RSI Mean Reversion)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -75,7 +75,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 2. محرك البرايس أكشن المتقدم (Fibonacci & Structure)
+# 2. محرك الاستراتيجية (Extreme RSI & Mean Reversion)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -87,95 +87,73 @@ class StrategyEngine:
     @staticmethod
     def analyze_mtf(symbol, h1_data, m5_data):
         try:
-            # --- الفلتر المؤسساتي (1 ساعة) ---
+            # --- 1. فريم الساعة: تحديد التشبع المتطرف ---
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_h1) < 100: return None 
-            df_h1['ema50'] = ta.ema(df_h1['close'], length=50)
-            df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
+            
+            df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
+            # بولينجر باندز بانحراف 2.5 (شديد القوة)
+            df_h1['sma20'] = df_h1['close'].rolling(20).mean()
+            df_h1['std20'] = df_h1['close'].rolling(20).std()
+            df_h1['bbu_extreme'] = df_h1['sma20'] + (2.5 * df_h1['std20'])
+            df_h1['bbl_extreme'] = df_h1['sma20'] - (2.5 * df_h1['std20'])
+            
             df_h1.dropna(inplace=True)
             if len(df_h1) < 2: return None
             
-            h1 = df_h1.iloc[-2] 
-            macro_bullish = h1['ema50'] > h1['ema200']
-            macro_bearish = h1['ema50'] < h1['ema200']
+            h1 = df_h1.iloc[-2] # الشمعة المغلقة
+            
+            # هل نحن في حالة تشبع متطرف حقيقي؟
+            macro_oversold = (h1['rsi'] <= 25) and (h1['close'] <= h1['bbl_extreme'])
+            macro_overbought = (h1['rsi'] >= 75) and (h1['close'] >= h1['bbu_extreme'])
 
-            # --- فريم القنص (5 دقائق) ---
+            if not macro_oversold and not macro_overbought: return None # تجاهل العملة لو مش متطرفة
+
+            # --- 2. فريم 5 دقائق: تأكيد الانعكاس القوي ---
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df_m5) < 60: return None
+            if len(df_m5) < 50: return None
             if h1['time'] > df_m5['time'].iloc[-1]: return None 
             
-            df_m5['ema21'] = ta.ema(df_m5['close'], length=21)
+            df_m5['ema9'] = ta.ema(df_m5['close'], length=9) # متوسط سريع جداً
+            df_m5['vol_ma'] = df_m5['vol'].rolling(20).mean()
+            
             df_m5.dropna(inplace=True)
             df_m5.reset_index(drop=True, inplace=True)
             
-            # تحليل آخر 50 شمعة لاستخراج النبضة السعرية (Impulse Wave)
-            window = df_m5.tail(50).copy()
-            current_idx = window.index[-2] # الشمعة المغلقة الحالية
-            m5_curr = window.loc[current_idx]
-            m5_prev = window.loc[current_idx - 1]
-            
+            m5_curr = df_m5.iloc[-2]
+            m5_prev = df_m5.iloc[-3]
             entry = float(m5_curr['close'])
             if entry <= 0: return None
             
-            swing_high_idx = window['high'].idxmax()
-            swing_high = float(window['high'].max())
-            swing_low_idx = window['low'].idxmin()
-            swing_low = float(window['low'].min())
-            
             strat = ""; side = ""; sl = 0.0
-            tps = []
             
-            # 🟢 استراتيجية الشراء (LONG)
-            if macro_bullish:
-                # التأكد أن الموجة صاعدة (القاع حدث قبل القمة) والقمة حدثت منذ فترة تسمح بالتصحيح
-                if swing_low_idx < swing_high_idx and (current_idx - swing_high_idx) >= 3:
-                    impulse_range = swing_high - swing_low
-                    fib_50 = swing_high - (impulse_range * 0.5)
-                    fib_786 = swing_high - (impulse_range * 0.786)
-                    
-                    # هل السعر صحح داخل المنطقة الذهبية؟
-                    pulled_back = (m5_prev['low'] <= fib_50) and (m5_prev['low'] >= swing_low)
-                    
-                    # تأكيد الارتداد: شمعة خضراء أغلقت فوق المتوسط المتحرك 21
-                    bouncing = (m5_curr['close'] > m5_curr['open']) and (m5_curr['close'] > m5_curr['ema21'])
-                    
-                    if pulled_back and bouncing:
-                        side = "LONG"
-                        strat = "Golden Fib Retracement"
-                        sl = swing_low * 0.998 # الستوب تحت القاع الهيكلي مباشرة
-                        tps = [
-                            swing_high,                           # TP1: القمة السابقة (سيولة)
-                            swing_high + (impulse_range * 0.272), # TP2: امتداد 1.272
-                            swing_high + (impulse_range * 0.618)  # TP3: امتداد 1.618
-                        ]
+            # 🟢 استراتيجية الشراء من القاع
+            if macro_oversold:
+                # تأكيد الدخول: شمعة خضراء تبتلع وتكسر فوق المتوسط 9 بفوليوم عالي
+                crossing_up = (m5_prev['close'] <= m5_prev['ema9']) and (m5_curr['close'] > m5_curr['ema9'])
+                strong_green = (m5_curr['close'] > m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.5)
+                
+                if crossing_up and strong_green:
+                    side = "LONG"
+                    strat = "Extreme RSI Reversal"
+                    # الستوب: تحت أدنى قاع في آخر 15 شمعة مباشرة (القاع الحقيقي للانهيار)
+                    sl = float(df_m5['low'].tail(15).min() * 0.998)
 
-            # 🔴 استراتيجية البيع (SHORT)
-            if macro_bearish and not side:
-                # التأكد أن الموجة هابطة (القمة حدثت قبل القاع)
-                if swing_high_idx < swing_low_idx and (current_idx - swing_low_idx) >= 3:
-                    impulse_range = swing_high - swing_low
-                    fib_50 = swing_low + (impulse_range * 0.5)
-                    fib_786 = swing_low + (impulse_range * 0.786)
-                    
-                    # هل السعر صحح صعوداً داخل المنطقة الذهبية؟
-                    pulled_back = (m5_prev['high'] >= fib_50) and (m5_prev['high'] <= swing_high)
-                    
-                    # تأكيد الارتداد: شمعة حمراء أغلقت تحت المتوسط المتحرك 21
-                    bouncing = (m5_curr['close'] < m5_curr['open']) and (m5_curr['close'] < m5_curr['ema21'])
-                    
-                    if pulled_back and bouncing:
-                        side = "SHORT"
-                        strat = "Golden Fib Retracement"
-                        sl = swing_high * 1.002 # الستوب فوق القمة الهيكلية مباشرة
-                        tps = [
-                            swing_low,                            # TP1: القاع السابق (سيولة)
-                            swing_low - (impulse_range * 0.272),  # TP2: امتداد 1.272
-                            swing_low - (impulse_range * 0.618)   # TP3: امتداد 1.618
-                        ]
+            # 🔴 استراتيجية البيع من القمة
+            elif macro_overbought:
+                # تأكيد الدخول: شمعة حمراء تكسر تحت المتوسط 9 بفوليوم عالي
+                crossing_down = (m5_prev['close'] >= m5_prev['ema9']) and (m5_curr['close'] < m5_curr['ema9'])
+                strong_red = (m5_curr['close'] < m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.5)
+                
+                if crossing_down and strong_red:
+                    side = "SHORT"
+                    strat = "Extreme RSI Reversal"
+                    # الستوب: فوق أعلى قمة في آخر 15 شمعة
+                    sl = float(df_m5['high'].tail(15).max() * 1.002)
 
             if not side: return None
 
-            # --- إدارة المخاطر والرافعة المالية ---
+            # --- حساب الأهداف (العودة للمتوسط) والرافعة المالية ---
             risk_distance = abs(entry - sl)
             if risk_distance < (entry * 0.001) or risk_distance > (entry * 0.05): return None 
 
@@ -183,7 +161,20 @@ class StrategyEngine:
             lev = int(10.0 / risk_pct) 
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)) 
 
-            pnls = [StrategyEngine.calc_actual_roe(entry, tp, side, lev) for tp in tps]
+            tps = []
+            pnls = []
+            
+            # الهدف الذهبي لهذه الاستراتيجية هو "العودة لمتوسط فريم الساعة SMA 20"
+            target_mean = float(h1['sma20']) 
+            total_target_distance = abs(target_mean - entry)
+            
+            # تقسيم الرحلة للعودة للمتوسط إلى 10 أهداف متتالية
+            step_size = total_target_distance / 10.0 
+
+            for i in range(1, 11):
+                target = entry + (step_size * i) if side == "LONG" else entry - (step_size * i)
+                tps.append(float(target))
+                pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
 
             del df_m5, df_h1
             return {
@@ -246,7 +237,14 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFibonacci Market Structure Sniper Active 📐🎯")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nExtreme RSI Mean Reversion Active 📉🎯")
+
+    # 👇 دالة الـ Shutdown تمت إضافتها هنا بشكل سليم لحل خطأ ريندر
+    async def shutdown(self):
+        self.running = False
+        self.save_state()
+        await self.tg.stop()
+        await self.exchange.close()
 
     async def execute_trade(self, trade):
         try:
@@ -276,22 +274,22 @@ class TradingSystem:
             
             icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
             
+            # عرض الأهداف اللي بتستهدف متوسط السعر
             targets_msg = ""
-            for idx, (tp, pnl) in enumerate(zip(safe_tps, safe_pnls)): 
-                if idx == 0: targets_msg += f"🎯 TP 1 (Swing): <code>{tp}</code> (+{pnl:.1f}% ROE)\n"
-                elif idx == 1: targets_msg += f"🎯 TP 2 (1.272): <code>{tp}</code> (+{pnl:.1f}% ROE)\n"
-                elif idx == 2: targets_msg += f"🎯 TP 3 (1.618): <code>{tp}</code> (+{pnl:.1f}% ROE)\n"
+            for idx, (tp, pnl) in enumerate(zip(safe_tps[:3], safe_pnls[:3])): 
+                targets_msg += f"🎯 TP {idx+1}: <code>{tp}</code> (+{pnl:.1f}% ROE)\n"
+            targets_msg += f"🎯 TP 10 (Mean): <code>{safe_tps[-1]}</code> (+{safe_pnls[-1]:.1f}% ROE)\n"
 
             msg = (
                 f"<code>{exact_app_name}</code>\n"
                 f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
-                f"{icon} | Fib Sniper | {trade['leverage']}x\n"
+                f"{icon} | {trade['strat']} | {trade['leverage']}x\n"
                 f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
                 f"💰 Entry: <code>{safe_entry}</code>\n"
                 f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
                 f"{targets_msg}"
                 f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
-                f"🛑 SL (Structure): <code>{safe_sl}</code>"
+                f"🛑 SL (Panic Extreme): <code>{safe_sl}</code>"
             )
             
             msg_id = await self.tg.send(msg)
@@ -396,7 +394,7 @@ class TradingSystem:
                     
                     if hit_sl:
                         if step == 0:
-                            msg = f"🛑 <b>Trade Closed at SL (Structure Broken)</b>"
+                            msg = f"🛑 <b>Trade Closed at SL (Reversal Failed)</b>"
                             self.stats['losses'] += 1
                         elif step == 1:
                             msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b>\n🎯 Last hit: TP {trade['last_tp_hit']}"
@@ -413,7 +411,7 @@ class TradingSystem:
                         continue
 
                     highest_tp_hit = step
-                    for i in range(step, 3): # 3 أهداف فقط
+                    for i in range(step, 10): 
                         target = trade['tps'][i]
                         hit_tp = (current_price >= target) if side == "LONG" else (current_price <= target)
                         if hit_tp: highest_tp_hit = i + 1
@@ -425,13 +423,13 @@ class TradingSystem:
                         
                         if highest_tp_hit == 1:
                             trade['last_sl_price'] = trade['entry'] 
-                            msg = f"✅ <b>TP 1 (Swing) HIT!</b>\n🛡️ SL moved to Entry."
-                        elif highest_tp_hit == 2:
-                            trade['last_sl_price'] = trade['tps'][0] 
-                            msg = f"🔥 <b>TP 2 (1.272 Ext) HIT!</b>\n📈 Trailing SL moved to TP 1."
+                            msg = f"✅ <b>TP 1 HIT!</b>\n🛡️ SL moved to Entry."
+                        else:
+                            trade['last_sl_price'] = trade['tps'][idx_hit - 1] 
+                            msg = f"🔥 <b>TP {highest_tp_hit} HIT!</b>\n📈 Trailing SL updated."
                             
-                        if highest_tp_hit == 3: 
-                            msg = f"🏆 <b>ALL TARGETS SMASHED (1.618 Golden Ext)!</b> 🏦\nTrade Completed."
+                        if highest_tp_hit == 10: 
+                            msg = f"🏆 <b>FULL MEAN REVERSION! (TP 10)</b> 🏦\nTrade Completed."
                             self.stats['wins'] += 1
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
@@ -454,7 +452,7 @@ class TradingSystem:
                     wr = (self.stats['wins'] / total_trades * 100) if total_trades > 0 else 0
                     
                     msg = (
-                        f"📈 <b>FIBONACCI SNIPER REPORT (24H)</b> 📉\n"
+                        f"📈 <b>EXTREME REVERSAL REPORT (24H)</b> 📉\n"
                         f"────────────────\n"
                         f"🎯 <b>Total Signals:</b> {self.stats['signals']}\n"
                         f"🏆 <b>Wins (In Profit):</b> {self.stats['wins']}\n"
