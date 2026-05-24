@@ -25,16 +25,16 @@ class Config:
     
     TF_MACRO = '1h'   
     TF_MICRO = '5m'   
-    BTC_SYMBOL = 'BTC/USDT:USDT' # رمز البتكوين للفلتر
     
+    TOP_COINS_LIMIT = 40 # سحب أفضل 40 عملة من حيث السيولة
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 1_000_000 
+    MIN_24H_VOLUME_USDT = 2_000_000 
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_pa_btc.json"
-    VERSION = "V5000.0 (Price Action + BTC Filter)"
+    STATE_FILE = "bot_state_trinity.json"
+    VERSION = "V6000.0 (The Trinity Engine - 3 Strategies)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -75,7 +75,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 2. محرك البرايس أكشن (Price Action + BTC)
+# 2. محرك الثالوث (The Trinity Engine)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -85,59 +85,112 @@ class StrategyEngine:
         else: return float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def analyze_pa(symbol, m5_data, btc_trend):
+    def analyze_mtf(symbol, h1_data, m5_data):
         try:
-            # --- فريم القنص (5 دقائق) للعملة المحددة ---
+            # --- 1. الفلتر المؤسساتي (1 ساعة) ---
+            df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            if len(df_h1) < 200: return None 
+            
+            df_h1['ema50'] = ta.ema(df_h1['close'], length=50)
+            df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
+            df_h1.dropna(inplace=True)
+            if len(df_h1) < 2: return None
+            h1 = df_h1.iloc[-2] 
+            
+            macro_bullish = h1['ema50'] > h1['ema200']
+            macro_bearish = h1['ema50'] < h1['ema200']
+
+            # --- 2. فريم القنص (5 دقائق) ---
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
             
-            # تحديد الهيكل: القمم والقيعان لآخر 20 شمعة (مزاحة شمعتين لنقارن مع الشمعة المغلقة)
-            df_m5['hh20'] = df_m5['high'].rolling(20).max().shift(2)
-            df_m5['ll20'] = df_m5['low'].rolling(20).min().shift(2)
+            if h1['time'] > df_m5['time'].iloc[-1]: return None 
+            
+            df_m5['ema21'] = ta.ema(df_m5['close'], length=21)
+            df_m5['ema50'] = ta.ema(df_m5['close'], length=50)
+            df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
             df_m5['vol_ma'] = df_m5['vol'].rolling(20).mean()
+            
+            # SMC: القمم والقيعان التاريخية
+            df_m5['ll20'] = df_m5['low'].rolling(20).min().shift(2)
+            df_m5['hh20'] = df_m5['high'].rolling(20).max().shift(2)
+            
+            # Squeeze (الانضغاط): بولينجر باندز وقنوات كيلتنر
+            df_m5['sma20'] = df_m5['close'].rolling(20).mean()
+            df_m5['std20'] = df_m5['close'].rolling(20).std()
+            df_m5['bbu'] = df_m5['sma20'] + (df_m5['std20'] * 2.0)
+            df_m5['bbl'] = df_m5['sma20'] - (df_m5['std20'] * 2.0)
+            
+            df_m5['atr20'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=20)
+            df_m5['kcu'] = df_m5['sma20'] + (df_m5['atr20'] * 1.5)
+            df_m5['kcl'] = df_m5['sma20'] - (df_m5['atr20'] * 1.5)
+            df_m5['squeeze_on'] = (df_m5['bbu'] < df_m5['kcu']) & (df_m5['bbl'] > df_m5['kcl'])
             
             df_m5.dropna(inplace=True)
             if len(df_m5) < 5: return None
 
-            # الشمعة الحالية المغلقة (شمعة الكسر)
             m5_curr = df_m5.iloc[-2] 
+            m5_prev = df_m5.iloc[-3] 
+            
             entry = float(m5_curr['close']) 
+            m5_atr = float(m5_curr['atr'])
+            if entry <= 0 or m5_atr <= 0: return None 
 
-            if entry <= 0: return None 
-
-            # مواصفات شمعة البرايس أكشن
-            body_size = abs(m5_curr['close'] - m5_curr['open'])
-            total_size = m5_curr['high'] - m5_curr['low']
-            if total_size <= 0: return None
+            # شروط القوة والفوليوم
+            m5_body = abs(m5_curr['close'] - m5_curr['open'])
+            vol_surge = m5_curr['vol'] > (m5_curr['vol_ma'] * 1.5)
+            is_strong_green = (m5_curr['close'] > m5_curr['open']) and (m5_body > m5_atr * 0.5)
+            is_strong_red = (m5_curr['close'] < m5_curr['open']) and (m5_body > m5_atr * 0.5)
             
-            # شمعة زخم حقيقية (الجسم يمثل أكثر من 50% من الشمعة وفوليوم أعلى من المتوسط)
-            is_strong_candle = (body_size / total_size > 0.5) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.2)
-            
-            strat = ""; side = ""
+            strat = ""; side = ""; sl = 0.0
             valid_setups = []
-            sl = 0.0
 
-            # 🟢 برايس أكشن شراء (Breakout LONG)
-            # فلتر البتكوين يقول صاعد + السعر كسر أعلى قمة لآخر 20 شمعة وقفل فوقها بشمعة قوية خضراء
-            if btc_trend == "BULLISH" and (m5_curr['close'] > m5_curr['hh20']) and (m5_curr['close'] > m5_curr['open']) and is_strong_candle:
-                valid_setups.append((1, "PA Breakout + BTC Sync", "LONG"))
-                # الستوب الهيكلي: تحت قاع شمعة الكسر مباشرة بمسافة بسيطة
-                sl = m5_curr['low'] * 0.998 
+            # ========================================================
+            # الاستراتيجية 1: SMC Liquidity Sweep (صيد السيولة)
+            # ========================================================
+            bullish_sweep = (m5_prev['low'] < m5_prev['ll20']) and (m5_prev['close'] > m5_prev['ll20'])
+            bearish_sweep = (m5_prev['high'] > m5_prev['hh20']) and (m5_prev['close'] < m5_prev['hh20'])
+            
+            if macro_bullish and bullish_sweep and is_strong_green and m5_curr['close'] > m5_curr['ema21']:
+                valid_setups.append((1, "1. SMC Liquidity Sweep", "LONG", m5_prev['low'] * 0.998))
+                
+            if macro_bearish and bearish_sweep and is_strong_red and m5_curr['close'] < m5_curr['ema21']:
+                valid_setups.append((1, "1. SMC Liquidity Sweep", "SHORT", m5_prev['high'] * 1.002))
 
-            # 🔴 برايس أكشن بيع (Breakdown SHORT)
-            # فلتر البتكوين يقول هابط + السعر كسر أدنى قاع لآخر 20 شمعة وقفل تحته بشمعة قوية حمراء
-            if btc_trend == "BEARISH" and (m5_curr['close'] < m5_curr['ll20']) and (m5_curr['close'] < m5_curr['open']) and is_strong_candle:
-                valid_setups.append((1, "PA Breakdown + BTC Sync", "SHORT"))
-                # الستوب الهيكلي: فوق قمة شمعة الكسر مباشرة بمسافة بسيطة
-                sl = m5_curr['high'] * 1.002 
+            # ========================================================
+            # الاستراتيجية 2: Volatility Breakout (الانفجار السعري)
+            # ========================================================
+            if macro_bullish and m5_prev['squeeze_on'] and (m5_curr['close'] > m5_curr['bbu']) and is_strong_green and vol_surge:
+                valid_setups.append((2, "2. Squeeze Breakout", "LONG", m5_curr['low'] - (m5_atr * 0.5)))
+                
+            if macro_bearish and m5_prev['squeeze_on'] and (m5_curr['close'] < m5_curr['bbl']) and is_strong_red and vol_surge:
+                valid_setups.append((2, "2. Squeeze Breakout", "SHORT", m5_curr['high'] + (m5_atr * 0.5)))
 
+            # ========================================================
+            # الاستراتيجية 3: Trend Pullback (الارتداد لمناطق القيمة)
+            # ========================================================
+            # السعر نزل لمس منطقة الدعم بين الـ EMA 21 و 50 وارتد منها بشمعة قوية
+            bullish_pullback = (m5_curr['low'] <= m5_curr['ema50']) and (m5_curr['close'] > m5_curr['ema21'])
+            bearish_pullback = (m5_curr['high'] >= m5_curr['ema50']) and (m5_curr['close'] < m5_curr['ema21'])
+
+            if macro_bullish and bullish_pullback and is_strong_green:
+                valid_setups.append((3, "3. Trend Pullback (Value Area)", "LONG", min(m5_curr['low'], m5_prev['low']) - (m5_atr * 0.5)))
+                
+            if macro_bearish and bearish_pullback and is_strong_red:
+                valid_setups.append((3, "3. Trend Pullback (Value Area)", "SHORT", max(m5_curr['high'], m5_prev['high']) + (m5_atr * 0.5)))
+
+            # ========================================================
+            # فلترة وإرسال الإشارة الأقوى
+            # ========================================================
             if not valid_setups: return None
-            _, strat, side = valid_setups[0]
+            
+            # ترتيب الأولويات: لو الـ 3 استراتيجيات اشتغلوا في نفس الوقت، يختار SMC أولاً
+            valid_setups.sort(key=lambda x: x[0]) 
+            _, strat, side, sl = valid_setups[0]
 
-            # --- الحسابات الصارمة ---
+            # --- الحسابات (إدارة مخاطر صارمة) ---
             risk_distance = abs(entry - sl)
-            # التأكد أن الستوب مش واسع جداً أو ضيق لدرجة مستحيلة
-            if risk_distance < (entry * 0.002) or risk_distance > (entry * 0.04): return None 
+            if risk_distance < (entry * 0.001) or risk_distance > (entry * 0.04): return None 
 
             risk_pct = max(0.5, (risk_distance / entry) * 100) 
             lev = int(10.0 / risk_pct) 
@@ -152,14 +205,14 @@ class StrategyEngine:
                 tps.append(float(target))
                 pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
 
-            del df_m5
+            del df_m5, df_h1
             return {
                 "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
                 "leverage": lev, "strat": strat, "original_sl": sl, "risk_pct": risk_pct
             }
 
         except Exception as e:
-            Log.print(f"PA Engine Error on {symbol}: {e}", Log.RED)
+            Log.print(f"Trinity Engine Error on {symbol}: {e}", Log.RED)
             return None
 
 # ==========================================
@@ -213,13 +266,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nPrice Action Strategy + BTC King's Filter Active 👑📊")
-
-    async def shutdown(self):
-        self.running = False
-        self.save_state()
-        await self.tg.stop()
-        await self.exchange.close()
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nThe Trinity Engine (SMC + Breakout + Pullback) Active 🏦🔥")
 
     async def execute_trade(self, trade):
         try:
@@ -231,8 +278,7 @@ class TradingSystem:
             bid, ask = ticker['bid'], ticker['ask']
             if bid and ask:
                 spread_pct = (ask - bid) / bid
-                if spread_pct > Config.MAX_ALLOWED_SPREAD:
-                    return
+                if spread_pct > Config.MAX_ALLOWED_SPREAD: return
 
             safe_entry = float(self.exchange.price_to_precision(sym, trade['entry']))
             safe_sl = float(self.exchange.price_to_precision(sym, trade['sl']))
@@ -248,7 +294,7 @@ class TradingSystem:
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
             
-            icon = "🟢 PA LONG (BTC Confirmed)" if trade['side'] == "LONG" else "🔴 PA SHORT (BTC Confirmed)"
+            icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
             
             targets_msg = ""
             for idx, (tp, pnl) in enumerate(zip(safe_tps, safe_pnls)): 
@@ -257,13 +303,13 @@ class TradingSystem:
             msg = (
                 f"<code>{exact_app_name}</code>\n"
                 f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
-                f"{icon} | Cross {trade['leverage']}x\n"
+                f"{icon} | {trade['strat']} | {trade['leverage']}x\n"
                 f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
                 f"💰 Entry: <code>{safe_entry}</code>\n"
                 f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
                 f"{targets_msg}"
                 f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
-                f"🛑 SL (Candle Tail): <code>{safe_sl}</code>"
+                f"🛑 SL: <code>{safe_sl}</code>"
             )
             
             msg_id = await self.tg.send(msg)
@@ -287,35 +333,21 @@ class TradingSystem:
             try:
                 tickers = await fetch_with_retry(self.exchange.fetch_tickers)
                 if not tickers: return
-                self.cached_valid_coins = [
-                    sym for sym, d in tickers.items() 
-                    if 'USDT' in sym and ':' in sym and d.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT 
-                    and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC'])
-                ]
+                
+                # ترتيب العملات حسب الفوليوم وأخذ أعلى TOP_COINS_LIMIT (التوب لست فقط)
+                valid_pairs = []
+                for sym, d in tickers.items():
+                    vol = d.get('quoteVolume', 0)
+                    if 'USDT' in sym and ':' in sym and vol >= Config.MIN_24H_VOLUME_USDT and not any(j in sym for j in ['3L', '3S', '5L', '5S', 'USDC']):
+                        valid_pairs.append((sym, vol))
+                
+                valid_pairs.sort(key=lambda x: x[1], reverse=True)
+                self.cached_valid_coins = [x[0] for x in valid_pairs[:Config.TOP_COINS_LIMIT]]
+                
                 self.last_cache_time = current_ts
-                Log.print(f"🔄 Coins Cache Updated. Valid Pairs: {len(self.cached_valid_coins)}", Log.BLUE)
+                Log.print(f"🔄 Coins Cache Updated. Scanning Top {len(self.cached_valid_coins)} Pairs.", Log.BLUE)
             except Exception as e:
                 Log.print(f"Cache Error: {e}", Log.RED)
-
-    async def get_btc_trend(self):
-        """دالة الفلتر المركزي للبتكوين"""
-        try:
-            btc_data = await fetch_with_retry(self.exchange.fetch_ohlcv, Config.BTC_SYMBOL, Config.TF_MACRO, limit=100)
-            if not btc_data: return "UNKNOWN"
-            df_btc = pd.DataFrame(btc_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            df_btc['ema50'] = ta.ema(df_btc['close'], length=50)
-            df_btc.dropna(inplace=True)
-            if len(df_btc) < 2: return "UNKNOWN"
-            
-            btc_curr = df_btc.iloc[-2] # الشمعة المغلقة
-            if btc_curr['close'] > btc_curr['ema50']:
-                return "BULLISH"
-            elif btc_curr['close'] < btc_curr['ema50']:
-                return "BEARISH"
-            return "UNKNOWN"
-        except Exception as e:
-            Log.print(f"BTC Filter Error: {e}", Log.RED)
-            return "UNKNOWN"
 
     async def scan_market(self):
         while self.running:
@@ -325,28 +357,24 @@ class TradingSystem:
             
             await self.update_valid_coins_cache()
             
-            # 👈 جلب اتجاه البتكوين مرة واحدة قبل فحص العملات
-            btc_trend = await self.get_btc_trend()
-            if btc_trend == "UNKNOWN":
-                await asyncio.sleep(10)
-                continue
-                
             try:
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                chunk_size = 10 
+                chunk_size = 5 
                 for i in range(0, len(scan_list), chunk_size):
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     chunk = scan_list[i:i+chunk_size]
                     
-                    tasks_m5 = [asyncio.create_task(fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MICRO, limit=50)) for sym in chunk]
+                    tasks_h1 = [asyncio.create_task(fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=250)) for sym in chunk]
+                    h1_results = await asyncio.gather(*tasks_h1)
+                    
+                    tasks_m5 = [asyncio.create_task(fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MICRO, limit=100)) for sym in chunk]
                     m5_results = await asyncio.gather(*tasks_m5)
 
                     for idx, sym in enumerate(chunk):
-                        if m5_results[idx] and sym not in self.active_trades:
-                            # 👈 تمرير اتجاه البتكوين لمحرك البرايس أكشن
-                            res = await asyncio.to_thread(StrategyEngine.analyze_pa, sym, m5_results[idx], btc_trend)
+                        if h1_results[idx] and m5_results[idx] and sym not in self.active_trades:
+                            res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, h1_results[idx], m5_results[idx])
                             if res and len(self.active_trades) < Config.MAX_TRADES_AT_ONCE:
                                 await self.execute_trade(res)
                     
@@ -388,7 +416,7 @@ class TradingSystem:
                     
                     if hit_sl:
                         if step == 0:
-                            msg = f"🛑 <b>Trade Closed at SL (PA Invalidated)</b>"
+                            msg = f"🛑 <b>Trade Closed at SL</b>"
                             self.stats['losses'] += 1
                         elif step == 1:
                             msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b>\n🎯 Last hit: TP{trade['last_tp_hit']}"
@@ -446,7 +474,7 @@ class TradingSystem:
                     wr = (self.stats['wins'] / total_trades * 100) if total_trades > 0 else 0
                     
                     msg = (
-                        f"📈 <b>PRICE ACTION REPORT (24H)</b> 📉\n"
+                        f"📈 <b>THE TRINITY ENGINE REPORT (24H)</b> 📉\n"
                         f"────────────────\n"
                         f"🎯 <b>Total Signals:</b> {self.stats['signals']}\n"
                         f"🏆 <b>Wins (In Profit):</b> {self.stats['wins']}\n"
