@@ -34,7 +34,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state_extreme_rsi.json"
-    VERSION = "V8000.0 (Extreme RSI Mean Reversion)"
+    VERSION = "V8000.1 (Extreme RSI + Clean Messages)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -87,12 +87,10 @@ class StrategyEngine:
     @staticmethod
     def analyze_mtf(symbol, h1_data, m5_data):
         try:
-            # --- 1. فريم الساعة: تحديد التشبع المتطرف ---
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_h1) < 100: return None 
             
             df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
-            # بولينجر باندز بانحراف 2.5 (شديد القوة)
             df_h1['sma20'] = df_h1['close'].rolling(20).mean()
             df_h1['std20'] = df_h1['close'].rolling(20).std()
             df_h1['bbu_extreme'] = df_h1['sma20'] + (2.5 * df_h1['std20'])
@@ -100,21 +98,18 @@ class StrategyEngine:
             
             df_h1.dropna(inplace=True)
             if len(df_h1) < 2: return None
+            h1 = df_h1.iloc[-2]
             
-            h1 = df_h1.iloc[-2] # الشمعة المغلقة
-            
-            # هل نحن في حالة تشبع متطرف حقيقي؟
             macro_oversold = (h1['rsi'] <= 25) and (h1['close'] <= h1['bbl_extreme'])
             macro_overbought = (h1['rsi'] >= 75) and (h1['close'] >= h1['bbu_extreme'])
 
-            if not macro_oversold and not macro_overbought: return None # تجاهل العملة لو مش متطرفة
+            if not macro_oversold and not macro_overbought: return None
 
-            # --- 2. فريم 5 دقائق: تأكيد الانعكاس القوي ---
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
             if h1['time'] > df_m5['time'].iloc[-1]: return None 
             
-            df_m5['ema9'] = ta.ema(df_m5['close'], length=9) # متوسط سريع جداً
+            df_m5['ema9'] = ta.ema(df_m5['close'], length=9)
             df_m5['vol_ma'] = df_m5['vol'].rolling(20).mean()
             
             df_m5.dropna(inplace=True)
@@ -127,33 +122,26 @@ class StrategyEngine:
             
             strat = ""; side = ""; sl = 0.0
             
-            # 🟢 استراتيجية الشراء من القاع
             if macro_oversold:
-                # تأكيد الدخول: شمعة خضراء تبتلع وتكسر فوق المتوسط 9 بفوليوم عالي
                 crossing_up = (m5_prev['close'] <= m5_prev['ema9']) and (m5_curr['close'] > m5_curr['ema9'])
                 strong_green = (m5_curr['close'] > m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.5)
                 
                 if crossing_up and strong_green:
                     side = "LONG"
                     strat = "Extreme RSI Reversal"
-                    # الستوب: تحت أدنى قاع في آخر 15 شمعة مباشرة (القاع الحقيقي للانهيار)
                     sl = float(df_m5['low'].tail(15).min() * 0.998)
 
-            # 🔴 استراتيجية البيع من القمة
             elif macro_overbought:
-                # تأكيد الدخول: شمعة حمراء تكسر تحت المتوسط 9 بفوليوم عالي
                 crossing_down = (m5_prev['close'] >= m5_prev['ema9']) and (m5_curr['close'] < m5_curr['ema9'])
                 strong_red = (m5_curr['close'] < m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.5)
                 
                 if crossing_down and strong_red:
                     side = "SHORT"
                     strat = "Extreme RSI Reversal"
-                    # الستوب: فوق أعلى قمة في آخر 15 شمعة
                     sl = float(df_m5['high'].tail(15).max() * 1.002)
 
             if not side: return None
 
-            # --- حساب الأهداف (العودة للمتوسط) والرافعة المالية ---
             risk_distance = abs(entry - sl)
             if risk_distance < (entry * 0.001) or risk_distance > (entry * 0.05): return None 
 
@@ -163,12 +151,8 @@ class StrategyEngine:
 
             tps = []
             pnls = []
-            
-            # الهدف الذهبي لهذه الاستراتيجية هو "العودة لمتوسط فريم الساعة SMA 20"
             target_mean = float(h1['sma20']) 
             total_target_distance = abs(target_mean - entry)
-            
-            # تقسيم الرحلة للعودة للمتوسط إلى 10 أهداف متتالية
             step_size = total_target_distance / 10.0 
 
             for i in range(1, 11):
@@ -197,10 +181,7 @@ class TradingSystem:
         self.cooldown_list = {} 
         self.cached_valid_coins = [] 
         self.last_cache_time = 0
-        
-        self.stats = {
-            "signals": 0, "wins": 0, "losses": 0, "break_evens": 0
-        } 
+        self.stats = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0} 
         self.running = True
 
     def save_state(self):
@@ -220,7 +201,6 @@ class TradingSystem:
             try:
                 with open(Config.STATE_FILE, "r") as f:
                     state = json.load(f)
-                
                 if state.get("version") == Config.VERSION:
                     self.active_trades = state.get("active_trades", {})
                     self.cooldown_list = state.get("cooldown_list", {})
@@ -237,9 +217,8 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nExtreme RSI Mean Reversion Active 📉🎯")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nClean Messages Active 🎯")
 
-    # 👇 دالة الـ Shutdown تمت إضافتها هنا بشكل سليم لحل خطأ ريندر
     async def shutdown(self):
         self.running = False
         self.save_state()
@@ -274,22 +253,25 @@ class TradingSystem:
             
             icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
             
-            # عرض الأهداف اللي بتستهدف متوسط السعر
+            # رسالة نظيفة خالية من التعقيد
             targets_msg = ""
             for idx, (tp, pnl) in enumerate(zip(safe_tps[:3], safe_pnls[:3])): 
-                targets_msg += f"🎯 TP {idx+1}: <code>{tp}</code> (+{pnl:.1f}% ROE)\n"
-            targets_msg += f"🎯 TP 10 (Mean): <code>{safe_tps[-1]}</code> (+{safe_pnls[-1]:.1f}% ROE)\n"
+                targets_msg += f"✅ <b>TP {idx+1}:</b> <code>{tp}</code> (+{pnl:.1f}%)\n"
+            targets_msg += f"🚀 <b>TP 10:</b> <code>{safe_tps[-1]}</code> (+{safe_pnls[-1]:.1f}%)\n"
+
+            # حساب نسبة الستوب لوز
+            safe_sl_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], trade['leverage'])
 
             msg = (
-                f"<code>{exact_app_name}</code>\n"
-                f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
-                f"{icon} | {trade['strat']} | {trade['leverage']}x\n"
-                f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
-                f"💰 Entry: <code>{safe_entry}</code>\n"
-                f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
+                f"🪙 <b><code>{exact_app_name}</code></b>\n"
+                f"ــــــــــــــــــــــــــــــــــــــ\n"
+                f"⚡ <b>{icon}</b> | 🎚️ <b>{trade['leverage']}x</b>\n"
+                f"ــــــــــــــــــــــــــــــــــــــ\n"
+                f"🎯 <b>Entry:</b> <code>{safe_entry}</code>\n"
+                f"ــــــــــــــــــــــــــــــــــــــ\n"
                 f"{targets_msg}"
-                f"ـــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــــ\n"
-                f"🛑 SL (Panic Extreme): <code>{safe_sl}</code>"
+                f"ــــــــــــــــــــــــــــــــــــــ\n"
+                f"🛑 <b>Stop:</b> <code>{safe_sl}</code> ({safe_sl_roe:.1f}%)"
             )
             
             msg_id = await self.tg.send(msg)
@@ -303,7 +285,7 @@ class TradingSystem:
                 self.active_trades[sym] = trade
                 self.stats["signals"] += 1
                 self.save_state() 
-                Log.print(f"🚀 {trade['strat']} FIRED: {exact_app_name}", Log.GREEN)
+                Log.print(f"🚀 SIGNAL FIRED: {exact_app_name}", Log.GREEN)
         except Exception as e:
             Log.print(f"Trade Execution Error: {e}", Log.RED)
 
@@ -394,7 +376,7 @@ class TradingSystem:
                     
                     if hit_sl:
                         if step == 0:
-                            msg = f"🛑 <b>Trade Closed at SL (Reversal Failed)</b>"
+                            msg = f"🛑 <b>Trade Closed at SL</b>"
                             self.stats['losses'] += 1
                         elif step == 1:
                             msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b>\n🎯 Last hit: TP {trade['last_tp_hit']}"
@@ -452,14 +434,14 @@ class TradingSystem:
                     wr = (self.stats['wins'] / total_trades * 100) if total_trades > 0 else 0
                     
                     msg = (
-                        f"📈 <b>EXTREME REVERSAL REPORT (24H)</b> 📉\n"
-                        f"────────────────\n"
-                        f"🎯 <b>Total Signals:</b> {self.stats['signals']}\n"
-                        f"🏆 <b>Wins (In Profit):</b> {self.stats['wins']}\n"
+                        f"📈 <b>DAILY PERFORMANCE REPORT</b> 📉\n"
+                        f"ــــــــــــــــــــــــــــــــــــــ\n"
+                        f"🎯 <b>Signals:</b> {self.stats['signals']}\n"
+                        f"🏆 <b>Wins:</b> {self.stats['wins']}\n"
                         f"🛡️ <b>Break-Evens:</b> {self.stats['break_evens']}\n"
                         f"🛑 <b>Losses:</b> {self.stats['losses']}\n"
-                        f"📊 <b>True Win Rate:</b> {wr:.1f}%\n"
-                        f"────────────────\n"
+                        f"📊 <b>Win Rate:</b> {wr:.1f}%\n"
+                        f"ــــــــــــــــــــــــــــــــــــــ\n"
                     )
                     await self.tg.send(msg)
                     
