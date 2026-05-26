@@ -34,7 +34,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state_extreme_rsi.json"
-    VERSION = "V8000.1 (Extreme RSI + Clean Messages)"
+    VERSION = "V8000.2 (Extreme RSI + Dynamic TPs)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -149,13 +149,19 @@ class StrategyEngine:
             lev = int(10.0 / risk_pct) 
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)) 
 
+            # --- حساب عدد الأهداف ديناميكياً (3 إلى 6 كحد أقصى) ---
             tps = []
             pnls = []
             target_mean = float(h1['sma20']) 
             total_target_distance = abs(target_mean - entry)
-            step_size = total_target_distance / 10.0 
+            
+            # حساب العائد مقابل المخاطرة لتحديد عدد الخطوات
+            rr_ratio = total_target_distance / risk_distance if risk_distance > 0 else 3
+            num_tps = max(3, min(6, int(rr_ratio))) # الرقم لن يقل عن 3 ولن يزيد عن 6
+            
+            step_size = total_target_distance / float(num_tps)
 
-            for i in range(1, 11):
+            for i in range(1, num_tps + 1):
                 target = entry + (step_size * i) if side == "LONG" else entry - (step_size * i)
                 tps.append(float(target))
                 pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
@@ -217,7 +223,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nClean Messages Active 🎯")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nDynamic TPs Active 🎯")
 
     async def shutdown(self):
         self.running = False
@@ -253,13 +259,13 @@ class TradingSystem:
             
             icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
             
-            # رسالة نظيفة خالية من التعقيد
+            # بناء قائمة الأهداف ديناميكياً (3 إلى 6) في الرسالة
             targets_msg = ""
-            for idx, (tp, pnl) in enumerate(zip(safe_tps[:3], safe_pnls[:3])): 
-                targets_msg += f"✅ <b>TP {idx+1}:</b> <code>{tp}</code> (+{pnl:.1f}%)\n"
-            targets_msg += f"🚀 <b>TP 10:</b> <code>{safe_tps[-1]}</code> (+{safe_pnls[-1]:.1f}%)\n"
+            total_tps = len(safe_tps)
+            for idx, (tp, pnl) in enumerate(zip(safe_tps, safe_pnls)): 
+                icon_tp = "🚀" if idx == total_tps - 1 else "✅"
+                targets_msg += f"{icon_tp} <b>TP {idx+1}:</b> <code>{tp}</code> (+{pnl:.1f}%)\n"
 
-            # حساب نسبة الستوب لوز
             safe_sl_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], trade['leverage'])
 
             msg = (
@@ -285,7 +291,7 @@ class TradingSystem:
                 self.active_trades[sym] = trade
                 self.stats["signals"] += 1
                 self.save_state() 
-                Log.print(f"🚀 SIGNAL FIRED: {exact_app_name}", Log.GREEN)
+                Log.print(f"🚀 SIGNAL FIRED: {exact_app_name} (TPs: {total_tps})", Log.GREEN)
         except Exception as e:
             Log.print(f"Trade Execution Error: {e}", Log.RED)
 
@@ -371,6 +377,7 @@ class TradingSystem:
                     entry = trade['entry']
                     original_sl = trade['original_sl']
                     current_sl = trade.get('last_sl_price', trade['sl'])
+                    total_tps = len(trade['tps'])
                     
                     hit_sl = (current_price <= current_sl) if side == "LONG" else (current_price >= current_sl)
                     
@@ -393,7 +400,7 @@ class TradingSystem:
                         continue
 
                     highest_tp_hit = step
-                    for i in range(step, 10): 
+                    for i in range(step, total_tps): 
                         target = trade['tps'][i]
                         hit_tp = (current_price >= target) if side == "LONG" else (current_price <= target)
                         if hit_tp: highest_tp_hit = i + 1
@@ -410,8 +417,8 @@ class TradingSystem:
                             trade['last_sl_price'] = trade['tps'][idx_hit - 1] 
                             msg = f"🔥 <b>TP {highest_tp_hit} HIT!</b>\n📈 Trailing SL updated."
                             
-                        if highest_tp_hit == 10: 
-                            msg = f"🏆 <b>FULL MEAN REVERSION! (TP 10)</b> 🏦\nTrade Completed."
+                        if highest_tp_hit == total_tps: 
+                            msg = f"🏆 <b>FULL MEAN REVERSION! (TP {total_tps})</b> 🏦\nTrade Completed."
                             self.stats['wins'] += 1
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
