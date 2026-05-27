@@ -34,7 +34,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state_extreme_rsi.json"
-    VERSION = "V8000.2 (Extreme RSI + Dynamic TPs)"
+    VERSION = "V8000.5 (Stable Monitor + Dynamic TPs)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -149,15 +149,14 @@ class StrategyEngine:
             lev = int(10.0 / risk_pct) 
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)) 
 
-            # --- حساب عدد الأهداف ديناميكياً (3 إلى 6 كحد أقصى) ---
             tps = []
             pnls = []
             target_mean = float(h1['sma20']) 
             total_target_distance = abs(target_mean - entry)
             
-            # حساب العائد مقابل المخاطرة لتحديد عدد الخطوات
+            # حساب عدد الأهداف ديناميكياً (من 3 إلى 6)
             rr_ratio = total_target_distance / risk_distance if risk_distance > 0 else 3
-            num_tps = max(3, min(6, int(rr_ratio))) # الرقم لن يقل عن 3 ولن يزيد عن 6
+            num_tps = max(3, min(6, int(rr_ratio))) 
             
             step_size = total_target_distance / float(num_tps)
 
@@ -223,7 +222,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nDynamic TPs Active 🎯")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nStable Monitor & Dynamic TPs Active 🎯")
 
     async def shutdown(self):
         self.running = False
@@ -259,25 +258,26 @@ class TradingSystem:
             
             icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
             
-            # بناء قائمة الأهداف ديناميكياً (3 إلى 6) في الرسالة
+            # بناء الأهداف ديناميكياً (3 إلى 6 أهداف) وتنسيق الرسالة
             targets_msg = ""
             total_tps = len(safe_tps)
             for idx, (tp, pnl) in enumerate(zip(safe_tps, safe_pnls)): 
                 icon_tp = "🚀" if idx == total_tps - 1 else "✅"
-                targets_msg += f"{icon_tp} <b>TP {idx+1}:</b> <code>{tp}</code> (+{pnl:.1f}%)\n"
+                targets_msg += f"{icon_tp} TP {idx+1}: <code>{tp}</code> (+{pnl:.1f}%)\n"
 
+            # حساب نسبة الستوب
             safe_sl_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], trade['leverage'])
 
             msg = (
                 f"🪙 <b><code>{exact_app_name}</code></b>\n"
                 f"ــــــــــــــــــــــــــــــــــــــ\n"
-                f"⚡ <b>{icon}</b> | 🎚️ <b>{trade['leverage']}x</b>\n"
+                f"⚡ {icon} | 🎚️ {trade['leverage']}x\n"
                 f"ــــــــــــــــــــــــــــــــــــــ\n"
-                f"🎯 <b>Entry:</b> <code>{safe_entry}</code>\n"
+                f"🎯 Entry: <code>{safe_entry}</code>\n"
                 f"ــــــــــــــــــــــــــــــــــــــ\n"
                 f"{targets_msg}"
                 f"ــــــــــــــــــــــــــــــــــــــ\n"
-                f"🛑 <b>Stop:</b> <code>{safe_sl}</code> ({safe_sl_roe:.1f}%)"
+                f"🛑 Stop: <code>{safe_sl}</code> ({safe_sl_roe:.1f}%)"
             )
             
             msg_id = await self.tg.send(msg)
@@ -378,23 +378,24 @@ class TradingSystem:
                     original_sl = trade['original_sl']
                     current_sl = trade.get('last_sl_price', trade['sl'])
                     total_tps = len(trade['tps'])
+                    coin_name = trade.get('clean_sym', sym.replace('/USDT:USDT', '/USDT'))
                     
                     hit_sl = (current_price <= current_sl) if side == "LONG" else (current_price >= current_sl)
                     
                     if hit_sl:
                         if step == 0:
-                            msg = f"🛑 <b>Trade Closed at SL</b>"
+                            msg = f"🛑 <b>{coin_name}</b> | Closed at Stop Loss"
                             self.stats['losses'] += 1
                         elif step == 1:
-                            msg = f"🛡️ <b>Stopped out at Entry (Break Even)</b>\n🎯 Last hit: TP {trade['last_tp_hit']}"
+                            msg = f"🛡️ <b>{coin_name}</b> | Closed at Entry (Break Even)\n🎯 Last hit: TP {trade['last_tp_hit']}"
                             self.stats['break_evens'] += 1
                         else:
-                            msg = f"🛡️ <b>Stopped out in Profit (Trailing SL)</b>\n🎯 Last hit: TP {trade['last_tp_hit']}"
+                            msg = f"🛡️ <b>{coin_name}</b> | Closed in Profit (Trailing SL)\n🎯 Last hit: TP {trade['last_tp_hit']}"
                             self.stats['wins'] += 1 
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
                         Log.print(f"Trade Closed: {sym}", Log.YELLOW) 
-                        await self.tg.send(msg, trade['msg_id'])
+                        await self.tg.send(msg, trade.get('msg_id'))
                         del self.active_trades[sym]
                         self.save_state() 
                         continue
@@ -412,19 +413,19 @@ class TradingSystem:
                         
                         if highest_tp_hit == 1:
                             trade['last_sl_price'] = trade['entry'] 
-                            msg = f"✅ <b>TP 1 HIT!</b>\n🛡️ SL moved to Entry."
+                            msg = f"✅ <b>{coin_name}</b> | TP 1 HIT! 🎯\n🛡️ SL moved to Entry."
                         else:
                             trade['last_sl_price'] = trade['tps'][idx_hit - 1] 
-                            msg = f"🔥 <b>TP {highest_tp_hit} HIT!</b>\n📈 Trailing SL updated."
+                            msg = f"🔥 <b>{coin_name}</b> | TP {highest_tp_hit} HIT! 🎯\n📈 Trailing SL updated."
                             
                         if highest_tp_hit == total_tps: 
-                            msg = f"🏆 <b>FULL MEAN REVERSION! (TP {total_tps})</b> 🏦\nTrade Completed."
+                            msg = f"🏆 <b>{coin_name}</b> | ALL TARGETS HIT! (TP {total_tps}) 🏦\nTrade Completed."
                             self.stats['wins'] += 1
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
                             
                         Log.print(f"Hit TP{highest_tp_hit}: {sym}", Log.GREEN) 
-                        await self.tg.send(msg, trade['msg_id'])
+                        await self.tg.send(msg, trade.get('msg_id'))
                         self.save_state() 
                             
             except Exception as e:
