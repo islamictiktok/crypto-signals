@@ -26,7 +26,7 @@ class Config:
     TF_MACRO = '1h'   
     TF_MICRO = '5m'   
     
-    TOP_COINS_LIMIT = 40 
+    TOP_COINS_LIMIT = 75 # 👈 تم رفع الفحص إلى أعلى 75 عملة لزيادة الفرص
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 2_000_000 
     MAX_ALLOWED_SPREAD = 0.003 
@@ -34,7 +34,7 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state_extreme_rsi.json"
-    VERSION = "V8000.5 (Stable Monitor + Dynamic TPs)"
+    VERSION = "V8000.6 (75-Majors Sniper)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -75,7 +75,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (Extreme RSI & Mean Reversion)
+# 2. محرك الاستراتيجية (Extreme RSI - Closed Candle Focus)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -98,6 +98,8 @@ class StrategyEngine:
             
             df_h1.dropna(inplace=True)
             if len(df_h1) < 2: return None
+            
+            # 👈 التركيز الحصري على الشمعة المغلقة بالكامل للساعة لمنع الدخول العشوائي
             h1 = df_h1.iloc[-2]
             
             macro_oversold = (h1['rsi'] <= 25) and (h1['close'] <= h1['bbl_extreme'])
@@ -120,7 +122,7 @@ class StrategyEngine:
             entry = float(m5_curr['close'])
             if entry <= 0: return None
             
-            strat = ""; side = ""; sl = 0.0
+            side = ""; sl = 0.0
             
             if macro_oversold:
                 crossing_up = (m5_prev['close'] <= m5_prev['ema9']) and (m5_curr['close'] > m5_curr['ema9'])
@@ -128,7 +130,6 @@ class StrategyEngine:
                 
                 if crossing_up and strong_green:
                     side = "LONG"
-                    strat = "Extreme RSI Reversal"
                     sl = float(df_m5['low'].tail(15).min() * 0.998)
 
             elif macro_overbought:
@@ -137,7 +138,6 @@ class StrategyEngine:
                 
                 if crossing_down and strong_red:
                     side = "SHORT"
-                    strat = "Extreme RSI Reversal"
                     sl = float(df_m5['high'].tail(15).max() * 1.002)
 
             if not side: return None
@@ -154,7 +154,6 @@ class StrategyEngine:
             target_mean = float(h1['sma20']) 
             total_target_distance = abs(target_mean - entry)
             
-            # حساب عدد الأهداف ديناميكياً (من 3 إلى 6)
             rr_ratio = total_target_distance / risk_distance if risk_distance > 0 else 3
             num_tps = max(3, min(6, int(rr_ratio))) 
             
@@ -168,9 +167,8 @@ class StrategyEngine:
             del df_m5, df_h1
             return {
                 "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
-                "leverage": lev, "strat": strat, "original_sl": sl, "risk_pct": risk_pct
+                "leverage": lev, "original_sl": sl, "risk_pct": risk_pct
             }
-
         except Exception as e:
             Log.print(f"Engine Error on {symbol}: {e}", Log.RED)
             return None
@@ -222,7 +220,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nStable Monitor & Dynamic TPs Active 🎯")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFasting Closed Hour Candles on 75 Pairs Active 🎯")
 
     async def shutdown(self):
         self.running = False
@@ -233,7 +231,6 @@ class TradingSystem:
     async def execute_trade(self, trade):
         try:
             sym = trade['symbol']
-            
             ticker = await fetch_with_retry(self.exchange.fetch_ticker, sym)
             if not ticker or 'bid' not in ticker or 'ask' not in ticker: return
             
@@ -258,14 +255,12 @@ class TradingSystem:
             
             icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
             
-            # بناء الأهداف ديناميكياً (3 إلى 6 أهداف) وتنسيق الرسالة
             targets_msg = ""
             total_tps = len(safe_tps)
             for idx, (tp, pnl) in enumerate(zip(safe_tps, safe_pnls)): 
                 icon_tp = "🚀" if idx == total_tps - 1 else "✅"
                 targets_msg += f"{icon_tp} TP {idx+1}: <code>{tp}</code> (+{pnl:.1f}%)\n"
 
-            # حساب نسبة الستوب
             safe_sl_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], trade['leverage'])
 
             msg = (
