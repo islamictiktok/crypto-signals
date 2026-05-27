@@ -3,6 +3,7 @@ import gc
 import os
 import json
 import warnings
+import time
 from datetime import datetime, timezone
 import pandas as pd
 import pandas_ta as ta
@@ -26,15 +27,16 @@ class Config:
     TF_MACRO = '1h'   
     TF_MICRO = '5m'   
     
-    TOP_COINS_LIMIT = 75 # 👈 تم رفع الفحص إلى أعلى 75 عملة لزيادة الفرص
+    TOP_COINS_LIMIT = 75 
     MAX_TRADES_AT_ONCE = 3  
     MIN_24H_VOLUME_USDT = 2_000_000 
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
+    MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state_extreme_rsi.json"
-    VERSION = "V8000.6 (75-Majors Sniper)"
+    VERSION = "V11000.0 (SMC Fibonacci Targets)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -56,26 +58,29 @@ async def fetch_with_retry(coro, *args, retries=3, delay=1.5, **kwargs):
 class TelegramNotifier:
     def __init__(self):
         self.base_url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
-        self.session = None
 
-    async def start(self): 
-        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
-    async def stop(self): 
-        if self.session: await self.session.close()
+    async def start(self): pass
+    async def stop(self): pass
     async def send(self, text, reply_to=None):
-        if not self.session: return None
         payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         if reply_to: payload["reply_to_message_id"] = reply_to
         try:
-            async with self.session.post(self.base_url, json=payload) as resp:
-                data = await resp.json()
-                return data.get('result', {}).get('message_id') if resp.status == 200 else None
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+                async with session.post(self.base_url, json=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get('result', {}).get('message_id')
+                    elif reply_to:
+                        del payload["reply_to_message_id"]
+                        async with session.post(self.base_url, json=payload) as resp2:
+                            data2 = await resp2.json()
+                            return data2.get('result', {}).get('message_id') if resp2.status == 200 else None
         except Exception as e:
             Log.print(f"TG Error: {e}", Log.RED)
             return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (Extreme RSI - Closed Candle Focus)
+# 2. محرك الاستراتيجية (ATR SL + Fibonacci TP)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -88,31 +93,33 @@ class StrategyEngine:
     def analyze_mtf(symbol, h1_data, m5_data):
         try:
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df_h1) < 100: return None 
+            if len(df_h1) < 40: return None 
             
             df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
             df_h1['sma20'] = df_h1['close'].rolling(20).mean()
             df_h1['std20'] = df_h1['close'].rolling(20).std()
-            df_h1['bbu_extreme'] = df_h1['sma20'] + (2.5 * df_h1['std20'])
-            df_h1['bbl_extreme'] = df_h1['sma20'] - (2.5 * df_h1['std20'])
+            df_h1['bbu_extreme'] = df_h1['sma20'] + (2.1 * df_h1['std20'])
+            df_h1['bbl_extreme'] = df_h1['sma20'] - (2.1 * df_h1['std20'])
             
             df_h1.dropna(inplace=True)
             if len(df_h1) < 2: return None
             
-            # 👈 التركيز الحصري على الشمعة المغلقة بالكامل للساعة لمنع الدخول العشوائي
             h1 = df_h1.iloc[-2]
             
-            macro_oversold = (h1['rsi'] <= 25) and (h1['close'] <= h1['bbl_extreme'])
-            macro_overbought = (h1['rsi'] >= 75) and (h1['close'] >= h1['bbu_extreme'])
+            macro_oversold = (h1['rsi'] <= 30) and (h1['close'] <= h1['bbl_extreme'])
+            macro_overbought = (h1['rsi'] >= 70) and (h1['close'] >= h1['bbu_extreme'])
 
-            if not macro_oversold and not macro_overbought: return None
+            if not macro_oversold and not macro_overbought: 
+                del df_h1 
+                return None
 
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df_m5) < 50: return None
+            if len(df_m5) < 30: return None
             if h1['time'] > df_m5['time'].iloc[-1]: return None 
             
             df_m5['ema9'] = ta.ema(df_m5['close'], length=9)
             df_m5['vol_ma'] = df_m5['vol'].rolling(20).mean()
+            df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
             
             df_m5.dropna(inplace=True)
             df_m5.reset_index(drop=True, inplace=True)
@@ -120,54 +127,77 @@ class StrategyEngine:
             m5_curr = df_m5.iloc[-2]
             m5_prev = df_m5.iloc[-3]
             entry = float(m5_curr['close'])
-            if entry <= 0: return None
+            atr_val = float(m5_curr['atr'])
+            if entry <= 0 or atr_val <= 0: return None
             
             side = ""; sl = 0.0
             
             if macro_oversold:
                 crossing_up = (m5_prev['close'] <= m5_prev['ema9']) and (m5_curr['close'] > m5_curr['ema9'])
-                strong_green = (m5_curr['close'] > m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.5)
+                strong_green = (m5_curr['close'] > m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.2)
                 
                 if crossing_up and strong_green:
                     side = "LONG"
-                    sl = float(df_m5['low'].tail(15).min() * 0.998)
+                    struct_low = float(df_m5['low'].tail(15).min())
+                    sl = struct_low - (atr_val * 1.0)
 
             elif macro_overbought:
                 crossing_down = (m5_prev['close'] >= m5_prev['ema9']) and (m5_curr['close'] < m5_curr['ema9'])
-                strong_red = (m5_curr['close'] < m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.5)
+                strong_red = (m5_curr['close'] < m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.2)
                 
                 if crossing_down and strong_red:
                     side = "SHORT"
-                    sl = float(df_m5['high'].tail(15).max() * 1.002)
+                    struct_high = float(df_m5['high'].tail(15).max())
+                    sl = struct_high + (atr_val * 1.0)
 
-            if not side: return None
+            if not side: 
+                del df_h1, df_m5
+                return None
 
-            risk_distance = abs(entry - sl)
-            if risk_distance < (entry * 0.001) or risk_distance > (entry * 0.05): return None 
-
-            risk_pct = max(0.5, (risk_distance / entry) * 100) 
-            lev = int(10.0 / risk_pct) 
+            sl_distance_pct = abs(entry - sl) / entry * 100
+            if sl_distance_pct < 0.1 or sl_distance_pct > 10.0: return None 
+            
+            lev = int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)) 
 
+            # 🚀 النظام الجديد: أهداف ارتداد فيبوناتشي الهيكلية (SMC Fibonacci)
+            # 1. قياس طول الموجة الكبرى (آخر 24 ساعة)
+            swing_high = float(df_h1['high'].tail(24).max()) 
+            swing_low = float(df_h1['low'].tail(24).min())   
+            macro_distance = swing_high - swing_low
+            
             tps = []
             pnls = []
-            target_mean = float(h1['sma20']) 
-            total_target_distance = abs(target_mean - entry)
             
-            rr_ratio = total_target_distance / risk_distance if risk_distance > 0 else 3
-            num_tps = max(3, min(6, int(rr_ratio))) 
+            # مستويات الارتداد الذهبية
+            fib_levels = [0.382, 0.500, 0.618, 0.786]
             
-            step_size = total_target_distance / float(num_tps)
+            for fib in fib_levels:
+                if side == "LONG":
+                    target = swing_low + (macro_distance * fib)
+                    # تصفية الأهداف القريبة جداً من نقطة الدخول
+                    if target > entry * 1.002: 
+                        tps.append(float(target))
+                        pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
+                else:
+                    target = swing_high - (macro_distance * fib)
+                    if target < entry * 0.998:
+                        tps.append(float(target))
+                        pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
 
-            for i in range(1, num_tps + 1):
-                target = entry + (step_size * i) if side == "LONG" else entry - (step_size * i)
-                tps.append(float(target))
-                pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
+            # خطة بديلة (Fallback) في حالة كانت الموجة ضيقة جداً
+            if not tps:
+                target_mean = float(h1['sma20'])
+                step = abs(target_mean - entry) / 3.0
+                for i in range(1, 4):
+                    t = entry + (step * i) if side == "LONG" else entry - (step * i)
+                    tps.append(float(t))
+                    pnls.append(StrategyEngine.calc_actual_roe(entry, t, side, lev))
 
             del df_m5, df_h1
             return {
                 "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
-                "leverage": lev, "original_sl": sl, "risk_pct": risk_pct
+                "leverage": lev, "original_sl": sl, "risk_pct": sl_distance_pct
             }
         except Exception as e:
             Log.print(f"Engine Error on {symbol}: {e}", Log.RED)
@@ -220,7 +250,7 @@ class TradingSystem:
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nFasting Closed Hour Candles on 75 Pairs Active 🎯")
+        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nSmart Sync & SMC Fibonacci Targets Active ⚡🎯")
 
     async def shutdown(self):
         self.running = False
@@ -255,11 +285,15 @@ class TradingSystem:
             
             icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
             
+            # رسالة نظيفة بأهداف الفيبوناتشي
             targets_msg = ""
             total_tps = len(safe_tps)
+            fib_labels = ["Fib 38.2%", "Fib 50.0%", "Fib 61.8%", "Fib 78.6%"]
+            
             for idx, (tp, pnl) in enumerate(zip(safe_tps, safe_pnls)): 
                 icon_tp = "🚀" if idx == total_tps - 1 else "✅"
-                targets_msg += f"{icon_tp} TP {idx+1}: <code>{tp}</code> (+{pnl:.1f}%)\n"
+                label = fib_labels[idx] if idx < len(fib_labels) else f"TP {idx+1}"
+                targets_msg += f"{icon_tp} {label}: <code>{tp}</code> (+{pnl:.1f}%)\n"
 
             safe_sl_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], trade['leverage'])
 
@@ -272,7 +306,7 @@ class TradingSystem:
                 f"ــــــــــــــــــــــــــــــــــــــ\n"
                 f"{targets_msg}"
                 f"ــــــــــــــــــــــــــــــــــــــ\n"
-                f"🛑 Stop: <code>{safe_sl}</code> ({safe_sl_roe:.1f}%)"
+                f"🛑 SL (ATR): <code>{safe_sl}</code> ({safe_sl_roe:.1f}%)"
             )
             
             msg_id = await self.tg.send(msg)
@@ -281,12 +315,11 @@ class TradingSystem:
                 trade['step'] = 0
                 trade['last_tp_hit'] = 0
                 trade['last_sl_price'] = safe_sl
-                trade['r_value'] = trade['risk_pct'] 
                 trade['clean_sym'] = exact_app_name 
                 self.active_trades[sym] = trade
                 self.stats["signals"] += 1
                 self.save_state() 
-                Log.print(f"🚀 SIGNAL FIRED: {exact_app_name} (TPs: {total_tps})", Log.GREEN)
+                Log.print(f"🚀 SIGNAL FIRED: {exact_app_name} | Lev: {trade['leverage']}x", Log.GREEN)
         except Exception as e:
             Log.print(f"Trade Execution Error: {e}", Log.RED)
 
@@ -320,29 +353,33 @@ class TradingSystem:
             await self.update_valid_coins_cache()
             
             try:
+                now = datetime.now(timezone.utc)
+                minutes_to_wait = 5 - (now.minute % 5)
+                seconds_to_wait = (minutes_to_wait * 60) - now.second + 2 
+                
+                Log.print(f"⏳ Next Scan in {int(seconds_to_wait)} seconds... (Waiting for 5m candle close)", Log.BLUE)
+                await asyncio.sleep(seconds_to_wait)
+                
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
-                chunk_size = 5 
-                for i in range(0, len(scan_list), chunk_size):
+                Log.print(f"🔍 Starting precision scan on {len(scan_list)} pairs...", Log.YELLOW)
+                
+                for sym in scan_list:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    chunk = scan_list[i:i+chunk_size]
                     
-                    tasks_h1 = [asyncio.create_task(fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=250)) for sym in chunk]
-                    h1_results = await asyncio.gather(*tasks_h1)
+                    h1_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=80)
+                    if not h1_res: continue
+                    m5_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MICRO, limit=40)
+                    if not m5_res: continue
                     
-                    tasks_m5 = [asyncio.create_task(fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MICRO, limit=100)) for sym in chunk]
-                    m5_results = await asyncio.gather(*tasks_m5)
-
-                    for idx, sym in enumerate(chunk):
-                        if h1_results[idx] and m5_results[idx] and sym not in self.active_trades:
-                            res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, h1_results[idx], m5_results[idx])
-                            if res and len(self.active_trades) < Config.MAX_TRADES_AT_ONCE:
-                                await self.execute_trade(res)
+                    if sym not in self.active_trades:
+                        res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, h1_res, m5_res)
+                        if res and len(self.active_trades) < Config.MAX_TRADES_AT_ONCE:
+                            await self.execute_trade(res)
                     
-                    await asyncio.sleep(0.5) 
-
-                await asyncio.sleep(2) 
+                    await asyncio.sleep(0.1) 
+                    
                 gc.collect() 
             except Exception as e:
                 Log.print(f"Scan Loop Error: {e}", Log.RED)
@@ -356,21 +393,25 @@ class TradingSystem:
             
             try:
                 symbols_to_fetch = list(self.active_trades.keys())
-                tickers = await fetch_with_retry(self.exchange.fetch_tickers, symbols_to_fetch)
-                if not tickers: 
-                    await asyncio.sleep(2)
-                    continue
-
-                for sym, trade in list(self.active_trades.items()):
-                    ticker = tickers.get(sym)
-                    if not ticker or not ticker.get('bid') or not ticker.get('ask'): continue
+                for sym in symbols_to_fetch:
+                    ticker = await fetch_with_retry(self.exchange.fetch_ticker, sym)
+                    if not ticker: continue
+                    
+                    trade = self.active_trades.get(sym)
+                    if not trade: continue
                     
                     side = trade['side']
-                    current_price = ticker['bid'] if side == "LONG" else ticker['ask']
+                    current_price = ticker.get('last')
+                    if current_price is None:
+                        bid = ticker.get('bid')
+                        ask = ticker.get('ask')
+                        if bid and ask:
+                            current_price = bid if side == "LONG" else ask
+                            
+                    if not current_price: continue
                     
                     step = trade['step']
                     entry = trade['entry']
-                    original_sl = trade['original_sl']
                     current_sl = trade.get('last_sl_price', trade['sl'])
                     total_tps = len(trade['tps'])
                     coin_name = trade.get('clean_sym', sym.replace('/USDT:USDT', '/USDT'))
@@ -379,7 +420,7 @@ class TradingSystem:
                     
                     if hit_sl:
                         if step == 0:
-                            msg = f"🛑 <b>{coin_name}</b> | Closed at Stop Loss"
+                            msg = f"🛑 <b>{coin_name}</b> | Closed at Stop Loss (ATR)"
                             self.stats['losses'] += 1
                         elif step == 1:
                             msg = f"🛡️ <b>{coin_name}</b> | Closed at Entry (Break Even)\n🎯 Last hit: TP {trade['last_tp_hit']}"
@@ -408,13 +449,13 @@ class TradingSystem:
                         
                         if highest_tp_hit == 1:
                             trade['last_sl_price'] = trade['entry'] 
-                            msg = f"✅ <b>{coin_name}</b> | TP 1 HIT! 🎯\n🛡️ SL moved to Entry."
+                            msg = f"✅ <b>{coin_name}</b> | TP 1 HIT (Fib 38.2%)! 🎯\n🛡️ SL moved to Entry."
                         else:
                             trade['last_sl_price'] = trade['tps'][idx_hit - 1] 
                             msg = f"🔥 <b>{coin_name}</b> | TP {highest_tp_hit} HIT! 🎯\n📈 Trailing SL updated."
                             
                         if highest_tp_hit == total_tps: 
-                            msg = f"🏆 <b>{coin_name}</b> | ALL TARGETS HIT! (TP {total_tps}) 🏦\nTrade Completed."
+                            msg = f"🏆 <b>{coin_name}</b> | ALL STRUCTURAL TARGETS HIT! 🏦\nTrade Completed."
                             self.stats['wins'] += 1
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
@@ -423,6 +464,7 @@ class TradingSystem:
                         await self.tg.send(msg, trade.get('msg_id'))
                         self.save_state() 
                             
+                    await asyncio.sleep(0.2)
             except Exception as e:
                 Log.print(f"Monitor Loop Error: {e}", Log.RED)
             await asyncio.sleep(2) 
@@ -459,8 +501,10 @@ class TradingSystem:
     async def keep_alive(self):
         while self.running:
             try:
-                async with aiohttp.ClientSession() as s:
-                    await s.get(Config.RENDER_URL)
+                timeout = aiohttp.ClientTimeout(total=10)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(Config.RENDER_URL) as response:
+                        await response.read() 
             except: pass
             await asyncio.sleep(300)
 
