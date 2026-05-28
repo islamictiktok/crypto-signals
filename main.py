@@ -31,11 +31,11 @@ class Config:
     MIN_24H_VOLUME_USDT = 2_000_000 
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
-    MAX_LEVERAGE_CAP = 50 
+    MAX_LEVERAGE_CAP = 25  # 🛡️ حماية المحفظة: تم التخفيض بناءً على التوجيهات
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V15000.0"
+    VERSION = "V16000.3 (Production Candidate)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -77,7 +77,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (High Win-Rate, Unchoked)
+# 2. محرك الاستراتيجية
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -87,7 +87,7 @@ class StrategyEngine:
         else: return float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def analyze_mtf(symbol, h1_data, m5_data):
+    def analyze_mtf(symbol, h1_data, m5_data, btc_trend):
         try:
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_h1) < 200: return None 
@@ -95,6 +95,13 @@ class StrategyEngine:
             df_h1['ema50'] = ta.ema(df_h1['close'], length=50)
             df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
             df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
+            
+            adx_df = ta.adx(df_h1['high'], df_h1['low'], df_h1['close'], length=14)
+            if adx_df is not None and not adx_df.empty and 'ADX_14' in adx_df.columns:
+                df_h1['adx'] = adx_df['ADX_14'] 
+            else:
+                df_h1['adx'] = 0
+
             df_h1.dropna(inplace=True)
             if len(df_h1) < 2: return None
             
@@ -102,14 +109,16 @@ class StrategyEngine:
             
             macro_uptrend = h1['ema50'] > h1['ema200']
             macro_downtrend = h1['ema50'] < h1['ema200']
+            strong_trend = h1.get('adx', 0) > 18
             
-            # تخفيف الخنقة: تصحيح طبيعي للاتجاه
-            pullback_long = macro_uptrend and (h1['rsi'] <= 45)
-            pullback_short = macro_downtrend and (h1['rsi'] >= 55)
+            pullback_long = macro_uptrend and strong_trend and (h1['rsi'] <= 45)
+            pullback_short = macro_downtrend and strong_trend and (h1['rsi'] >= 55)
 
             if not pullback_long and not pullback_short: 
                 del df_h1 
                 return None
+                
+            Log.print(f"👀 {symbol}: H1 Setup Active (ADX: {h1.get('adx',0):.1f}, RSI: {h1['rsi']:.1f}). Checking M5 Trigger...", Log.BLUE)
 
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 40: return None
@@ -119,6 +128,8 @@ class StrategyEngine:
             df_m5['vol_ma'] = df_m5['vol'].rolling(20).mean()
             df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
             df_m5['rsi'] = ta.rsi(df_m5['close'], length=14)
+            df_m5['candle_range'] = df_m5['high'] - df_m5['low'] 
+            
             df_m5.dropna(inplace=True)
             df_m5.reset_index(drop=True, inplace=True)
             
@@ -128,25 +139,49 @@ class StrategyEngine:
             atr_val = float(m5_curr['atr'])
             if entry <= 0 or atr_val <= 0: return None
             
+            atr_pct = (atr_val / entry) * 100
+            if atr_pct < 0.15:
+                del df_h1, df_m5
+                return None
+            
+            candle_range = m5_curr['candle_range']
+            if candle_range <= 0: candle_range = 1e-8 
+            
+            avg_range = df_m5['candle_range'].iloc[-12:-2].mean() 
+            if avg_range <= 0: avg_range = 1e-8
+            
+            if candle_range > (avg_range * 2.5):
+                Log.print(f"🚫 {symbol}: Rejected! Spike Candle Detected (Range > 2.5x Avg).", Log.YELLOW)
+                del df_h1, df_m5
+                return None
+
+            rsi_delta = abs(m5_curr['rsi'] - m5_prev['rsi'])
+            if rsi_delta < 1.5:
+                Log.print(f"🚫 {symbol}: Rejected! Weak Momentum (RSI Delta < 1.5).", Log.YELLOW)
+                del df_h1, df_m5
+                return None
+                
+            body_size = abs(m5_curr['close'] - m5_curr['open'])
+            strong_body = (body_size / candle_range) > 0.55
+            
             side = ""; sl = 0.0
             
-            # تخفيف الخنقة: فوليوم أعلى من المتوسط بـ 5% فقط، مع انعكاس مؤشر الزخم (RSI)
             if pullback_long:
                 crossing_up = (m5_prev['close'] <= m5_prev['ema9']) and (m5_curr['close'] > m5_curr['ema9'])
                 strong_green = (m5_curr['close'] > m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.05)
                 rsi_rising = m5_curr['rsi'] > m5_prev['rsi']
                 
-                if crossing_up and strong_green and rsi_rising:
+                if crossing_up and strong_green and rsi_rising and strong_body and btc_trend in ["BULLISH", "NONE"]:
                     side = "LONG"
                     struct_low = float(df_m5['low'].tail(15).min())
-                    sl = struct_low - (atr_val * 1.2) # ستوب دقيق ومحمي
+                    sl = struct_low - (atr_val * 1.2)
 
             elif pullback_short:
                 crossing_down = (m5_prev['close'] >= m5_prev['ema9']) and (m5_curr['close'] < m5_curr['ema9'])
                 strong_red = (m5_curr['close'] < m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.05)
                 rsi_falling = m5_curr['rsi'] < m5_prev['rsi']
                 
-                if crossing_down and strong_red and rsi_falling:
+                if crossing_down and strong_red and rsi_falling and strong_body and btc_trend in ["BEARISH", "NONE"]:
                     side = "SHORT"
                     struct_high = float(df_m5['high'].tail(15).max())
                     sl = struct_high + (atr_val * 1.2)
@@ -242,6 +277,26 @@ class TradingSystem:
         self.save_state()
         await self.tg.stop()
         await self.exchange.close()
+        
+    async def get_btc_trend(self):
+        try:
+            btc_res = await fetch_with_retry(self.exchange.fetch_ohlcv, "BTC/USDT", Config.TF_MACRO, limit=250)
+            if not btc_res: return "NONE"
+            df = pd.DataFrame(btc_res, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            df['ema50'] = ta.ema(df['close'], length=50)
+            df['ema200'] = ta.ema(df['close'], length=200)
+            df.dropna(inplace=True)
+            if len(df) < 2: return "NONE"
+            
+            curr = df.iloc[-2]
+            trend = "NONE"
+            if curr['ema50'] > curr['ema200']: trend = "BULLISH"
+            elif curr['ema50'] < curr['ema200']: trend = "BEARISH"
+            
+            del df 
+            return trend
+        except:
+            return "NONE"
 
     async def execute_trade(self, trade):
         try:
@@ -277,7 +332,7 @@ class TradingSystem:
             sl_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], trade['leverage'])
 
             msg = (
-                f"{exact_app_name}\n"
+                f"<b>{exact_app_name}</b>\n"
                 f"{icon} {trade['side']} | Cross {trade['leverage']}x\n"
                 f"_____________________________________\n"
                 f"💰 Entry: {safe_entry}\n"
@@ -332,10 +387,25 @@ class TradingSystem:
                 minutes_to_wait = 5 - (now.minute % 5)
                 seconds_to_wait = (minutes_to_wait * 60) - now.second + 2 
                 
+                Log.print(f"⏳ Next Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
                 await asyncio.sleep(seconds_to_wait)
-                current_time = int(datetime.now(timezone.utc).timestamp())
+                
+                now_after = datetime.now(timezone.utc)
+                
+                # 🛡️ منع ساعات السيولة الضعيفة + افتتاح نيويورك (المرشح للإنتاج)
+                if (now_after.hour in [3, 4] or (now_after.hour == 13 and now_after.minute < 45)):
+                    Log.print(
+                        f"🌙 Session Filter Active ({now_after.hour:02d}:{now_after.minute:02d} UTC). Skipping new setups.", 
+                        Log.YELLOW
+                    )
+                    continue
+
+                current_time = int(now_after.timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
                 
+                btc_trend = await self.get_btc_trend()
+                Log.print(f"🔍 BTC Trend: {btc_trend} | Scanning {len(scan_list)} pairs...", Log.BLUE)
+
                 for sym in scan_list:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     
@@ -345,11 +415,12 @@ class TradingSystem:
                     if not m5_res: continue
                     
                     if sym not in self.active_trades:
-                        res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, h1_res, m5_res)
+                        res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, h1_res, m5_res, btc_trend)
                         if res and len(self.active_trades) < Config.MAX_TRADES_AT_ONCE:
                             await self.execute_trade(res)
                     
-                    await asyncio.sleep(0.3) 
+                    # ⚡ تسريع الالتقاط
+                    await asyncio.sleep(0.15) 
                     
                 gc.collect() 
             except Exception as e:
