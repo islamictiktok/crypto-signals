@@ -3,7 +3,6 @@ import gc
 import os
 import json
 import warnings
-import time
 from datetime import datetime, timezone
 import pandas as pd
 import pandas_ta as ta
@@ -35,8 +34,8 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_extreme_rsi.json"
-    VERSION = "V11000.0 (SMC Fibonacci Targets)"
+    STATE_FILE = "bot_state.json"
+    VERSION = "V15000.0"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -51,7 +50,6 @@ async def fetch_with_retry(coro, *args, retries=3, delay=1.5, **kwargs):
             return await coro(*args, **kwargs)
         except Exception as e:
             if i == retries - 1:
-                Log.print(f"API Failed after {retries} retries: {e}", Log.RED)
                 return None
             await asyncio.sleep(delay)
 
@@ -75,12 +73,11 @@ class TelegramNotifier:
                         async with session.post(self.base_url, json=payload) as resp2:
                             data2 = await resp2.json()
                             return data2.get('result', {}).get('message_id') if resp2.status == 200 else None
-        except Exception as e:
-            Log.print(f"TG Error: {e}", Log.RED)
+        except:
             return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (ATR SL + Fibonacci TP)
+# 2. محرك الاستراتيجية (High Win-Rate, Unchoked)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -93,34 +90,35 @@ class StrategyEngine:
     def analyze_mtf(symbol, h1_data, m5_data):
         try:
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df_h1) < 40: return None 
+            if len(df_h1) < 200: return None 
             
+            df_h1['ema50'] = ta.ema(df_h1['close'], length=50)
+            df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
             df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
-            df_h1['sma20'] = df_h1['close'].rolling(20).mean()
-            df_h1['std20'] = df_h1['close'].rolling(20).std()
-            df_h1['bbu_extreme'] = df_h1['sma20'] + (2.1 * df_h1['std20'])
-            df_h1['bbl_extreme'] = df_h1['sma20'] - (2.1 * df_h1['std20'])
-            
             df_h1.dropna(inplace=True)
             if len(df_h1) < 2: return None
             
             h1 = df_h1.iloc[-2]
             
-            macro_oversold = (h1['rsi'] <= 30) and (h1['close'] <= h1['bbl_extreme'])
-            macro_overbought = (h1['rsi'] >= 70) and (h1['close'] >= h1['bbu_extreme'])
+            macro_uptrend = h1['ema50'] > h1['ema200']
+            macro_downtrend = h1['ema50'] < h1['ema200']
+            
+            # تخفيف الخنقة: تصحيح طبيعي للاتجاه
+            pullback_long = macro_uptrend and (h1['rsi'] <= 45)
+            pullback_short = macro_downtrend and (h1['rsi'] >= 55)
 
-            if not macro_oversold and not macro_overbought: 
+            if not pullback_long and not pullback_short: 
                 del df_h1 
                 return None
 
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df_m5) < 30: return None
+            if len(df_m5) < 40: return None
             if h1['time'] > df_m5['time'].iloc[-1]: return None 
             
             df_m5['ema9'] = ta.ema(df_m5['close'], length=9)
             df_m5['vol_ma'] = df_m5['vol'].rolling(20).mean()
             df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
-            
+            df_m5['rsi'] = ta.rsi(df_m5['close'], length=14)
             df_m5.dropna(inplace=True)
             df_m5.reset_index(drop=True, inplace=True)
             
@@ -132,23 +130,26 @@ class StrategyEngine:
             
             side = ""; sl = 0.0
             
-            if macro_oversold:
+            # تخفيف الخنقة: فوليوم أعلى من المتوسط بـ 5% فقط، مع انعكاس مؤشر الزخم (RSI)
+            if pullback_long:
                 crossing_up = (m5_prev['close'] <= m5_prev['ema9']) and (m5_curr['close'] > m5_curr['ema9'])
-                strong_green = (m5_curr['close'] > m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.2)
+                strong_green = (m5_curr['close'] > m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.05)
+                rsi_rising = m5_curr['rsi'] > m5_prev['rsi']
                 
-                if crossing_up and strong_green:
+                if crossing_up and strong_green and rsi_rising:
                     side = "LONG"
                     struct_low = float(df_m5['low'].tail(15).min())
-                    sl = struct_low - (atr_val * 1.0)
+                    sl = struct_low - (atr_val * 1.2) # ستوب دقيق ومحمي
 
-            elif macro_overbought:
+            elif pullback_short:
                 crossing_down = (m5_prev['close'] >= m5_prev['ema9']) and (m5_curr['close'] < m5_curr['ema9'])
-                strong_red = (m5_curr['close'] < m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.2)
+                strong_red = (m5_curr['close'] < m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.05)
+                rsi_falling = m5_curr['rsi'] < m5_prev['rsi']
                 
-                if crossing_down and strong_red:
+                if crossing_down and strong_red and rsi_falling:
                     side = "SHORT"
                     struct_high = float(df_m5['high'].tail(15).max())
-                    sl = struct_high + (atr_val * 1.0)
+                    sl = struct_high + (atr_val * 1.2)
 
             if not side: 
                 del df_h1, df_m5
@@ -160,47 +161,35 @@ class StrategyEngine:
             lev = int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)) 
 
-            # 🚀 النظام الجديد: أهداف ارتداد فيبوناتشي الهيكلية (SMC Fibonacci)
-            # 1. قياس طول الموجة الكبرى (آخر 24 ساعة)
-            swing_high = float(df_h1['high'].tail(24).max()) 
-            swing_low = float(df_h1['low'].tail(24).min())   
-            macro_distance = swing_high - swing_low
+            tps = []; pnls = []
+            swing_high = float(df_h1['high'].tail(40).max())
+            swing_low = float(df_h1['low'].tail(40).min())
             
-            tps = []
-            pnls = []
+            macro_distance = swing_high - entry if side == "LONG" else entry - swing_low
+            risk_amount = abs(entry - sl)
             
-            # مستويات الارتداد الذهبية
-            fib_levels = [0.382, 0.500, 0.618, 0.786]
-            
-            for fib in fib_levels:
+            if macro_distance < (risk_amount * 1.5):
+                tps = [
+                    entry + (risk_amount * 1.5) if side == "LONG" else entry - (risk_amount * 1.5),
+                    entry + (risk_amount * 3.0) if side == "LONG" else entry - (risk_amount * 3.0),
+                    entry + (risk_amount * 5.0) if side == "LONG" else entry - (risk_amount * 5.0)
+                ]
+            else:
                 if side == "LONG":
-                    target = swing_low + (macro_distance * fib)
-                    # تصفية الأهداف القريبة جداً من نقطة الدخول
-                    if target > entry * 1.002: 
-                        tps.append(float(target))
-                        pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
+                    tps = [entry + (macro_distance * 0.50), swing_high, entry + (macro_distance * 1.272)]
                 else:
-                    target = swing_high - (macro_distance * fib)
-                    if target < entry * 0.998:
-                        tps.append(float(target))
-                        pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
+                    tps = [entry - (macro_distance * 0.50), swing_low, entry - (macro_distance * 1.272)]
 
-            # خطة بديلة (Fallback) في حالة كانت الموجة ضيقة جداً
-            if not tps:
-                target_mean = float(h1['sma20'])
-                step = abs(target_mean - entry) / 3.0
-                for i in range(1, 4):
-                    t = entry + (step * i) if side == "LONG" else entry - (step * i)
-                    tps.append(float(t))
-                    pnls.append(StrategyEngine.calc_actual_roe(entry, t, side, lev))
+            for target in tps:
+                pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
 
             del df_m5, df_h1
             return {
                 "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
-                "leverage": lev, "original_sl": sl, "risk_pct": sl_distance_pct
+                "leverage": lev, "original_sl": sl
             }
         except Exception as e:
-            Log.print(f"Engine Error on {symbol}: {e}", Log.RED)
+            Log.print(f"Engine Error: {e}", Log.RED)
             return None
 
 # ==========================================
@@ -226,8 +215,7 @@ class TradingSystem:
         }
         try:
             with open(Config.STATE_FILE, "w") as f: json.dump(state, f)
-        except Exception as e:
-            Log.print(f"State Save Error: {e}", Log.RED)
+        except: pass
 
     def load_state(self):
         if os.path.exists(Config.STATE_FILE):
@@ -238,19 +226,16 @@ class TradingSystem:
                     self.active_trades = state.get("active_trades", {})
                     self.cooldown_list = state.get("cooldown_list", {})
                     self.stats = state.get("stats", self.stats)
-                    Log.print("💾 State Matched. Memory Restored Successfully.", Log.BLUE)
+                    Log.print("💾 State Memory Restored.", Log.BLUE)
                 else:
-                    Log.print(f"🔄 Version Update Detected ({Config.VERSION}). Wiping Old State...", Log.YELLOW)
                     os.remove(Config.STATE_FILE)
-            except Exception as e:
-                Log.print(f"State Load Error: {e}", Log.RED)
+            except: pass
 
     async def initialize(self):
         await self.tg.start()
         await self.exchange.load_markets()
         self.load_state() 
-        Log.print(f"🚀 WALL STREET MASTER: {Config.VERSION}", Log.GREEN)
-        await self.tg.send(f"🟢 <b>Fortress {Config.VERSION} Online.</b>\nSmart Sync & SMC Fibonacci Targets Active ⚡🎯")
+        Log.print(f"🚀 ENGINE ONLINE: {Config.VERSION}", Log.GREEN)
 
     async def shutdown(self):
         self.running = False
@@ -283,30 +268,23 @@ class TradingSystem:
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
             
-            icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
+            icon = "🟢" if trade['side'] == "LONG" else "🔴"
             
-            # رسالة نظيفة بأهداف الفيبوناتشي
             targets_msg = ""
-            total_tps = len(safe_tps)
-            fib_labels = ["Fib 38.2%", "Fib 50.0%", "Fib 61.8%", "Fib 78.6%"]
-            
             for idx, (tp, pnl) in enumerate(zip(safe_tps, safe_pnls)): 
-                icon_tp = "🚀" if idx == total_tps - 1 else "✅"
-                label = fib_labels[idx] if idx < len(fib_labels) else f"TP {idx+1}"
-                targets_msg += f"{icon_tp} {label}: <code>{tp}</code> (+{pnl:.1f}%)\n"
+                targets_msg += f"🎯 TP {idx+1}: {tp} (+{pnl:.1f}%)\n"
 
-            safe_sl_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], trade['leverage'])
+            sl_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], trade['leverage'])
 
             msg = (
-                f"🪙 <b><code>{exact_app_name}</code></b>\n"
-                f"ــــــــــــــــــــــــــــــــــــــ\n"
-                f"⚡ {icon} | 🎚️ {trade['leverage']}x\n"
-                f"ــــــــــــــــــــــــــــــــــــــ\n"
-                f"🎯 Entry: <code>{safe_entry}</code>\n"
-                f"ــــــــــــــــــــــــــــــــــــــ\n"
+                f"{exact_app_name}\n"
+                f"{icon} {trade['side']} | Cross {trade['leverage']}x\n"
+                f"_____________________________________\n"
+                f"💰 Entry: {safe_entry}\n"
+                f"_____________________________________\n"
                 f"{targets_msg}"
-                f"ــــــــــــــــــــــــــــــــــــــ\n"
-                f"🛑 SL (ATR): <code>{safe_sl}</code> ({safe_sl_roe:.1f}%)"
+                f"_____________________________________\n"
+                f"🛑 Stop: {safe_sl} ({sl_roe:.1f}%)"
             )
             
             msg_id = await self.tg.send(msg)
@@ -319,7 +297,7 @@ class TradingSystem:
                 self.active_trades[sym] = trade
                 self.stats["signals"] += 1
                 self.save_state() 
-                Log.print(f"🚀 SIGNAL FIRED: {exact_app_name} | Lev: {trade['leverage']}x", Log.GREEN)
+                Log.print(f"🚀 SIGNAL FIRED: {exact_app_name}", Log.GREEN)
         except Exception as e:
             Log.print(f"Trade Execution Error: {e}", Log.RED)
 
@@ -338,11 +316,8 @@ class TradingSystem:
                 
                 valid_pairs.sort(key=lambda x: x[1], reverse=True)
                 self.cached_valid_coins = [x[0] for x in valid_pairs[:Config.TOP_COINS_LIMIT]]
-                
                 self.last_cache_time = current_ts
-                Log.print(f"🔄 Coins Cache Updated. Scanning Top {len(self.cached_valid_coins)} Pairs.", Log.BLUE)
-            except Exception as e:
-                Log.print(f"Cache Error: {e}", Log.RED)
+            except: pass
 
     async def scan_market(self):
         while self.running:
@@ -357,20 +332,16 @@ class TradingSystem:
                 minutes_to_wait = 5 - (now.minute % 5)
                 seconds_to_wait = (minutes_to_wait * 60) - now.second + 2 
                 
-                Log.print(f"⏳ Next Scan in {int(seconds_to_wait)} seconds... (Waiting for 5m candle close)", Log.BLUE)
                 await asyncio.sleep(seconds_to_wait)
-                
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
-                
-                Log.print(f"🔍 Starting precision scan on {len(scan_list)} pairs...", Log.YELLOW)
                 
                 for sym in scan_list:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     
-                    h1_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=80)
+                    h1_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=250)
                     if not h1_res: continue
-                    m5_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MICRO, limit=40)
+                    m5_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MICRO, limit=50)
                     if not m5_res: continue
                     
                     if sym not in self.active_trades:
@@ -378,7 +349,7 @@ class TradingSystem:
                         if res and len(self.active_trades) < Config.MAX_TRADES_AT_ONCE:
                             await self.execute_trade(res)
                     
-                    await asyncio.sleep(0.1) 
+                    await asyncio.sleep(0.3) 
                     
                 gc.collect() 
             except Exception as e:
@@ -420,17 +391,16 @@ class TradingSystem:
                     
                     if hit_sl:
                         if step == 0:
-                            msg = f"🛑 <b>{coin_name}</b> | Closed at Stop Loss (ATR)"
+                            msg = f"🛑 <b>{coin_name}</b> | Closed at Stop Loss"
                             self.stats['losses'] += 1
                         elif step == 1:
-                            msg = f"🛡️ <b>{coin_name}</b> | Closed at Entry (Break Even)\n🎯 Last hit: TP {trade['last_tp_hit']}"
+                            msg = f"🛡️ <b>{coin_name}</b> | Closed at Entry (Break Even)"
                             self.stats['break_evens'] += 1
                         else:
-                            msg = f"🛡️ <b>{coin_name}</b> | Closed in Profit (Trailing SL)\n🎯 Last hit: TP {trade['last_tp_hit']}"
+                            msg = f"🛡️ <b>{coin_name}</b> | Closed in Profit\n🎯 Last hit: TP {trade['last_tp_hit']}"
                             self.stats['wins'] += 1 
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
-                        Log.print(f"Trade Closed: {sym}", Log.YELLOW) 
                         await self.tg.send(msg, trade.get('msg_id'))
                         del self.active_trades[sym]
                         self.save_state() 
@@ -449,24 +419,24 @@ class TradingSystem:
                         
                         if highest_tp_hit == 1:
                             trade['last_sl_price'] = trade['entry'] 
-                            msg = f"✅ <b>{coin_name}</b> | TP 1 HIT (Fib 38.2%)! 🎯\n🛡️ SL moved to Entry."
+                            sl_roe = 0.0
+                            msg = f"✅ <b>{coin_name}</b> | TP 1 HIT!\n🛡️ SL moved to: <code>{trade['entry']}</code> (+{sl_roe:.1f}%)"
                         else:
                             trade['last_sl_price'] = trade['tps'][idx_hit - 1] 
-                            msg = f"🔥 <b>{coin_name}</b> | TP {highest_tp_hit} HIT! 🎯\n📈 Trailing SL updated."
+                            sl_roe = StrategyEngine.calc_actual_roe(entry, trade['last_sl_price'], side, trade['leverage'])
+                            msg = f"🔥 <b>{coin_name}</b> | TP {highest_tp_hit} HIT!\n📈 SL updated to: <code>{trade['last_sl_price']}</code> (+{sl_roe:.1f}%)"
                             
                         if highest_tp_hit == total_tps: 
-                            msg = f"🏆 <b>{coin_name}</b> | ALL STRUCTURAL TARGETS HIT! 🏦\nTrade Completed."
+                            msg = f"🏆 <b>{coin_name}</b> | ALL TARGETS HIT!\nTrade Completed."
                             self.stats['wins'] += 1
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
                             
-                        Log.print(f"Hit TP{highest_tp_hit}: {sym}", Log.GREEN) 
                         await self.tg.send(msg, trade.get('msg_id'))
                         self.save_state() 
                             
                     await asyncio.sleep(0.2)
-            except Exception as e:
-                Log.print(f"Monitor Loop Error: {e}", Log.RED)
+            except: pass
             await asyncio.sleep(2) 
 
     async def daily_report(self):
@@ -479,23 +449,19 @@ class TradingSystem:
                     wr = (self.stats['wins'] / total_trades * 100) if total_trades > 0 else 0
                     
                     msg = (
-                        f"📈 <b>DAILY PERFORMANCE REPORT</b> 📉\n"
+                        f"📊 <b>Daily Report</b>\n"
                         f"ــــــــــــــــــــــــــــــــــــــ\n"
-                        f"🎯 <b>Signals:</b> {self.stats['signals']}\n"
-                        f"🏆 <b>Wins:</b> {self.stats['wins']}\n"
-                        f"🛡️ <b>Break-Evens:</b> {self.stats['break_evens']}\n"
-                        f"🛑 <b>Losses:</b> {self.stats['losses']}\n"
-                        f"📊 <b>Win Rate:</b> {wr:.1f}%\n"
-                        f"ــــــــــــــــــــــــــــــــــــــ\n"
+                        f"🎯 Signals: {self.stats['signals']} | 🏆 Wins: {self.stats['wins']}\n"
+                        f"🛡️ BE: {self.stats['break_evens']} | 🛑 Losses: {self.stats['losses']}\n"
+                        f"📈 Win Rate: {wr:.1f}%\n"
+                        f"ــــــــــــــــــــــــــــــــــــــ"
                     )
                     await self.tg.send(msg)
                     
                     self.stats['signals'] = 0; self.stats['wins'] = 0; self.stats['losses'] = 0; self.stats['break_evens'] = 0
                     last_sent_day = now.day
                     self.save_state()
-            except Exception as e:
-                Log.print(f"Daily Report Error: {e}", Log.RED)
-                
+            except: pass
             await asyncio.sleep(60) 
 
     async def keep_alive(self):
@@ -517,7 +483,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER {Config.VERSION} ONLINE</h1></body></html>"
+    return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
@@ -527,7 +493,7 @@ async def run_bot_background():
         asyncio.create_task(bot.daily_report())
         asyncio.create_task(bot.keep_alive())
     except Exception as e:
-        Log.print(f"Critical Bot Startup Error: {e}", Log.RED)
+        Log.print(f"Bot Startup Error: {e}", Log.RED)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
