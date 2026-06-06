@@ -2,6 +2,7 @@ import asyncio
 import gc
 import os
 import json
+import time
 import warnings
 from datetime import datetime, timezone
 import pandas as pd
@@ -34,8 +35,8 @@ class Config:
     MAX_LEVERAGE_CAP = 25 
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state.json"
-    VERSION = "V17000.0 (Ultimate Quant Engine)"
+    STATE_FILE = "bot_state_v19.json"
+    VERSION = "V19000.2 (Zero-Lag Sniper)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -77,7 +78,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (Radical Updates)
+# 2. محرك الاستراتيجية (Zero-Lag & Early Catch Updates)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -108,7 +109,6 @@ class StrategyEngine:
             
             h1 = df_h1.iloc[-2]
             
-            # 🛡️ 6. Anti-Chop Filter
             chop_pct = abs(h1['ema50'] - h1['ema200']) / h1['close']
             if chop_pct < 0.003:
                 del df_h1
@@ -118,9 +118,8 @@ class StrategyEngine:
             macro_downtrend = h1['ema50'] < h1['ema200']
             strong_trend = h1.get('adx', 0) > 25
             
-            # 🛡️ 1. CRITICAL FIX: Pullback Conditions
-            pullback_long = macro_uptrend and strong_trend and (45 <= h1['rsi'] <= 55) and (h1['close'] <= h1['ema20'])
-            pullback_short = macro_downtrend and strong_trend and (45 <= h1['rsi'] <= 55) and (h1['close'] >= h1['ema20'])
+            pullback_long = macro_uptrend and strong_trend and (40 <= h1['rsi'] <= 60) and (h1['low'] <= h1['ema20'])
+            pullback_short = macro_downtrend and strong_trend and (40 <= h1['rsi'] <= 60) and (h1['high'] >= h1['ema20'])
 
             if not pullback_long and not pullback_short: 
                 del df_h1 
@@ -133,7 +132,7 @@ class StrategyEngine:
             if h1['time'] > df_m5['time'].iloc[-1]: return None 
             
             df_m5['ema9'] = ta.ema(df_m5['close'], length=9)
-            df_m5['ema50'] = ta.ema(df_m5['close'], length=50) # Added for Smart SL
+            df_m5['ema50'] = ta.ema(df_m5['close'], length=50)
             df_m5['vol_ma'] = df_m5['vol'].rolling(20).mean()
             df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
             df_m5['rsi'] = ta.rsi(df_m5['close'], length=14)
@@ -148,57 +147,76 @@ class StrategyEngine:
             atr_val = float(m5_curr['atr'])
             if entry <= 0 or atr_val <= 0: return None
             
-            # Minimum volatility
             atr_pct = (atr_val / entry) * 100
             if atr_pct < 0.15:
                 del df_h1, df_m5
                 return None
             
-            # 🛡️ 3. Anti-Lag Filter (Remove strong_body, add Over-extension)
+            # 🛡️ 1. Strict Anti-Lag Filter (تضييق المسافة لمنع الدخول المتأخر)
             candle_position = abs(entry - m5_curr['ema9']) / atr_val
-            if candle_position > 1.2:
-                Log.print(f"🚫 {symbol}: Rejected! Over-extended (Position: {candle_position:.2f} > 1.2).", Log.YELLOW)
+            if candle_position > 0.75: # تم التخفيض من 1.2 إلى 0.75 لضمان القرب من نقطة الكسر
+                Log.print(f"🚫 {symbol}: Rejected! Late Entry (Position: {candle_position:.2f} > 0.75 ATR).", Log.YELLOW)
                 del df_h1, df_m5
                 return None
             
-            # 🛡️ 2. Entry Timing Score (Out of 100)
+            recent_low = float(df_m5['low'].iloc[-15:-2].min())
+            prev_low = float(df_m5['low'].iloc[-40:-15].min())
+            higher_low = recent_low > prev_low
+            
+            recent_high = float(df_m5['high'].iloc[-15:-2].max())
+            prev_high = float(df_m5['high'].iloc[-40:-15].max())
+            lower_high = recent_high < prev_high
+
+            candle_range = m5_curr['candle_range'] if m5_curr['candle_range'] > 0 else 1e-8
+            close_pct_up = (m5_curr['high'] - m5_curr['close']) / candle_range
+            close_pct_down = (m5_curr['close'] - m5_curr['low']) / candle_range
+
+            cross_up = (m5_prev['close'] <= m5_prev['ema9']) and (m5_curr['close'] > m5_curr['ema9']) and (close_pct_up < 0.35)
+            cross_down = (m5_prev['close'] >= m5_prev['ema9']) and (m5_curr['close'] < m5_curr['ema9']) and (close_pct_down < 0.35)
+            
+            # 🛡️ 2. Zero-Lag Entry Score System
             score = 0
             
-            # +30: RSI Delta
             rsi_delta = abs(m5_curr['rsi'] - m5_prev['rsi'])
-            if rsi_delta > 2: score += 30
-            
-            # +20: Volume confirmation
-            if m5_curr['vol'] > m5_curr['vol_ma']: score += 20
-            
-            # +20: Candle close position relative to EMA9
-            if pullback_long and (entry > m5_curr['ema9']): score += 20
-            elif pullback_short and (entry < m5_curr['ema9']): score += 20
-                
-            # +30: No Spikes in last 5 candles
-            recent_ranges = df_m5['candle_range'].iloc[-7:-2]
-            avg_range = df_m5['candle_range'].iloc[-17:-7].mean() # Avg of 10 candles before the 5
-            if avg_range <= 0: avg_range = 1e-8
-            has_spike = any(recent_ranges > (avg_range * 2.5))
-            if not has_spike: score += 30
-            
-            if score < 60:
-                Log.print(f"🚫 {symbol}: Rejected! Score too low ({score}/100).", Log.YELLOW)
+            if rsi_delta < 1.0: # 🛡️ تم التخفيض من 4.0 لمنع التأخير، نحتاج فقط لبداية الانحناء
+                Log.print(f"🚫 {symbol}: Rejected! No Momentum Shift (RSI Delta < 1.0).", Log.YELLOW)
                 del df_h1, df_m5
                 return None
             
-            Log.print(f"✅ {symbol}: Passed Entry Score ({score}/100). Executing...", Log.GREEN)
+            # مكافأة الانحناء الجيد
+            if rsi_delta > 2.0: score += 15
+            
+            # مكافأة الفوليوم المتصاعد
+            if m5_curr['vol'] > m5_curr['vol_ma']: score += 15
+            
+            # 🛡️ 3. Root Catch Bonus: مكافأة الالتقاط المبكر جداً (بالقرب من المتوسط)
+            if candle_position <= 0.4: 
+                score += 20
+            
+            if pullback_long and cross_up and higher_low: score += 30
+            elif pullback_short and cross_down and lower_high: score += 30
+                
+            avg_range = df_m5['candle_range'].iloc[-17:-7].mean()
+            if avg_range <= 0: avg_range = 1e-8
+            has_spike = any(df_m5['candle_range'].iloc[-7:-2] > (avg_range * 2.5))
+            if not has_spike: score += 20
+            
+            if score < 60:
+                Log.print(f"🚫 {symbol}: Rejected! Score too low ({score}/100) - Missing Early Triggers.", Log.YELLOW)
+                del df_h1, df_m5
+                return None
+            
+            Log.print(f"✅ {symbol}: Passed Sniper Entry Score ({score}/100). Executing...", Log.GREEN)
 
-            # 🛡️ 4. Smart Liquidity Stop (SL)
             side = ""
             sl = 0.0
             
-            if pullback_long and btc_trend in ["BULLISH", "NONE"]:
+            if pullback_long and cross_up and higher_low and btc_trend in ["BULLISH", "NONE"]:
                 side = "LONG"
                 lowest_low_20 = float(df_m5['low'].tail(20).min())
                 sl = min(lowest_low_20, float(m5_curr['ema50'])) - (atr_val * 1.5)
 
-            elif pullback_short and btc_trend in ["BEARISH", "NONE"]:
+            elif pullback_short and cross_down and lower_high and btc_trend in ["BEARISH", "NONE"]:
                 side = "SHORT"
                 highest_high_20 = float(df_m5['high'].tail(20).max())
                 sl = max(highest_high_20, float(m5_curr['ema50'])) + (atr_val * 1.5)
@@ -208,44 +226,34 @@ class StrategyEngine:
                 return None
 
             sl_distance_pct = abs(entry - sl) / entry * 100
-            if sl_distance_pct < 0.1 or sl_distance_pct > 10.0: return None 
+            if sl_distance_pct < 0.1 or sl_distance_pct > 3.0: 
+                Log.print(f"🚫 {symbol}: Rejected! SL too wide ({sl_distance_pct:.1f}% > 3.0%).", Log.YELLOW)
+                del df_h1, df_m5
+                return None 
             
             lev = int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)) 
 
-            # 🛡️ 5. Dynamic Market Based TP System
-            swing_high = float(df_h1['high'].tail(40).max())
-            swing_low = float(df_h1['low'].tail(40).min())
             risk = abs(entry - sl)
             
             if side == "LONG":
-                tp1 = entry + (atr_val * 1.2)
-                # Ensure TP2 is strictly above TP1 for CCXT validation
-                tp2 = max(swing_high, tp1 + (risk * 0.5)) 
-                tp3 = entry + (risk * 3.0)
-                if tp3 <= tp2: tp3 = tp2 + (risk * 1.0)
-                tps = [tp1, tp2, tp3]
+                tps = [entry + (1.0 * risk), entry + (2.0 * risk), entry + (3.0 * risk)]
             else:
-                tp1 = entry - (atr_val * 1.2)
-                # Ensure TP2 is strictly below TP1 for CCXT validation
-                tp2 = min(swing_low, tp1 - (risk * 0.5))
-                tp3 = entry - (risk * 3.0)
-                if tp3 >= tp2: tp3 = tp2 - (risk * 1.0)
-                tps = [tp1, tp2, tp3]
-
+                tps = [entry - (1.0 * risk), entry - (2.0 * risk), entry - (3.0 * risk)]
+                
             pnls = [StrategyEngine.calc_actual_roe(entry, t, side, lev) for t in tps]
 
             del df_m5, df_h1
             return {
                 "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
-                "leverage": lev, "original_sl": sl
+                "leverage": lev, "original_sl": sl, "risk": risk
             }
         except Exception as e:
             Log.print(f"Engine Error: {e}", Log.RED)
             return None
 
 # ==========================================
-# 3. مدير البوت (Orchestrator)
+# 3. مدير البوت (Orchestrator & Advanced Stats)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -255,7 +263,13 @@ class TradingSystem:
         self.cooldown_list = {} 
         self.cached_valid_coins = [] 
         self.last_cache_time = 0
-        self.stats = {"signals": 0, "wins": 0, "losses": 0, "break_evens": 0} 
+        
+        self.stats = {
+            "signals": 0, "full_losses": 0, "micro_profits": 0, 
+            "tp1_hits": 0, "tp2_hits": 0, "tp3_hits": 0,
+            "realized_rr": 0.0, "potential_rr": 0.0, 
+            "total_duration_secs": 0, "closed_trades": 0
+        }
         self.running = True
 
     def save_state(self):
@@ -302,19 +316,30 @@ class TradingSystem:
             df = pd.DataFrame(btc_res, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             df['ema20'] = ta.ema(df['close'], length=20)
             df['ema50'] = ta.ema(df['close'], length=50)
+            
+            adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
+            if adx_df is not None and not adx_df.empty and 'ADX_14' in adx_df.columns:
+                df['adx'] = adx_df['ADX_14'] 
+            else:
+                df['adx'] = 0
+                
             df.dropna(inplace=True)
             if len(df) < 2: return "NONE"
             
             curr = df.iloc[-2]
             
-            # 🛡️ 7. Modified BTC Filter (Transition Zone Reject)
+            if curr['adx'] < 20: 
+                del df
+                return "NONE" 
+            
             diff_pct = abs(curr['ema20'] - curr['ema50']) / curr['close']
-            if diff_pct < 0.0015: # 0.15% threshold
+            if diff_pct < 0.0015: 
+                del df
                 return "NONE"
             
             trend = "NONE"
-            if curr['ema20'] > curr['ema50']: trend = "BULLISH"
-            elif curr['ema20'] < curr['ema50']: trend = "BEARISH"
+            if curr['ema20'] > curr['ema50'] and curr['close'] > curr['ema50']: trend = "BULLISH"
+            elif curr['ema20'] < curr['ema50'] and curr['close'] < curr['ema50']: trend = "BEARISH"
             
             del df 
             return trend
@@ -341,6 +366,8 @@ class TradingSystem:
             trade['sl'] = safe_sl
             trade['tps'] = safe_tps
             trade['original_sl'] = safe_sl 
+            trade['entry_time'] = int(time.time()) 
+            trade['max_rr_reached'] = 0 
             
             market_info = self.exchange.markets.get(sym, {})
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
@@ -478,18 +505,26 @@ class TradingSystem:
                     total_tps = len(trade['tps'])
                     coin_name = trade.get('clean_sym', sym.replace('/USDT:USDT', '/USDT'))
                     
+                    duration_secs = int(time.time()) - trade.get('entry_time', int(time.time()))
+                    
                     hit_sl = (current_price <= current_sl) if side == "LONG" else (current_price >= current_sl)
                     
                     if hit_sl:
+                        self.stats['closed_trades'] += 1
+                        self.stats['total_duration_secs'] += duration_secs
+                        self.stats['potential_rr'] += trade['max_rr_reached']
+                        
                         if step == 0:
-                            msg = f"🛑 <b>{coin_name}</b> | Closed at Stop Loss"
-                            self.stats['losses'] += 1
+                            msg = f"🛑 <b>{coin_name}</b> | Closed at Stop Loss (-1R)"
+                            self.stats['full_losses'] += 1
+                            self.stats['realized_rr'] -= 1.0
                         elif step == 1:
-                            msg = f"🛡️ <b>{coin_name}</b> | Closed at Entry (Break Even)"
-                            self.stats['break_evens'] += 1
+                            msg = f"🛡️ <b>{coin_name}</b> | Closed at Micro-Profit (+0.25R)"
+                            self.stats['micro_profits'] += 1
+                            self.stats['realized_rr'] += 0.25
                         else:
-                            msg = f"🛡️ <b>{coin_name}</b> | Closed in Profit\n🎯 Last hit: TP {trade['last_tp_hit']}"
-                            self.stats['wins'] += 1 
+                            msg = f"🛡️ <b>{coin_name}</b> | Closed at Trailing SL (+1R)\n🎯 Last hit: TP {trade['last_tp_hit']}"
+                            self.stats['realized_rr'] += 1.0
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
                         await self.tg.send(msg, trade.get('msg_id'))
@@ -506,20 +541,30 @@ class TradingSystem:
                     if highest_tp_hit > step:
                         trade['step'] = highest_tp_hit
                         trade['last_tp_hit'] = highest_tp_hit
+                        trade['max_rr_reached'] = max(trade['max_rr_reached'], highest_tp_hit) 
+                        
                         idx_hit = highest_tp_hit - 1
                         
                         if highest_tp_hit == 1:
-                            trade['last_sl_price'] = trade['entry'] 
-                            sl_roe = 0.0
-                            msg = f"✅ <b>{coin_name}</b> | TP 1 HIT!\n🛡️ SL moved to: <code>{trade['entry']}</code> (+{sl_roe:.1f}%)"
-                        else:
-                            trade['last_sl_price'] = trade['tps'][idx_hit - 1] 
+                            trade['last_sl_price'] = entry + (trade['risk'] * 0.25) if side == "LONG" else entry - (trade['risk'] * 0.25)
+                            self.stats['tp1_hits'] += 1
                             sl_roe = StrategyEngine.calc_actual_roe(entry, trade['last_sl_price'], side, trade['leverage'])
-                            msg = f"🔥 <b>{coin_name}</b> | TP {highest_tp_hit} HIT!\n📈 SL updated to: <code>{trade['last_sl_price']}</code> (+{sl_roe:.1f}%)"
+                            msg = f"✅ <b>{coin_name}</b> | TP 1 HIT! (+1R)\n🛡️ SL moved to: <code>{trade['last_sl_price']}</code> (+{sl_roe:.1f}%)"
+                            
+                        elif highest_tp_hit == 2:
+                            trade['last_sl_price'] = trade['tps'][0] 
+                            self.stats['tp2_hits'] += 1
+                            sl_roe = StrategyEngine.calc_actual_roe(entry, trade['last_sl_price'], side, trade['leverage'])
+                            msg = f"🔥 <b>{coin_name}</b> | TP 2 HIT! (+2R)\n📈 SL updated to: <code>{trade['last_sl_price']}</code> (+{sl_roe:.1f}%)"
                             
                         if highest_tp_hit == total_tps: 
-                            msg = f"🏆 <b>{coin_name}</b> | ALL TARGETS HIT!\nTrade Completed."
-                            self.stats['wins'] += 1
+                            self.stats['tp3_hits'] += 1
+                            self.stats['closed_trades'] += 1
+                            self.stats['total_duration_secs'] += duration_secs
+                            self.stats['realized_rr'] += 3.0 
+                            self.stats['potential_rr'] += 3.0
+                            
+                            msg = f"🏆 <b>{coin_name}</b> | ALL TARGETS HIT! (+3R)\nTrade Completed."
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
                             
@@ -536,20 +581,40 @@ class TradingSystem:
             try:
                 now = datetime.now(timezone.utc)
                 if now.hour == 0 and now.minute < 5 and now.day != last_sent_day:
-                    total_trades = self.stats['wins'] + self.stats['losses'] + self.stats['break_evens']
-                    wr = (self.stats['wins'] / total_trades * 100) if total_trades > 0 else 0
+                    
+                    closed = self.stats['closed_trades']
+                    wins = self.stats['tp3_hits'] + self.stats['tp2_hits']
+                    losses = self.stats['full_losses']
+                    micro = self.stats['micro_profits']
+                    
+                    wr = (wins / closed * 100) if closed > 0 else 0
+                    avg_realized_rr = (self.stats['realized_rr'] / closed) if closed > 0 else 0
+                    avg_potential_rr = (self.stats['potential_rr'] / closed) if closed > 0 else 0
+                    avg_dur_mins = (self.stats['total_duration_secs'] / closed / 60) if closed > 0 else 0
                     
                     msg = (
-                        f"📊 <b>Daily Report</b>\n"
+                        f"📊 <b>Daily Quant Report</b>\n"
                         f"ــــــــــــــــــــــــــــــــــــــ\n"
-                        f"🎯 Signals: {self.stats['signals']} | 🏆 Wins: {self.stats['wins']}\n"
-                        f"🛡️ BE: {self.stats['break_evens']} | 🛑 Losses: {self.stats['losses']}\n"
-                        f"📈 Win Rate: {wr:.1f}%\n"
-                        f"ــــــــــــــــــــــــــــــــــــــ"
+                        f"🎯 Signals: {self.stats['signals']}\n"
+                        f"🏆 Solid Wins (TP2/3): {wins}\n"
+                        f"🛡️ Micro-Profits (+0.25R): {micro}\n"
+                        f"🛑 Full Losses (-1R): {losses}\n"
+                        f"ــــــــــــــــــــــــــــــــــــــ\n"
+                        f"🎯 TP1 Hit: {self.stats['tp1_hits']} | 🔥 TP2: {self.stats['tp2_hits']} | 🚀 TP3: {self.stats['tp3_hits']}\n"
+                        f"ــــــــــــــــــــــــــــــــــــــ\n"
+                        f"📈 <b>Win Rate:</b> {wr:.1f}%\n"
+                        f"⚖️ <b>Realized R:R:</b> {avg_realized_rr:.2f}R\n"
+                        f"🔎 <b>Potential R:R:</b> {avg_potential_rr:.2f}R\n"
+                        f"⏱️ <b>Avg Duration:</b> {avg_dur_mins:.0f} mins\n"
                     )
                     await self.tg.send(msg)
                     
-                    self.stats['signals'] = 0; self.stats['wins'] = 0; self.stats['losses'] = 0; self.stats['break_evens'] = 0
+                    self.stats = {
+                        "signals": 0, "full_losses": 0, "micro_profits": 0, 
+                        "tp1_hits": 0, "tp2_hits": 0, "tp3_hits": 0,
+                        "realized_rr": 0.0, "potential_rr": 0.0, 
+                        "total_duration_secs": 0, "closed_trades": 0
+                    }
                     last_sent_day = now.day
                     self.save_state()
             except: pass
