@@ -28,14 +28,14 @@ class Config:
     
     TOP_COINS_LIMIT = 75 
     MAX_TRADES_AT_ONCE = 3  
-    MIN_24H_VOLUME_USDT = 2_000_000 
+    MIN_24H_VOLUME_USDT = 15_000_000 
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
-    MAX_LEVERAGE_CAP = 25  # 🛡️ حماية المحفظة: تم التخفيض بناءً على التوجيهات
+    MAX_LEVERAGE_CAP = 25 
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state.json"
-    VERSION = "V16000.3 (Production Candidate)"
+    VERSION = "V17000.0 (Ultimate Quant Engine)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -77,7 +77,7 @@ class TelegramNotifier:
             return None
 
 # ==========================================
-# 2. محرك الاستراتيجية
+# 2. محرك الاستراتيجية (Radical Updates)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -92,6 +92,7 @@ class StrategyEngine:
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_h1) < 200: return None 
             
+            df_h1['ema20'] = ta.ema(df_h1['close'], length=20)
             df_h1['ema50'] = ta.ema(df_h1['close'], length=50)
             df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
             df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
@@ -107,24 +108,32 @@ class StrategyEngine:
             
             h1 = df_h1.iloc[-2]
             
+            # 🛡️ 6. Anti-Chop Filter
+            chop_pct = abs(h1['ema50'] - h1['ema200']) / h1['close']
+            if chop_pct < 0.003:
+                del df_h1
+                return None
+            
             macro_uptrend = h1['ema50'] > h1['ema200']
             macro_downtrend = h1['ema50'] < h1['ema200']
-            strong_trend = h1.get('adx', 0) > 18
+            strong_trend = h1.get('adx', 0) > 25
             
-            pullback_long = macro_uptrend and strong_trend and (h1['rsi'] <= 45)
-            pullback_short = macro_downtrend and strong_trend and (h1['rsi'] >= 55)
+            # 🛡️ 1. CRITICAL FIX: Pullback Conditions
+            pullback_long = macro_uptrend and strong_trend and (45 <= h1['rsi'] <= 55) and (h1['close'] <= h1['ema20'])
+            pullback_short = macro_downtrend and strong_trend and (45 <= h1['rsi'] <= 55) and (h1['close'] >= h1['ema20'])
 
             if not pullback_long and not pullback_short: 
                 del df_h1 
                 return None
                 
-            Log.print(f"👀 {symbol}: H1 Setup Active (ADX: {h1.get('adx',0):.1f}, RSI: {h1['rsi']:.1f}). Checking M5 Trigger...", Log.BLUE)
+            Log.print(f"👀 {symbol}: H1 Setup Active (ADX: {h1.get('adx',0):.1f}, RSI: {h1['rsi']:.1f}). Checking M5 Score...", Log.BLUE)
 
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df_m5) < 40: return None
+            if len(df_m5) < 50: return None
             if h1['time'] > df_m5['time'].iloc[-1]: return None 
             
             df_m5['ema9'] = ta.ema(df_m5['close'], length=9)
+            df_m5['ema50'] = ta.ema(df_m5['close'], length=50) # Added for Smart SL
             df_m5['vol_ma'] = df_m5['vol'].rolling(20).mean()
             df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
             df_m5['rsi'] = ta.rsi(df_m5['close'], length=14)
@@ -139,52 +148,60 @@ class StrategyEngine:
             atr_val = float(m5_curr['atr'])
             if entry <= 0 or atr_val <= 0: return None
             
+            # Minimum volatility
             atr_pct = (atr_val / entry) * 100
             if atr_pct < 0.15:
                 del df_h1, df_m5
                 return None
             
-            candle_range = m5_curr['candle_range']
-            if candle_range <= 0: candle_range = 1e-8 
-            
-            avg_range = df_m5['candle_range'].iloc[-12:-2].mean() 
-            if avg_range <= 0: avg_range = 1e-8
-            
-            if candle_range > (avg_range * 2.5):
-                Log.print(f"🚫 {symbol}: Rejected! Spike Candle Detected (Range > 2.5x Avg).", Log.YELLOW)
+            # 🛡️ 3. Anti-Lag Filter (Remove strong_body, add Over-extension)
+            candle_position = abs(entry - m5_curr['ema9']) / atr_val
+            if candle_position > 1.2:
+                Log.print(f"🚫 {symbol}: Rejected! Over-extended (Position: {candle_position:.2f} > 1.2).", Log.YELLOW)
                 del df_h1, df_m5
                 return None
-
+            
+            # 🛡️ 2. Entry Timing Score (Out of 100)
+            score = 0
+            
+            # +30: RSI Delta
             rsi_delta = abs(m5_curr['rsi'] - m5_prev['rsi'])
-            if rsi_delta < 1.5:
-                Log.print(f"🚫 {symbol}: Rejected! Weak Momentum (RSI Delta < 1.5).", Log.YELLOW)
+            if rsi_delta > 2: score += 30
+            
+            # +20: Volume confirmation
+            if m5_curr['vol'] > m5_curr['vol_ma']: score += 20
+            
+            # +20: Candle close position relative to EMA9
+            if pullback_long and (entry > m5_curr['ema9']): score += 20
+            elif pullback_short and (entry < m5_curr['ema9']): score += 20
+                
+            # +30: No Spikes in last 5 candles
+            recent_ranges = df_m5['candle_range'].iloc[-7:-2]
+            avg_range = df_m5['candle_range'].iloc[-17:-7].mean() # Avg of 10 candles before the 5
+            if avg_range <= 0: avg_range = 1e-8
+            has_spike = any(recent_ranges > (avg_range * 2.5))
+            if not has_spike: score += 30
+            
+            if score < 60:
+                Log.print(f"🚫 {symbol}: Rejected! Score too low ({score}/100).", Log.YELLOW)
                 del df_h1, df_m5
                 return None
-                
-            body_size = abs(m5_curr['close'] - m5_curr['open'])
-            strong_body = (body_size / candle_range) > 0.55
             
-            side = ""; sl = 0.0
-            
-            if pullback_long:
-                crossing_up = (m5_prev['close'] <= m5_prev['ema9']) and (m5_curr['close'] > m5_curr['ema9'])
-                strong_green = (m5_curr['close'] > m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.05)
-                rsi_rising = m5_curr['rsi'] > m5_prev['rsi']
-                
-                if crossing_up and strong_green and rsi_rising and strong_body and btc_trend in ["BULLISH", "NONE"]:
-                    side = "LONG"
-                    struct_low = float(df_m5['low'].tail(15).min())
-                    sl = struct_low - (atr_val * 1.2)
+            Log.print(f"✅ {symbol}: Passed Entry Score ({score}/100). Executing...", Log.GREEN)
 
-            elif pullback_short:
-                crossing_down = (m5_prev['close'] >= m5_prev['ema9']) and (m5_curr['close'] < m5_curr['ema9'])
-                strong_red = (m5_curr['close'] < m5_curr['open']) and (m5_curr['vol'] > m5_curr['vol_ma'] * 1.05)
-                rsi_falling = m5_curr['rsi'] < m5_prev['rsi']
-                
-                if crossing_down and strong_red and rsi_falling and strong_body and btc_trend in ["BEARISH", "NONE"]:
-                    side = "SHORT"
-                    struct_high = float(df_m5['high'].tail(15).max())
-                    sl = struct_high + (atr_val * 1.2)
+            # 🛡️ 4. Smart Liquidity Stop (SL)
+            side = ""
+            sl = 0.0
+            
+            if pullback_long and btc_trend in ["BULLISH", "NONE"]:
+                side = "LONG"
+                lowest_low_20 = float(df_m5['low'].tail(20).min())
+                sl = min(lowest_low_20, float(m5_curr['ema50'])) - (atr_val * 1.5)
+
+            elif pullback_short and btc_trend in ["BEARISH", "NONE"]:
+                side = "SHORT"
+                highest_high_20 = float(df_m5['high'].tail(20).max())
+                sl = max(highest_high_20, float(m5_curr['ema50'])) + (atr_val * 1.5)
 
             if not side: 
                 del df_h1, df_m5
@@ -196,27 +213,27 @@ class StrategyEngine:
             lev = int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)) 
 
-            tps = []; pnls = []
+            # 🛡️ 5. Dynamic Market Based TP System
             swing_high = float(df_h1['high'].tail(40).max())
             swing_low = float(df_h1['low'].tail(40).min())
+            risk = abs(entry - sl)
             
-            macro_distance = swing_high - entry if side == "LONG" else entry - swing_low
-            risk_amount = abs(entry - sl)
-            
-            if macro_distance < (risk_amount * 1.5):
-                tps = [
-                    entry + (risk_amount * 1.5) if side == "LONG" else entry - (risk_amount * 1.5),
-                    entry + (risk_amount * 3.0) if side == "LONG" else entry - (risk_amount * 3.0),
-                    entry + (risk_amount * 5.0) if side == "LONG" else entry - (risk_amount * 5.0)
-                ]
+            if side == "LONG":
+                tp1 = entry + (atr_val * 1.2)
+                # Ensure TP2 is strictly above TP1 for CCXT validation
+                tp2 = max(swing_high, tp1 + (risk * 0.5)) 
+                tp3 = entry + (risk * 3.0)
+                if tp3 <= tp2: tp3 = tp2 + (risk * 1.0)
+                tps = [tp1, tp2, tp3]
             else:
-                if side == "LONG":
-                    tps = [entry + (macro_distance * 0.50), swing_high, entry + (macro_distance * 1.272)]
-                else:
-                    tps = [entry - (macro_distance * 0.50), swing_low, entry - (macro_distance * 1.272)]
+                tp1 = entry - (atr_val * 1.2)
+                # Ensure TP2 is strictly below TP1 for CCXT validation
+                tp2 = min(swing_low, tp1 - (risk * 0.5))
+                tp3 = entry - (risk * 3.0)
+                if tp3 >= tp2: tp3 = tp2 - (risk * 1.0)
+                tps = [tp1, tp2, tp3]
 
-            for target in tps:
-                pnls.append(StrategyEngine.calc_actual_roe(entry, target, side, lev))
+            pnls = [StrategyEngine.calc_actual_roe(entry, t, side, lev) for t in tps]
 
             del df_m5, df_h1
             return {
@@ -283,15 +300,21 @@ class TradingSystem:
             btc_res = await fetch_with_retry(self.exchange.fetch_ohlcv, "BTC/USDT", Config.TF_MACRO, limit=250)
             if not btc_res: return "NONE"
             df = pd.DataFrame(btc_res, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            df['ema20'] = ta.ema(df['close'], length=20)
             df['ema50'] = ta.ema(df['close'], length=50)
-            df['ema200'] = ta.ema(df['close'], length=200)
             df.dropna(inplace=True)
             if len(df) < 2: return "NONE"
             
             curr = df.iloc[-2]
+            
+            # 🛡️ 7. Modified BTC Filter (Transition Zone Reject)
+            diff_pct = abs(curr['ema20'] - curr['ema50']) / curr['close']
+            if diff_pct < 0.0015: # 0.15% threshold
+                return "NONE"
+            
             trend = "NONE"
-            if curr['ema50'] > curr['ema200']: trend = "BULLISH"
-            elif curr['ema50'] < curr['ema200']: trend = "BEARISH"
+            if curr['ema20'] > curr['ema50']: trend = "BULLISH"
+            elif curr['ema20'] < curr['ema50']: trend = "BEARISH"
             
             del df 
             return trend
@@ -391,8 +414,6 @@ class TradingSystem:
                 await asyncio.sleep(seconds_to_wait)
                 
                 now_after = datetime.now(timezone.utc)
-                
-                # 🛡️ منع ساعات السيولة الضعيفة + افتتاح نيويورك (المرشح للإنتاج)
                 if (now_after.hour in [3, 4] or (now_after.hour == 13 and now_after.minute < 45)):
                     Log.print(
                         f"🌙 Session Filter Active ({now_after.hour:02d}:{now_after.minute:02d} UTC). Skipping new setups.", 
@@ -411,7 +432,7 @@ class TradingSystem:
                     
                     h1_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=250)
                     if not h1_res: continue
-                    m5_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MICRO, limit=50)
+                    m5_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MICRO, limit=60)
                     if not m5_res: continue
                     
                     if sym not in self.active_trades:
@@ -419,7 +440,6 @@ class TradingSystem:
                         if res and len(self.active_trades) < Config.MAX_TRADES_AT_ONCE:
                             await self.execute_trade(res)
                     
-                    # ⚡ تسريع الالتقاط
                     await asyncio.sleep(0.15) 
                     
                 gc.collect() 
