@@ -36,7 +36,7 @@ class Config:
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state_v22.json"
-    VERSION = "V22000.0 (Bollinger Reversion)"
+    VERSION = "V22000.1 (BB Reversion Patch)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -57,19 +57,33 @@ async def fetch_with_retry(coro, *args, retries=3, delay=1.5, **kwargs):
 class TelegramNotifier:
     def __init__(self):
         self.base_url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
+        self.session = None
 
-    async def start(self): pass
-    async def stop(self): pass
+    async def start(self): 
+        if not self.session:
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+
+    async def stop(self): 
+        if self.session:
+            await self.session.close()
+
     async def send(self, text, reply_to=None):
+        if not self.session: await self.start()
         payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         if reply_to: payload["reply_to_message_id"] = reply_to
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-                async with session.post(self.base_url, json=payload) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get('result', {}).get('message_id')
-        except: return None
+            async with self.session.post(self.base_url, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('result', {}).get('message_id')
+                elif reply_to:
+                    del payload["reply_to_message_id"]
+                    async with self.session.post(self.base_url, json=payload) as resp2:
+                        data2 = await resp2.json()
+                        return data2.get('result', {}).get('message_id') if resp2.status == 200 else None
+        except Exception as e:
+            Log.print(f"Telegram Error: {e}", Log.RED)
+            return None
 
 # ==========================================
 # 2. محرك الاستراتيجية (Bollinger + URSI Only)
@@ -93,7 +107,11 @@ class StrategyEngine:
             # Bollinger Bands (20, 2.5)
             bb = ta.bbands(df_h1['close'], length=20, std=2.5)
             if bb is None or bb.empty: return None
-            df_h1 = pd.concat([df_h1, bb], axis=1)
+            
+            # 🛡️ Dynamic Column Mapping (Fixes KeyError: 'BBL_20_2.5')
+            df_h1['bbl'] = bb.iloc[:, 0] # Lower Band
+            df_h1['bbm'] = bb.iloc[:, 1] # Mid Band
+            df_h1['bbu'] = bb.iloc[:, 2] # Upper Band
             
             # Ultimate RSI Calculation (Average of 7, 14, 28 periods)
             df_h1['rsi7'] = ta.rsi(df_h1['close'], length=7)
@@ -106,10 +124,9 @@ class StrategyEngine:
             
             h1 = df_h1.iloc[-2] # Last closed H1 candle
             
-            # Dynamic names from pandas_ta
-            bbl = h1['BBL_20_2.5']
-            bbm = h1['BBM_20_2.5']
-            bbu = h1['BBU_20_2.5']
+            bbl = float(h1['bbl'])
+            bbm = float(h1['bbm'])
+            bbu = float(h1['bbu'])
             
             # Conditions
             touch_lower = h1['low'] <= bbl
@@ -164,11 +181,11 @@ class StrategyEngine:
             # 🛡️ Step 3: Targets (TP1: Mid BB, TP2: Opposite BB)
             # ---------------------------
             if side == "LONG":
-                tp1 = float(bbm)
-                tp2 = float(bbu) * 0.998 # Just before the upper band
+                tp1 = bbm
+                tp2 = bbu * 0.998 # Just before the upper band
             else:
-                tp1 = float(bbm)
-                tp2 = float(bbl) * 1.002 # Just before the lower band
+                tp1 = bbm
+                tp2 = bbl * 1.002 # Just before the lower band
                 
             tps = [tp1, tp2]
             
@@ -341,7 +358,12 @@ class TradingSystem:
 
                 now_after = datetime.now(timezone.utc)
                 current_time = int(now_after.timestamp())
-                scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
+                
+                # 🛡️ Memory Leak Fix: Clean up old cooldowns
+                keys_to_delete = [k for k, v in self.cooldown_list.items() if (current_time - v) > Config.COOLDOWN_SECONDS]
+                for k in keys_to_delete: del self.cooldown_list[k]
+
+                scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list]
                 
                 Log.print(f"🔍 BB Reversion Scan Active | Scanning {len(scan_list)} pairs...", Log.BLUE)
 
@@ -374,6 +396,7 @@ class TradingSystem:
             try:
                 symbols_to_fetch = list(self.active_trades.keys())
                 for sym in symbols_to_fetch:
+                    # 🛡️ High/Low 1m monitoring to avoid missing spikes
                     ohlc = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, '1m', limit=2)
                     if not ohlc: continue
                     high, low = ohlc[-1][2], ohlc[-1][3]
@@ -386,7 +409,6 @@ class TradingSystem:
                     best_price = high if side == "LONG" else low    
 
                     entry = trade['entry']
-                    risk = trade['risk']
                             
                     step = trade['step']
                     current_sl = trade.get('last_sl_price', trade['sl'])
@@ -428,7 +450,7 @@ class TradingSystem:
                             # Move SL to Entry (BE)
                             trade['last_sl_price'] = entry 
                             self.stats['tp1_reached'] += 1
-                            self.stats['realized_rr'] += 0.5 # Secured half R for reaching Mid BB
+                            self.stats['realized_rr'] += 0.5 
                             msg = f"✅ <b>{coin_name}</b> | TP 1 HIT (Mid BB)!\n🛡️ SL moved to BE."
                             
                         elif highest_tp_hit == 2:
@@ -436,7 +458,7 @@ class TradingSystem:
                             self.stats['closed_trades'] += 1
                             self.stats['total_duration_secs'] += duration_secs
                             self.stats['solid_wins'] += 1 
-                            self.stats['realized_rr'] += 1.5 # Additional R secured
+                            self.stats['realized_rr'] += 1.5 
                             
                             msg = f"🏆 <b>{coin_name}</b> | FULL TARGET HIT (Opposite BB)!\nTrade Completed."
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
