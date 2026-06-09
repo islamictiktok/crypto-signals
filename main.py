@@ -24,8 +24,9 @@ class Config:
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    TF_MACRO = '1h'   # Setup timeframe
-    TF_MICRO = '5m'   # Execution timeframe
+    TF_MACRO = '1h'   # Setup
+    TF_MICRO = '5m'   # Reversal
+    TF_NANO = '1m'    # Confirmation
     
     TOP_COINS_LIMIT = 75 
     MAX_TRADES_AT_ONCE = 3  
@@ -36,7 +37,7 @@ class Config:
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state_v22.json"
-    VERSION = "V22000.1 (BB Reversion Patch)"
+    VERSION = "V22000.2 (Clean UI & Precision)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -76,17 +77,10 @@ class TelegramNotifier:
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get('result', {}).get('message_id')
-                elif reply_to:
-                    del payload["reply_to_message_id"]
-                    async with self.session.post(self.base_url, json=payload) as resp2:
-                        data2 = await resp2.json()
-                        return data2.get('result', {}).get('message_id') if resp2.status == 200 else None
-        except Exception as e:
-            Log.print(f"Telegram Error: {e}", Log.RED)
-            return None
+        except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (Bollinger + URSI Only)
+# 2. محرك الاستراتيجية (Pure Logic + 1M Conf)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -96,7 +90,7 @@ class StrategyEngine:
         else: return float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def analyze_mtf(symbol, h1_data, m5_data):
+    def analyze_mtf(symbol, h1_data, m5_data, m1_data, btc_allowed_sides):
         try:
             # ---------------------------
             # 🛡️ Step 1: 1H Setup (Bollinger Touch + URSI)
@@ -104,16 +98,13 @@ class StrategyEngine:
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_h1) < 50: return None
             
-            # Bollinger Bands (20, 2.5)
             bb = ta.bbands(df_h1['close'], length=20, std=2.5)
             if bb is None or bb.empty: return None
             
-            # 🛡️ Dynamic Column Mapping (Fixes KeyError: 'BBL_20_2.5')
-            df_h1['bbl'] = bb.iloc[:, 0] # Lower Band
-            df_h1['bbm'] = bb.iloc[:, 1] # Mid Band
-            df_h1['bbu'] = bb.iloc[:, 2] # Upper Band
+            df_h1['bbl'] = bb.iloc[:, 0] 
+            df_h1['bbm'] = bb.iloc[:, 1] 
+            df_h1['bbu'] = bb.iloc[:, 2] 
             
-            # Ultimate RSI Calculation (Average of 7, 14, 28 periods)
             df_h1['rsi7'] = ta.rsi(df_h1['close'], length=7)
             df_h1['rsi14'] = ta.rsi(df_h1['close'], length=14)
             df_h1['rsi28'] = ta.rsi(df_h1['close'], length=28)
@@ -122,21 +113,20 @@ class StrategyEngine:
             df_h1.dropna(inplace=True)
             if len(df_h1) < 2: return None
             
-            h1 = df_h1.iloc[-2] # Last closed H1 candle
+            h1 = df_h1.iloc[-2] 
             
             bbl = float(h1['bbl'])
             bbm = float(h1['bbm'])
             bbu = float(h1['bbu'])
             
-            # Conditions
             touch_lower = h1['low'] <= bbl
             touch_upper = h1['high'] >= bbu
             
             oversold = h1['ursi'] < 30
             overbought = h1['ursi'] > 70
             
-            setup_long = touch_lower and oversold
-            setup_short = touch_upper and overbought
+            setup_long = touch_lower and oversold and ("LONG" in btc_allowed_sides)
+            setup_short = touch_upper and overbought and ("SHORT" in btc_allowed_sides)
             
             if not setup_long and not setup_short: return None
 
@@ -146,28 +136,46 @@ class StrategyEngine:
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 20: return None
             
-            m5_curr = df_m5.iloc[-2] # Last closed M5 candle
-            m5_prev = df_m5.iloc[-3] # Previous M5 candle
+            m5_curr = df_m5.iloc[-2] 
+            m5_prev = df_m5.iloc[-3] 
             
             entry = float(m5_curr['close'])
             if entry <= 0: return None
             
-            # Reversal Confirmation: Current close beats previous high (Long) or low (Short)
             rev_long = m5_curr['close'] > m5_prev['high']
             rev_short = m5_curr['close'] < m5_prev['low']
+
+            if (setup_long and not rev_long) and (setup_short and not rev_short): return None
+
+            # ---------------------------
+            # 🛡️ Step 3: 1M Micro Momentum Confirmation
+            # ---------------------------
+            df_m1 = pd.DataFrame(m1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            if len(df_m1) < 20: return None
             
+            df_m1['ema9'] = ta.ema(df_m1['close'], length=9)
+            df_m1['rsi'] = ta.rsi(df_m1['close'], length=14)
+            df_m1.dropna(inplace=True)
+            if len(df_m1) < 2: return None
+            
+            m1_curr = df_m1.iloc[-2] 
+            
+            m1_conf_long = (m1_curr['close'] > m1_curr['ema9']) and (m1_curr['rsi'] > 50)
+            m1_conf_short = (m1_curr['close'] < m1_curr['ema9']) and (m1_curr['rsi'] < 50)
+
             side = ""
             sl = 0.0
             
-            if setup_long and rev_long:
+            # Strict Boolean Logic
+            if setup_long and rev_long and m1_conf_long:
                 side = "LONG"
-                # Stop Loss: Lowest point of the recent M5 touch minus 0.2% buffer
-                sl = float(df_m5['low'].iloc[-10:-1].min()) * 0.998
+                # تم توسيع نافذة الستوب لوز لالتقاط القاع الفعلي
+                sl = float(df_m5['low'].iloc[-15:-1].min()) * 0.998
                 
-            elif setup_short and rev_short:
+            elif setup_short and rev_short and m1_conf_short:
                 side = "SHORT"
-                # Stop Loss: Highest point of the recent M5 touch plus 0.2% buffer
-                sl = float(df_m5['high'].iloc[-10:-1].max()) * 1.002
+                # تم توسيع نافذة الستوب لوز لالتقاط القمة الفعلية
+                sl = float(df_m5['high'].iloc[-15:-1].max()) * 1.002
 
             if not side: return None
 
@@ -178,27 +186,26 @@ class StrategyEngine:
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, lev)) 
 
             # ---------------------------
-            # 🛡️ Step 3: Targets (TP1: Mid BB, TP2: Opposite BB)
+            # 🛡️ Step 4: Targets
             # ---------------------------
             if side == "LONG":
                 tp1 = bbm
-                tp2 = bbu * 0.998 # Just before the upper band
+                tp2 = bbu * 0.998 
             else:
                 tp1 = bbm
-                tp2 = bbl * 1.002 # Just before the lower band
+                tp2 = bbl * 1.002 
                 
             tps = [tp1, tp2]
             
-            # Ensure TPs are logically placed compared to entry
             if side == "LONG" and (tp1 <= entry or tp2 <= tp1): return None
             if side == "SHORT" and (tp1 >= entry or tp2 >= tp1): return None
             
             pnls = [StrategyEngine.calc_actual_roe(entry, t, side, lev) for t in tps]
             risk = abs(entry - sl)
 
-            Log.print(f"✅ {symbol}: Pure Bollinger Reversion Found! Executing...", Log.GREEN)
+            Log.print(f"✅ {symbol}: Confirmed 1M BB Reversion! Executing...", Log.GREEN)
 
-            del df_m5, df_h1
+            del df_m5, df_h1, df_m1
             return {
                 "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
                 "leverage": lev, "original_sl": sl, "risk": risk
@@ -218,8 +225,6 @@ class TradingSystem:
         self.cooldown_list = {} 
         self.cached_valid_coins = [] 
         self.last_cache_time = 0
-        
-        # Track 2 TPs only now
         self.stats = {
             "signals": 0, "full_losses": 0, "micro_profits": 0, "solid_wins": 0,
             "tp1_reached": 0, "tp2_reached": 0, 
@@ -264,6 +269,28 @@ class TradingSystem:
         await self.tg.stop()
         await self.exchange.close()
 
+    async def get_btc_filter(self):
+        try:
+            btc_res = await fetch_with_retry(self.exchange.fetch_ohlcv, "BTC/USDT", '1h', limit=100)
+            if not btc_res: return ["LONG", "SHORT"]
+            df = pd.DataFrame(btc_res, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            df['ema50'] = ta.ema(df['close'], length=50)
+            adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
+            df['adx'] = adx_df['ADX_14'] if adx_df is not None else 0
+            
+            df.dropna(inplace=True)
+            if len(df) < 2: return ["LONG", "SHORT"]
+            
+            curr = df.iloc[-2]
+            
+            if curr['adx'] >= 25:
+                if curr['close'] > curr['ema50']: return ["LONG"] 
+                else: return ["SHORT"] 
+            
+            return ["LONG", "SHORT"]
+        except:
+            return ["LONG", "SHORT"]
+
     async def execute_trade(self, trade):
         try:
             sym = trade['symbol']
@@ -292,22 +319,16 @@ class TradingSystem:
             
             icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
             
-            targets_msg = ""
-            for idx, (tp, pnl) in enumerate(zip(safe_tps, safe_pnls)): 
-                name = "Mid BB" if idx == 0 else "Opposite BB"
-                targets_msg += f"🎯 TP{idx+1} ({name}): {tp} (+{pnl:.1f}%)\n"
-
-            sl_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], trade['leverage'])
-
+            # 🛡️ رسالة تليغرام نظيفة وذكية (Tap-to-Copy)
             msg = (
-                f"<b>{exact_app_name}</b>\n"
-                f"{icon} | BB Reversion | Cross {trade['leverage']}x\n"
-                f"_____________________________________\n"
-                f"💰 Entry: {safe_entry}\n"
-                f"_____________________________________\n"
-                f"{targets_msg}"
-                f"_____________________________________\n"
-                f"🛑 Stop: {safe_sl} ({sl_roe:.1f}%)"
+                f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
+                f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"💰 Entry: <code>{safe_entry}</code>\n"
+                f"🎯 TP1: <code>{safe_tps[0]}</code> (+{safe_pnls[0]:.1f}%)\n"
+                f"🎯 TP2: <code>{safe_tps[1]}</code> (+{safe_pnls[1]:.1f}%)\n"
+                f"🛑 Stop: <code>{safe_sl}</code>\n"
+                f"━━━━━━━━━━━━━━━"
             )
             
             msg_id = await self.tg.send(msg)
@@ -359,13 +380,16 @@ class TradingSystem:
                 now_after = datetime.now(timezone.utc)
                 current_time = int(now_after.timestamp())
                 
-                # 🛡️ Memory Leak Fix: Clean up old cooldowns
                 keys_to_delete = [k for k, v in self.cooldown_list.items() if (current_time - v) > Config.COOLDOWN_SECONDS]
                 for k in keys_to_delete: del self.cooldown_list[k]
 
                 scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list]
                 
-                Log.print(f"🔍 BB Reversion Scan Active | Scanning {len(scan_list)} pairs...", Log.BLUE)
+                btc_allowed_sides = await self.get_btc_filter()
+                Log.print(f"🔍 Scan Active | BTC Allows: {btc_allowed_sides} | Scanning {len(scan_list)} pairs...", Log.BLUE)
+
+                if not btc_allowed_sides:
+                    await asyncio.sleep(60); continue
 
                 for sym in scan_list:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
@@ -374,9 +398,11 @@ class TradingSystem:
                     if not h1_res: continue
                     m5_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MICRO, limit=50)
                     if not m5_res: continue
+                    m1_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_NANO, limit=50)
+                    if not m1_res: continue
                     
                     if sym not in self.active_trades:
-                        res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, h1_res, m5_res)
+                        res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, h1_res, m5_res, m1_res, btc_allowed_sides)
                         if res and len(self.active_trades) < Config.MAX_TRADES_AT_ONCE:
                             await self.execute_trade(res)
                     
@@ -396,7 +422,6 @@ class TradingSystem:
             try:
                 symbols_to_fetch = list(self.active_trades.keys())
                 for sym in symbols_to_fetch:
-                    # 🛡️ High/Low 1m monitoring to avoid missing spikes
                     ohlc = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, '1m', limit=2)
                     if not ohlc: continue
                     high, low = ohlc[-1][2], ohlc[-1][3]
@@ -424,11 +449,11 @@ class TradingSystem:
                         self.stats['total_duration_secs'] += duration_secs
                         
                         if step == 0:
-                            msg = f"🛑 <b>{coin_name}</b> | Closed at Stop Loss"
+                            msg = f"🛑 <b><code>{coin_name}</code></b>\n❌ SL Hit: <code>{current_sl}</code>"
                             self.stats['full_losses'] += 1
                             self.stats['realized_rr'] -= 1.0
                         else:
-                            msg = f"🛡️ <b>{coin_name}</b> | Closed at BE (Secured Half)"
+                            msg = f"🛡️ <b><code>{coin_name}</code></b>\n⚠️ Closed at BE: <code>{current_sl}</code>"
                             self.stats['micro_profits'] += 1
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
@@ -447,11 +472,10 @@ class TradingSystem:
                         trade['step'] = highest_tp_hit
                         
                         if highest_tp_hit == 1:
-                            # Move SL to Entry (BE)
                             trade['last_sl_price'] = entry 
                             self.stats['tp1_reached'] += 1
                             self.stats['realized_rr'] += 0.5 
-                            msg = f"✅ <b>{coin_name}</b> | TP 1 HIT (Mid BB)!\n🛡️ SL moved to BE."
+                            msg = f"✅ <b><code>{coin_name}</code></b>\n🎯 TP1 Hit: <code>{trade['tps'][0]}</code>\n🛡️ SL to BE: <code>{entry}</code>"
                             
                         elif highest_tp_hit == 2:
                             self.stats['tp2_reached'] += 1
@@ -460,7 +484,7 @@ class TradingSystem:
                             self.stats['solid_wins'] += 1 
                             self.stats['realized_rr'] += 1.5 
                             
-                            msg = f"🏆 <b>{coin_name}</b> | FULL TARGET HIT (Opposite BB)!\nTrade Completed."
+                            msg = f"🏆 <b><code>{coin_name}</code></b>\n🚀 TP2 Hit: <code>{trade['tps'][1]}</code>\n✅ Trade Completed!"
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
                             
@@ -488,15 +512,15 @@ class TradingSystem:
                     avg_dur_mins = (self.stats.get('total_duration_secs', 0) / closed / 60) if closed > 0 else 0
 
                     msg = (
-                        f"📊 <b>Daily BB Reversion Report</b>\n"
-                        f"ــــــــــــــــــــــــــــــــــــــ\n"
+                        f"📊 <b>Daily Market Report</b>\n"
+                        f"━━━━━━━━━━━━━━━\n"
                         f"🎯 Signals: {self.stats.get('signals', 0)}\n"
                         f"🏆 Full Wins (TP2): {wins}\n"
                         f"🛡️ Break-Evens (TP1): {micro}\n"
                         f"🛑 Full Losses: {losses}\n"
-                        f"ــــــــــــــــــــــــــــــــــــــ\n"
-                        f"🎯 Mid BB Hit: {self.stats.get('tp1_reached', 0)} | 🚀 Opp BB Hit: {self.stats.get('tp2_reached', 0)}\n"
-                        f"ــــــــــــــــــــــــــــــــــــــ\n"
+                        f"━━━━━━━━━━━━━━━\n"
+                        f"🎯 TP1 Hit: {self.stats.get('tp1_reached', 0)} | 🚀 TP2 Hit: {self.stats.get('tp2_reached', 0)}\n"
+                        f"━━━━━━━━━━━━━━━\n"
                         f"📈 <b>Win Rate:</b> {wr:.1f}%\n"
                         f"⚖️ <b>Avg Realized R:R:</b> {avg_realized_rr:.2f}R\n"
                         f"⏱️ <b>Avg Duration:</b> {avg_dur_mins:.0f} mins\n"
@@ -532,7 +556,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ BB REVERSION MASTER ONLINE</h1></body></html>"
+    return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
