@@ -32,11 +32,11 @@ class Config:
     MIN_24H_VOLUME_USDT = 15_000_000 
     MAX_ALLOWED_SPREAD = 0.003 
     MIN_LEVERAGE = 2  
-    MAX_LEVERAGE_CAP = 25 
+    MAX_LEVERAGE_CAP = 15 # 🛡️ خفضت إلى 15x لأمان المحفظة
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v19.json"
-    VERSION = "V19000.5 (Apex Quant Master)"
+    STATE_FILE = "bot_state_v20.json"
+    VERSION = "V20000.3 (Production Hardened)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -54,31 +54,40 @@ async def fetch_with_retry(coro, *args, retries=3, delay=1.5, **kwargs):
                 return None
             await asyncio.sleep(delay)
 
+# 🛡️ تم إصلاح إدارة جلسة تليغرام لمنع استنزاف المقابس وتسرب الذاكرة
 class TelegramNotifier:
     def __init__(self):
         self.base_url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
+        self.session = None
 
-    async def start(self): pass
-    async def stop(self): pass
+    async def start(self): 
+        if not self.session:
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+
+    async def stop(self): 
+        if self.session:
+            await self.session.close()
+
     async def send(self, text, reply_to=None):
+        if not self.session: await self.start()
         payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         if reply_to: payload["reply_to_message_id"] = reply_to
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-                async with session.post(self.base_url, json=payload) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get('result', {}).get('message_id')
-                    elif reply_to:
-                        del payload["reply_to_message_id"]
-                        async with session.post(self.base_url, json=payload) as resp2:
-                            data2 = await resp2.json()
-                            return data2.get('result', {}).get('message_id') if resp2.status == 200 else None
-        except:
+            async with self.session.post(self.base_url, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('result', {}).get('message_id')
+                elif reply_to:
+                    del payload["reply_to_message_id"]
+                    async with self.session.post(self.base_url, json=payload) as resp2:
+                        data2 = await resp2.json()
+                        return data2.get('result', {}).get('message_id') if resp2.status == 200 else None
+        except Exception as e:
+            Log.print(f"Telegram Error: {e}", Log.RED)
             return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (Graded Score & Contextual Momentum)
+# 2. محرك الاستراتيجية (Hybrid Strict Logic)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -90,13 +99,14 @@ class StrategyEngine:
     @staticmethod
     def analyze_mtf(symbol, h1_data, m5_data, btc_trend):
         try:
+            if btc_trend == "DEAD": return None
+            
             df_h1 = pd.DataFrame(h1_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_h1) < 200: return None 
             
             df_h1['ema20'] = ta.ema(df_h1['close'], length=20)
             df_h1['ema50'] = ta.ema(df_h1['close'], length=50)
             df_h1['ema200'] = ta.ema(df_h1['close'], length=200)
-            df_h1['rsi'] = ta.rsi(df_h1['close'], length=14)
             
             adx_df = ta.adx(df_h1['high'], df_h1['low'], df_h1['close'], length=14)
             if adx_df is not None and not adx_df.empty and 'ADX_14' in adx_df.columns:
@@ -109,31 +119,34 @@ class StrategyEngine:
             
             h1 = df_h1.iloc[-2]
             
-            chop_pct = abs(h1['ema50'] - h1['ema200']) / h1['close']
-            if chop_pct < 0.003:
-                return None
-            
             macro_uptrend = h1['ema50'] > h1['ema200']
             macro_downtrend = h1['ema50'] < h1['ema200']
             strong_trend = h1.get('adx', 0) > 25
             
-            pullback_long = macro_uptrend and strong_trend and (40 <= h1['rsi'] <= 60) and (h1['low'] <= h1['ema20'])
-            pullback_short = macro_downtrend and strong_trend and (40 <= h1['rsi'] <= 60) and (h1['high'] >= h1['ema20'])
+            pullback_long = macro_uptrend and strong_trend and (h1['low'] <= h1['ema20'])
+            pullback_short = macro_downtrend and strong_trend and (h1['high'] >= h1['ema20'])
 
             if not pullback_long and not pullback_short: 
                 return None
 
             df_m5 = pd.DataFrame(m5_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_m5) < 50: return None
-            if h1['time'] > df_m5['time'].iloc[-1]: return None 
             
             df_m5['ema9'] = ta.ema(df_m5['close'], length=9)
+            df_m5['ema20'] = ta.ema(df_m5['close'], length=20)
             df_m5['ema50'] = ta.ema(df_m5['close'], length=50)
             df_m5['vol_ma'] = df_m5['vol'].rolling(20).mean()
             df_m5['atr'] = ta.atr(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
             df_m5['rsi'] = ta.rsi(df_m5['close'], length=14)
-            df_m5['rsi_ma'] = ta.sma(df_m5['rsi'], length=14) # 🛡️ إضافة متوسط RSI لتقييم الزخم السياقي
-            df_m5['candle_range'] = df_m5['high'] - df_m5['low'] 
+            
+            macd = ta.macd(df_m5['close'], fast=12, slow=26, signal=9)
+            df_m5['macd_hist'] = macd['MACDh_12_26_9']
+            
+            adx_m5_df = ta.adx(df_m5['high'], df_m5['low'], df_m5['close'], length=14)
+            if adx_m5_df is not None and not adx_m5_df.empty and 'ADX_14' in adx_m5_df.columns:
+                df_m5['adx'] = adx_m5_df['ADX_14']
+            else:
+                df_m5['adx'] = 0
             
             df_m5.dropna(inplace=True)
             df_m5.reset_index(drop=True, inplace=True)
@@ -148,103 +161,67 @@ class StrategyEngine:
             atr_pct = (atr_val / entry) * 100
             if atr_pct < 0.15 or atr_pct > 4.0: return None
             
-            candle_position = abs(entry - m5_curr['ema9']) / atr_val
-            if candle_position > 0.85: return None
-            
-            recent_low = float(df_m5['low'].iloc[-15:-2].min())
-            prev_low = float(df_m5['low'].iloc[-40:-15].min())
-            higher_low = recent_low > prev_low
-            
-            recent_high = float(df_m5['high'].iloc[-15:-2].max())
-            prev_high = float(df_m5['high'].iloc[-40:-15].max())
-            lower_high = recent_high < prev_high
+            # 🛡️ Dollar Volume Check (استبعاد شموع الفوليوم الكاذب للعملات الميتة)
+            if (entry * m5_curr['vol']) < 500_000: return None
 
-            candle_range = m5_curr['candle_range'] if m5_curr['candle_range'] > 0 else 1e-8
-            close_pct_up = (m5_curr['high'] - m5_curr['close']) / candle_range
-            close_pct_down = (m5_curr['close'] - m5_curr['low']) / candle_range
-
-            # 🛡️ فصل الترند عن جودة الشمعة لعدم تصفير النقاط عشوائياً
-            trend_up_m5 = (m5_curr['close'] > m5_curr['ema9']) and (m5_curr['ema9'] >= m5_prev['ema9'])
-            trend_down_m5 = (m5_curr['close'] < m5_curr['ema9']) and (m5_curr['ema9'] <= m5_prev['ema9'])
+            pivot_low = float(df_m5['low'].iloc[-15:-2].min())
+            pivot_high = float(df_m5['high'].iloc[-15:-2].max())
             
-            # 🛡️ تقييم الزخم السياقي (Contextual Momentum)
-            rsi_delta = abs(m5_curr['rsi'] - m5_prev['rsi'])
-            rsi_supported_long = pullback_long and (m5_curr['rsi'] > m5_curr['rsi_ma'])
-            rsi_supported_short = pullback_short and (m5_curr['rsi'] < m5_curr['rsi_ma'])
-
-            # رفض قاطع للزخم الميت تماماً
-            if rsi_delta < 0.5 and not (rsi_supported_long or rsi_supported_short):
-                return None
+            # 🛡️ Lookahead Bias Fixed (-13:-3 ensures current candle is not evaluated)
+            highest_10 = float(df_m5['high'].iloc[-13:-3].max())
+            lowest_10 = float(df_m5['low'].iloc[-13:-3].min())
             
-            # 🛡️ النظام المتدرج لتوزيع النقاط (Graded Scoring System)
+            bos_long = (m5_curr['close'] > highest_10) and (m5_curr['vol'] > m5_curr['vol_ma'])
+            bos_short = (m5_curr['close'] < lowest_10) and (m5_curr['vol'] > m5_curr['vol_ma'])
+            
+            ema_align_long = (m5_curr['ema9'] > m5_curr['ema20']) and (m5_curr['ema20'] > m5_curr['ema50'])
+            ema_align_short = (m5_curr['ema9'] < m5_curr['ema20']) and (m5_curr['ema20'] < m5_curr['ema50'])
+
             score = 0
-            score_log = {"Trend": 0, "Struct": 0, "Vol": 0, "RSI": 0, "Clean": 0}
+            score_log = {"H1_Tr": 0, "EMA_Algn": 0, "BOS": 0, "Vol": 0, "MACD": 0, "RSI": 0, "M5_ADX": 0}
             
-            # 1. الاتجاه اللحظي (30 نقطة)
-            if pullback_long and trend_up_m5:
-                score += 30; score_log["Trend"] = 30
-            elif pullback_short and trend_down_m5:
-                score += 30; score_log["Trend"] = 30
-
-            # 2. الهيكل (20 نقطة)
-            if pullback_long and higher_low:
-                score += 20; score_log["Struct"] = 20
-            elif pullback_short and lower_high:
-                score += 20; score_log["Struct"] = 20
-
-            # 3. تدفق السيولة الفوليوم (20 نقطة كحد أقصى)
+            if pullback_long: score += 25; score_log["H1_Tr"] = 25
+            elif pullback_short: score += 25; score_log["H1_Tr"] = 25
+                
+            if pullback_long and ema_align_long: score += 20; score_log["EMA_Algn"] = 20
+            elif pullback_short and ema_align_short: score += 20; score_log["EMA_Algn"] = 20
+                
+            if pullback_long and bos_long: score += 20; score_log["BOS"] = 20
+            elif pullback_short and bos_short: score += 20; score_log["BOS"] = 20
+                
             vol_ratio = m5_curr['vol'] / m5_curr['vol_ma'] if m5_curr['vol_ma'] > 0 else 0
-            if vol_ratio > 1.5:
-                score += 20; score_log["Vol"] = 20
-            elif vol_ratio > 1.0:
-                score += 10; score_log["Vol"] = 10
-
-            # 4. قوة الزخم (15 نقطة)
-            if rsi_delta > 1.5 or rsi_supported_long or rsi_supported_short:
-                score += 15; score_log["RSI"] = 15
-
-            # 5. السلوك السعري النظيف (15 نقطة)
-            avg_range = df_m5['candle_range'].iloc[-17:-7].mean()
-            has_spike = any(df_m5['candle_range'].iloc[-7:-2] > (avg_range * 2.5) if avg_range > 0 else False)
-            wick_is_clean = (pullback_long and close_pct_up < 0.4) or (pullback_short and close_pct_down < 0.4)
+            if vol_ratio > 1.8: score += 15; score_log["Vol"] = 15
+            elif vol_ratio > 1.3: score += 10; score_log["Vol"] = 10
+                
+            if pullback_long and m5_curr['macd_hist'] > 0: score += 10; score_log["MACD"] = 10
+            elif pullback_short and m5_curr['macd_hist'] < 0: score += 10; score_log["MACD"] = 10
+                
+            if pullback_long and m5_curr['rsi'] > m5_prev['rsi']: score += 10; score_log["RSI"] = 10
+            elif pullback_short and m5_curr['rsi'] < m5_prev['rsi']: score += 10; score_log["RSI"] = 10
             
-            if not has_spike and wick_is_clean:
-                score += 15; score_log["Clean"] = 15
+            if m5_curr.get('adx', 0) > 25: score += 15; score_log["M5_ADX"] = 15
+            elif m5_curr.get('adx', 0) > 20: score += 10; score_log["M5_ADX"] = 10
             
-            # 🛡️ طباعة الرفض التشخيصية
-            if score < 60:
-                Log.print(f"🚫 {symbol}: Score {score}/100 too low {json.dumps(score_log)}.", Log.YELLOW)
-                return None
+            if score < 75: return None
 
             side = ""
             sl = 0.0
             
-            if pullback_long and trend_up_m5 and btc_trend in ["BULLISH", "NONE"]:
-                # 🛡️ فلتر الـ EMA50 اللحظي القاتل للارتدادات الوهمية
-                if m5_curr['close'] < m5_curr['ema50']:
-                    Log.print(f"🚫 {symbol}: Rejected! M5 Close below M5 EMA50 (Fake Pullback).", Log.YELLOW)
-                    return None
-                
+            if pullback_long and btc_trend == "BULLISH":
                 side = "LONG"
-                lowest_low_10 = float(df_m5['low'].tail(10).min())
-                sl = min(lowest_low_10, float(m5_curr['ema50'])) - (atr_val * 1.0)
+                sl = pivot_low - (atr_val * 0.5) 
 
-            elif pullback_short and trend_down_m5 and btc_trend in ["BEARISH", "NONE"]:
-                if m5_curr['close'] > m5_curr['ema50']:
-                    Log.print(f"🚫 {symbol}: Rejected! M5 Close above M5 EMA50 (Fake Pullback).", Log.YELLOW)
-                    return None
-                
+            elif pullback_short and btc_trend == "BEARISH":
                 side = "SHORT"
-                highest_high_10 = float(df_m5['high'].tail(10).max())
-                sl = max(highest_high_10, float(m5_curr['ema50'])) + (atr_val * 1.0)
+                sl = pivot_high + (atr_val * 0.5)
 
             if not side: return None
             
-            Log.print(f"✅ {symbol}: Passed Final Entry Score ({score}/100) {json.dumps(score_log)}. Executing...", Log.GREEN)
+            Log.print(f"✅ {symbol}: Executing Score ({score}/100) {json.dumps(score_log)}.", Log.GREEN)
 
             sl_distance_pct = abs(entry - sl) / entry * 100
-            if sl_distance_pct < 0.1 or sl_distance_pct > 3.0: 
-                Log.print(f"🚫 {symbol}: Rejected! SL too wide ({sl_distance_pct:.1f}% > 3.0%).", Log.YELLOW)
+            if sl_distance_pct < 0.1 or sl_distance_pct > 4.0: 
+                Log.print(f"🚫 {symbol}: Rejected! SL too wide ({sl_distance_pct:.1f}%).", Log.YELLOW)
                 return None 
             
             lev = int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)
@@ -253,23 +230,30 @@ class StrategyEngine:
             risk = abs(entry - sl)
             
             if side == "LONG":
-                tps = [entry + (1.0 * risk), entry + (2.0 * risk), entry + (3.0 * risk)]
+                tps = [entry + (0.8 * risk), entry + (1.5 * risk), entry + (2.5 * risk)]
             else:
-                tps = [entry - (1.0 * risk), entry - (2.0 * risk), entry - (3.0 * risk)]
+                tps = [entry - (0.8 * risk), entry - (1.5 * risk), entry - (2.5 * risk)]
                 
             pnls = [StrategyEngine.calc_actual_roe(entry, t, side, lev) for t in tps]
+
+            trade_context = {
+                "m5_adx": float(m5_curr.get('adx', 0)),
+                "rsi": float(m5_curr['rsi']),
+                "macd": float(m5_curr['macd_hist']),
+                "vol_ratio": float(vol_ratio)
+            }
 
             del df_m5, df_h1
             return {
                 "symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls,
-                "leverage": lev, "original_sl": sl, "risk": risk
+                "leverage": lev, "original_sl": sl, "risk": risk, "context": trade_context
             }
         except Exception as e:
             Log.print(f"Engine Error: {e}", Log.RED)
             return None
 
 # ==========================================
-# 3. مدير البوت (Orchestrator & Advanced Stats)
+# 3. مدير البوت (Orchestrator & Memory Management)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -333,25 +317,23 @@ class TradingSystem:
             df['ema20'] = ta.ema(df['close'], length=20)
             df['ema50'] = ta.ema(df['close'], length=50)
             
+            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            df['atr_ma'] = ta.sma(df['atr'], length=14)
+            
             adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
-            if adx_df is not None and not adx_df.empty and 'ADX_14' in adx_df.columns:
-                df['adx'] = adx_df['ADX_14'] 
-            else:
-                df['adx'] = 0
+            df['adx'] = adx_df['ADX_14'] if adx_df is not None else 0
                 
             df.dropna(inplace=True)
             if len(df) < 2: return "NONE"
             
             curr = df.iloc[-2]
             
-            if curr['adx'] < 20: 
-                del df
-                return "NONE" 
+            if curr['adx'] < 25 or curr['atr'] < curr['atr_ma']: 
+                del df; return "DEAD" 
             
             diff_pct = abs(curr['ema20'] - curr['ema50']) / curr['close']
             if diff_pct < 0.0015: 
-                del df
-                return "NONE"
+                del df; return "NONE"
             
             trend = "NONE"
             if curr['ema20'] > curr['ema50'] and curr['close'] > curr['ema50']: trend = "BULLISH"
@@ -360,7 +342,12 @@ class TradingSystem:
             del df 
             return trend
         except:
-            return "NONE"
+            return "DEAD"
+
+    async def diagnose_loss(self, trade):
+        ctx = trade.get('context', {})
+        diag_str = f"M5_ADX: {ctx.get('m5_adx', 0):.1f} | RSI: {ctx.get('rsi', 0):.1f} | MACD: {ctx.get('macd', 0):.3f} | Vol: {ctx.get('vol_ratio', 0):.1f}"
+        return diag_str
 
     async def execute_trade(self, trade):
         try:
@@ -450,26 +437,31 @@ class TradingSystem:
             await self.update_valid_coins_cache()
             
             try:
-                now = datetime.now(timezone.utc)
-                minutes_to_wait = 5 - (now.minute % 5)
-                seconds_to_wait = (minutes_to_wait * 60) - now.second + 2 
+                now_after = datetime.now(timezone.utc)
+                minutes_to_wait = 5 - (now_after.minute % 5)
+                seconds_to_wait = (minutes_to_wait * 60) - now_after.second + 2 
                 
                 Log.print(f"⏳ Next Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
                 await asyncio.sleep(seconds_to_wait)
                 
                 now_after = datetime.now(timezone.utc)
                 if (now_after.hour in [3, 4] or (now_after.hour == 13 and now_after.minute < 45)):
-                    Log.print(
-                        f"🌙 Session Filter Active ({now_after.hour:02d}:{now_after.minute:02d} UTC). Skipping new setups.", 
-                        Log.YELLOW
-                    )
+                    Log.print(f"🌙 Session Filter Active. Skipping new setups.", Log.YELLOW)
                     continue
 
                 current_time = int(now_after.timestamp())
-                scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list or (current_time - self.cooldown_list[c]) > Config.COOLDOWN_SECONDS]
+                
+                # 🛡️ تنظيف الذاكرة (Memory Optimization): مسح العملات القديمة من فترة التبريد
+                keys_to_delete = [k for k, v in self.cooldown_list.items() if (current_time - v) > Config.COOLDOWN_SECONDS]
+                for k in keys_to_delete: del self.cooldown_list[k]
+
+                scan_list = [c for c in self.cached_valid_coins if c not in self.cooldown_list]
                 
                 btc_trend = await self.get_btc_trend()
                 Log.print(f"🔍 BTC Trend: {btc_trend} | Scanning {len(scan_list)} pairs...", Log.BLUE)
+                
+                if btc_trend == "DEAD":
+                    continue
 
                 for sym in scan_list:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
@@ -500,28 +492,25 @@ class TradingSystem:
             try:
                 symbols_to_fetch = list(self.active_trades.keys())
                 for sym in symbols_to_fetch:
-                    ticker = await fetch_with_retry(self.exchange.fetch_ticker, sym)
-                    if not ticker: continue
+                    # 🛡️ المراقبة عبر فريم الدقيقة لضمان التقاط السبايكات
+                    ohlc = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, '1m', limit=2)
+                    if not ohlc: continue
+                    
+                    # ohlc is typically: [timestamp, open, high, low, close, volume]
+                    high, low = ohlc[-1][2], ohlc[-1][3]
                     
                     trade = self.active_trades.get(sym)
                     if not trade: continue
                     
                     side = trade['side']
-                    bid = ticker.get('bid')
-                    ask = ticker.get('ask')
-                    
-                    if not bid or not ask: continue
-                    
-                    current_price = bid if side == "LONG" else ask
                     entry = trade['entry']
                     risk = trade['risk']
                     
-                    # 🛡️ Update MFE
                     if side == "LONG":
-                        trade['max_price_seen'] = max(trade.get('max_price_seen', entry), current_price)
+                        trade['max_price_seen'] = max(trade.get('max_price_seen', entry), high)
                         current_r = (trade['max_price_seen'] - entry) / risk if risk > 0 else 0
                     else:
-                        trade['max_price_seen'] = min(trade.get('max_price_seen', entry), current_price)
+                        trade['max_price_seen'] = min(trade.get('max_price_seen', entry), low)
                         current_r = (entry - trade['max_price_seen']) / risk if risk > 0 else 0
                         
                     trade['max_rr_reached'] = max(trade.get('max_rr_reached', 0.0), current_r)
@@ -533,7 +522,8 @@ class TradingSystem:
                     
                     duration_secs = int(time.time()) - trade.get('entry_time', int(time.time()))
                     
-                    hit_sl = (current_price <= current_sl) if side == "LONG" else (current_price >= current_sl)
+                    # تحقق ضرب الاستوب (الأسوأ)
+                    hit_sl = (low <= current_sl) if side == "LONG" else (high >= current_sl)
                     
                     if hit_sl:
                         self.stats['closed_trades'] += 1
@@ -541,17 +531,18 @@ class TradingSystem:
                         self.stats['potential_rr'] += trade.get('max_rr_reached', 0.0)
                         
                         if step == 0:
-                            msg = f"🛑 <b>{coin_name}</b> | Closed at Stop Loss (-1R)"
+                            diag_data = await self.diagnose_loss(trade)
+                            msg = f"🛑 <b>{coin_name}</b> | Closed at Stop Loss (-1R)\n🔍 <i>Diag: [{diag_data}]</i>"
                             self.stats['full_losses'] += 1
                             self.stats['realized_rr'] -= 1.0
                         elif step == 1:
-                            msg = f"🛡️ <b>{coin_name}</b> | Closed at BE (+0.05R)"
+                            msg = f"🛡️ <b>{coin_name}</b> | Closed at BE (+0.20R)"
                             self.stats['micro_profits'] += 1
-                            self.stats['realized_rr'] += 0.05
+                            self.stats['realized_rr'] += 0.20
                         else:
-                            msg = f"🛡️ <b>{coin_name}</b> | Closed at Trailing SL (+1R)\n🎯 Last hit: TP {trade['last_tp_hit']}"
+                            msg = f"🛡️ <b>{coin_name}</b> | Closed at Trailing SL (+0.8R)\n🎯 Last hit: TP {trade['last_tp_hit']}"
                             self.stats['solid_wins'] += 1 
-                            self.stats['realized_rr'] += 1.0
+                            self.stats['realized_rr'] += 0.8
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
                         await self.tg.send(msg, trade.get('msg_id'))
@@ -559,10 +550,11 @@ class TradingSystem:
                         self.save_state() 
                         continue
 
+                    # تحقق ضرب الهدف (الأفضل)
                     highest_tp_hit = step
                     for i in range(step, total_tps): 
                         target = trade['tps'][i]
-                        hit_tp = (current_price >= target) if side == "LONG" else (current_price <= target)
+                        hit_tp = (high >= target) if side == "LONG" else (low <= target)
                         if hit_tp: highest_tp_hit = i + 1
                     
                     if highest_tp_hit > step:
@@ -570,19 +562,17 @@ class TradingSystem:
                         trade['last_tp_hit'] = highest_tp_hit
                         trade['max_rr_reached'] = max(trade['max_rr_reached'], highest_tp_hit) 
                         
-                        idx_hit = highest_tp_hit - 1
-                        
                         if highest_tp_hit == 1:
-                            trade['last_sl_price'] = entry + (risk * 0.05) if side == "LONG" else entry - (risk * 0.05)
+                            trade['last_sl_price'] = entry + (risk * 0.20) if side == "LONG" else entry - (risk * 0.20)
                             self.stats['tp1_reached'] += 1
                             sl_roe = StrategyEngine.calc_actual_roe(entry, trade['last_sl_price'], side, trade['leverage'])
-                            msg = f"✅ <b>{coin_name}</b> | TP 1 HIT! (+1R)\n🛡️ SL moved to BE: <code>{trade['last_sl_price']}</code> (+{sl_roe:.1f}%)"
+                            msg = f"✅ <b>{coin_name}</b> | TP 1 HIT! (+0.8R)\n🛡️ SL moved to BE+: <code>{trade['last_sl_price']}</code> (+{sl_roe:.1f}%)"
                             
                         elif highest_tp_hit == 2:
                             trade['last_sl_price'] = trade['tps'][0] 
                             self.stats['tp2_reached'] += 1
                             sl_roe = StrategyEngine.calc_actual_roe(entry, trade['last_sl_price'], side, trade['leverage'])
-                            msg = f"🔥 <b>{coin_name}</b> | TP 2 HIT! (+2R)\n📈 SL updated to +1R: <code>{trade['last_sl_price']}</code> (+{sl_roe:.1f}%)"
+                            msg = f"🔥 <b>{coin_name}</b> | TP 2 HIT! (+1.5R)\n📈 SL updated to TP1: <code>{trade['last_sl_price']}</code> (+{sl_roe:.1f}%)"
                             
                         if highest_tp_hit == total_tps: 
                             self.stats['tp3_reached'] += 1
@@ -590,10 +580,10 @@ class TradingSystem:
                             self.stats['total_duration_secs'] += duration_secs
                             
                             self.stats['solid_wins'] += 1 
-                            self.stats['realized_rr'] += 3.0 
-                            self.stats['potential_rr'] += max(3.0, trade.get('max_rr_reached', 0.0))
+                            self.stats['realized_rr'] += 2.5 
+                            self.stats['potential_rr'] += max(2.5, trade.get('max_rr_reached', 0.0))
                             
-                            msg = f"🏆 <b>{coin_name}</b> | ALL TARGETS HIT! (+3R)\nTrade Completed."
+                            msg = f"🏆 <b>{coin_name}</b> | ALL TARGETS HIT! (+2.5R)\nTrade Completed."
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
                             
@@ -620,19 +610,19 @@ class TradingSystem:
                     avg_realized_rr = (self.stats.get('realized_rr', 0.0) / closed) if closed > 0 else 0
                     avg_potential_rr = (self.stats.get('potential_rr', 0.0) / closed) if closed > 0 else 0
                     avg_dur_mins = (self.stats.get('total_duration_secs', 0) / closed / 60) if closed > 0 else 0
-                    
+
                     msg = (
-                        f"📊 <b>Daily Quant Report</b>\n"
+                        f"📊 <b>Daily SMC Report</b>\n"
                         f"ــــــــــــــــــــــــــــــــــــــ\n"
                         f"🎯 Signals: {self.stats.get('signals', 0)}\n"
-                        f"🏆 Solid Wins (>1R): {wins}\n"
-                        f"🛡️ Micro-Profits (+0.05R): {micro}\n"
+                        f"🏆 Solid Wins (>0.8R): {wins}\n"
+                        f"🛡️ Micro-Profits (+0.20R): {micro}\n"
                         f"🛑 Full Losses (-1R): {losses}\n"
                         f"ــــــــــــــــــــــــــــــــــــــ\n"
                         f"🎯 TP1 Hit: {self.stats.get('tp1_reached', 0)} | 🔥 TP2: {self.stats.get('tp2_reached', 0)} | 🚀 TP3: {self.stats.get('tp3_reached', 0)}\n"
                         f"ــــــــــــــــــــــــــــــــــــــ\n"
                         f"📈 <b>Win Rate:</b> {wr:.1f}%\n"
-                        f"⚖️ <b>Realized R:R:</b> {avg_realized_rr:.2f}R\n"
+                        f"⚖️ <b>Avg Realized R:R:</b> {avg_realized_rr:.2f}R\n"
                         f"🔎 <b>Potential R:R:</b> {avg_potential_rr:.2f}R\n"
                         f"⏱️ <b>Avg Duration:</b> {avg_dur_mins:.0f} mins\n"
                     )
@@ -668,7 +658,7 @@ async def favicon():
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): 
-    return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ WALL STREET MASTER ONLINE</h1></body></html>"
+    return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ SMC MASTER ONLINE</h1></body></html>"
 
 async def run_bot_background():
     try:
