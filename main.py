@@ -24,8 +24,8 @@ class Config:
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     
-    TF_MACRO = '30m'   # الإطار الزمني الرئيسي
-    TF_MICRO = '1m'    # الإطار اللحظي للتأكيد
+    TF_MACRO = '30m'   # الإطار الزمني الرئيسي (للتشبع والرفض)
+    TF_MICRO = '1m'    # الإطار اللحظي (للتأكيد والزخم)
     
     TOP_COINS_LIMIT = 75 
     MAX_TRADES_AT_ONCE = 3  
@@ -36,7 +36,7 @@ class Config:
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state_v22.json"
-    VERSION = "V22000.6 (1M Pulse Patch)"
+    VERSION = "V22000.7 (ADX Shielded BB)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -84,7 +84,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (30M/1M Pure Reversion)
+# 2. محرك الاستراتيجية (ADX Filtered BB Reversion)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -97,7 +97,7 @@ class StrategyEngine:
     def analyze_mtf(symbol, m30_data, m1_data, btc_allowed_sides):
         try:
             # ---------------------------
-            # 🛡️ Step 1: 30M Setup (BB Touch + URSI)
+            # 🛡️ Step 1: 30M Setup (BB Touch + URSI + ADX)
             # ---------------------------
             df_30m = pd.DataFrame(m30_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df_30m) < 50: return None
@@ -108,6 +108,10 @@ class StrategyEngine:
             df_30m['bbl'] = bb.iloc[:, 0] 
             df_30m['bbm'] = bb.iloc[:, 1] 
             df_30m['bbu'] = bb.iloc[:, 2] 
+            
+            # ADX لحماية البوت من الترندات العنيفة
+            adx_df = ta.adx(df_30m['high'], df_30m['low'], df_30m['close'], length=14)
+            df_30m['adx'] = adx_df['ADX_14'] if adx_df is not None and not adx_df.empty else 0
             
             df_30m['atr'] = ta.atr(df_30m['high'], df_30m['low'], df_30m['close'], length=14)
             
@@ -126,15 +130,18 @@ class StrategyEngine:
             bbm = float(m30['bbm'])
             bbu = float(m30['bbu'])
             atr_macro = float(m30['atr'])
+            adx_val = float(m30['adx'])
             
-            touch_lower = m30['low'] <= bbl
-            touch_upper = m30['high'] >= bbu
+            # 1. فلتر التذبذب العرضي
+            is_ranging = adx_val < 25
             
-            oversold = m30['ursi'] < 30
-            overbought = m30['ursi'] > 70
+            # 2. ملامسة + إغلاق آمن داخل البولنجر (Wick Rejection)
+            touch_lower_rejected = (m30['low'] <= bbl) and (m30['close'] > bbl)
+            touch_upper_rejected = (m30['high'] >= bbu) and (m30['close'] < bbu)
             
-            setup_long = touch_lower and oversold and ("LONG" in btc_allowed_sides)
-            setup_short = touch_upper and overbought and ("SHORT" in btc_allowed_sides)
+            # 3. شروط التشبع المعدلة
+            setup_long = is_ranging and touch_lower_rejected and (m30['ursi'] < 35) and ("LONG" in btc_allowed_sides)
+            setup_short = is_ranging and touch_upper_rejected and (m30['ursi'] > 65) and ("SHORT" in btc_allowed_sides)
             
             if not setup_long and not setup_short: return None
 
@@ -162,17 +169,17 @@ class StrategyEngine:
             sl = 0.0
             
             # ---------------------------
-            # 🛡️ Step 3: Stop Loss
+            # 🛡️ Step 3: Stop Loss (1.5 ATR for MEXC Wicks)
             # ---------------------------
             if setup_long and rev_long:
                 side = "LONG"
                 lowest_sw = float(df_30m['low'].iloc[-11:-1].min())
-                sl = lowest_sw - (atr_macro * 1.2)
+                sl = lowest_sw - (atr_macro * 1.5)
                 
             elif setup_short and rev_short:
                 side = "SHORT"
                 highest_sw = float(df_30m['high'].iloc[-11:-1].max())
-                sl = highest_sw + (atr_macro * 1.2)
+                sl = highest_sw + (atr_macro * 1.5)
 
             if not side: return None
 
@@ -202,7 +209,7 @@ class StrategyEngine:
             pnls = [StrategyEngine.calc_actual_roe(entry, t, side, lev) for t in tps]
             risk = abs(entry - sl)
 
-            Log.print(f"✅ {symbol}: Pure 30M/1M Bollinger Reversion Triggered!", Log.GREEN)
+            Log.print(f"✅ {symbol}: Safe ADX Bollinger Reversion Triggered!", Log.GREEN)
 
             del df_30m, df_m1
             return {
@@ -323,10 +330,10 @@ class TradingSystem:
             msg = (
                 f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
                 f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
-                f"━━━━━━━━━━━━━━━\n"
                 f"💰 Entry: <code>{safe_entry}</code>\n"
-                f"🎯 TP1 (Mid BB): <code>{safe_tps[0]}</code> (+{safe_pnls[0]:.1f}%)\n"
-                f"🎯 TP2 (Opp BB): <code>{safe_tps[1]}</code> (+{safe_pnls[1]:.1f}%)\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"🎯 TP1 : <code>{safe_tps[0]}</code> (+{safe_pnls[0]:.1f}%)\n"
+                f"🎯 TP2 : <code>{safe_tps[1]}</code> (+{safe_pnls[1]:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🛑 Stop: <code>{safe_sl}</code> ({sl_roe:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━"
@@ -372,7 +379,6 @@ class TradingSystem:
             
             try:
                 now_after = datetime.now(timezone.utc)
-                # 🛡️ تم التعديل: نبض الرادار أصبح كل 1 دقيقة للتوافق مع فريم الدقيقة!
                 seconds_to_wait = 60 - now_after.second + 1
                 
                 Log.print(f"⏳ Next Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
