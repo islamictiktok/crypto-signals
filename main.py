@@ -33,10 +33,10 @@ class Config:
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state_v25.json"
-    VERSION = "V25.1 (Bug-Free Pure Sniper)"
+    VERSION = "V25.2 (Fixed ROE Telegram Message)"
 
 class Log:
-    GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
+    GREEN = ' [92m'; YELLOW = ' [93m'; RED = ' [91m'; BLUE = ' [94m'; RESET = ' [0m'
     @staticmethod
     def print(msg, color=RESET):
         ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
@@ -84,7 +84,6 @@ class StrategyEngine:
             bb = ta.bbands(df['close'], length=20, std=2.5)
             df['bbl'] = bb.iloc[:, 0]; df['bbm'] = bb.iloc[:, 1]; df['bbu'] = bb.iloc[:, 2]
             
-            # LuxAlgo RSI logic
             df['rsi_base'] = ta.rsi(df['close'], length=14)
             df['rsi_signal'] = ta.ema(df['rsi_base'], length=14)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
@@ -95,18 +94,15 @@ class StrategyEngine:
             curr = df.iloc[-2]
             prev = df.iloc[-3]
             
-            # فحص ملامسة البولنجر خلال آخر 3 شموع لضمان التقاط الحركة بعد الارتداد
             lowest_3 = df['low'].iloc[-4:-1].min()
             highest_3 = df['high'].iloc[-4:-1].max()
             
             near_lower_bb = (lowest_3 <= curr['bbl'] * 1.002)
             near_upper_bb = (highest_3 >= curr['bbu'] * 0.998)
             
-            # مناطق الـ RSI (فوق أو تحت 50)
             rsi_below_50 = float(curr['rsi_base']) < 50
             rsi_above_50 = float(curr['rsi_base']) > 50
             
-            # التقاطع
             bullish_cross = (prev['rsi_base'] <= prev['rsi_signal']) and (curr['rsi_base'] > curr['rsi_signal'])
             bearish_cross = (prev['rsi_base'] >= prev['rsi_signal']) and (curr['rsi_base'] < curr['rsi_signal'])
             
@@ -119,7 +115,6 @@ class StrategyEngine:
             side = "LONG" if setup_long else "SHORT"
             atr = float(curr['atr'])
             
-            # الستوب لوز الآمن (Swing Low/High)
             if side == "LONG":
                 lowest_sw = float(df['low'].iloc[-11:-1].min())
                 sl = lowest_sw - (atr * 1.5)
@@ -135,14 +130,18 @@ class StrategyEngine:
             
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / (abs(entry-sl)/entry*100))))
             
+            # 💡 تم التأكد من إرسال pnls لرسالة التليجرام
+            tps = [tp1, tp2]
+            pnls = [StrategyEngine.calc_actual_roe(entry, t, side, lev) for t in tps]
+            
             Log.print(f"🎯 {symbol}: Sniper Crossover Triggered!", Log.GREEN)
-            return {"symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": [tp1, tp2], "pnls": [], "leverage": lev}
+            return {"symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls, "leverage": lev}
         except Exception as e: 
             Log.print(f"Engine Error: {e}", Log.RED)
             return None
 
 # ==========================================
-# 3. نظام التداول الكامل والخالي من الأخطاء
+# 3. نظام التداول (Trading System)
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -150,7 +149,6 @@ class TradingSystem:
         self.tg = TelegramNotifier()
         self.active_trades = {}
         self.cooldown_list = {} 
-        # القاموس الكامل للإحصائيات
         self.stats = {
             "signals": 0, "full_losses": 0, "micro_profits": 0, "solid_wins": 0,
             "tp1_reached": 0, "tp2_reached": 0, 
@@ -177,6 +175,7 @@ class TradingSystem:
 
     async def initialize(self):
         await self.tg.start()
+        Log.print("🔄 Loading Markets from MEXC...", Log.YELLOW)
         await self.exchange.load_markets()
         self.load_state() 
         Log.print(f"🚀 ENGINE ONLINE: {Config.VERSION}", Log.GREEN)
@@ -192,29 +191,47 @@ class TradingSystem:
         icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
         sl_roe = StrategyEngine.calc_actual_roe(trade['entry'], trade['sl'], trade['side'], trade['leverage'])
         
+        # 💡 تم استرجاع رسالة التليجرام الكاملة مع نسب الـ ROE المئوية
+        safe_tps = trade['tps']
+        safe_pnls = trade['pnls']
+        
         msg = (
-            f"⚡ <b><code>{sym.replace('/USDT:USDT', '/USDT')}</code></b> | {icon}\n"
-            f"⚖️ Lev: <b>{trade['leverage']}x</b>\n"
-            f"💰 Entry: <code>{trade['entry']}</code>\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🎯 TP1: <code>{trade['tps'][0]:.4f}</code>\n"
-            f"🚀 TP2: <code>{trade['tps'][1]:.4f}</code>\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"🛑 Stop: <code>{trade['sl']:.4f}</code> ({sl_roe:.1f}%)\n"
+            f"⚡ <b><code>{sym.replace('/USDT:USDT', '/USDT')}</code></b> | {icon}
+"
+            f"⚖️ Leverage: <b>{trade['leverage']}x</b>
+"
+            f"💰 Entry: <code>{trade['entry']}</code>
+"
+            f"━━━━━━━━━━━━━━━
+"
+            f"🎯 TP1 : <code>{safe_tps[0]:.4f}</code> (+{safe_pnls[0]:.1f}%)
+"
+            f"🚀 TP2 : <code>{safe_tps[1]:.4f}</code> (+{safe_pnls[1]:.1f}%)
+"
+            f"━━━━━━━━━━━━━━━
+"
+            f"🛑 Stop: <code>{trade['sl']:.4f}</code> ({sl_roe:.1f}%)
+"
+            f"━━━━━━━━━━━━━━━"
         )
         msg_id = await self.tg.send(msg)
         trade['msg_id'] = msg_id
         trade['step'] = 0
         trade['entry_time'] = int(time.time())
-        trade['last_sl_price'] = trade['sl'] # تهيئة سعر الستوب الحالي
+        trade['last_sl_price'] = trade['sl'] 
         self.active_trades[sym] = trade
         self.stats["signals"] += 1
         self.save_state()
+        Log.print(f"🚀 SIGNAL SENT TO TELEGRAM: {sym}", Log.GREEN)
 
     async def scan_market(self):
         while self.running:
-            await asyncio.sleep(60) 
             try:
+                now_after = datetime.now(timezone.utc)
+                seconds_to_wait = 60 - now_after.second + 1
+                Log.print(f"⏳ Next Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
+                await asyncio.sleep(seconds_to_wait)
+
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 keys_to_delete = [k for k, v in self.cooldown_list.items() if (current_time - v) > Config.COOLDOWN_SECONDS]
                 for k in keys_to_delete: del self.cooldown_list[k]
@@ -222,11 +239,12 @@ class TradingSystem:
                 tickers = await self.exchange.fetch_tickers()
                 scan_list = [c for c in tickers.keys() if 'USDT:USDT' in c and c not in self.active_trades and c not in self.cooldown_list]
                 
-                # فحص 10 عملات بالتوازي للسرعة
+                Log.print(f"🔍 Pure Sniper Scan Active | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
+
                 sem = asyncio.Semaphore(10)
                 async def fetch_pair_data(sym):
                     async with sem:
-                        m30_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=100) # 100 شمعة لحساب دقيق
+                        m30_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=100) 
                         return sym, m30_res
 
                 tasks = [fetch_pair_data(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
@@ -273,11 +291,15 @@ class TradingSystem:
                         self.stats['closed_trades'] += 1
                         self.stats['total_duration_secs'] += duration_secs
                         if step == 0:
-                            msg = f"🛑 <b><code>{coin_name}</code></b>\n❌ SL Hit: <code>{current_sl:.4f}</code>"
+                            msg = f"🛑 <b><code>{coin_name}</code></b>
+❌ SL Hit: <code>{current_sl:.4f}</code>"
                             self.stats['full_losses'] += 1; self.stats['realized_rr'] -= 1.0
+                            Log.print(f"🛑 {sym} hit Full SL", Log.RED)
                         else:
-                            msg = f"🛡️ <b><code>{coin_name}</code></b>\n⚠️ Closed at BE: <code>{current_sl:.4f}</code>"
+                            msg = f"🛡️ <b><code>{coin_name}</code></b>
+⚠️ Closed at BE: <code>{current_sl:.4f}</code>"
                             self.stats['micro_profits'] += 1
+                            Log.print(f"🛡️ {sym} closed at BE", Log.YELLOW)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
                         await self.tg.send(msg, trade.get('msg_id'))
@@ -293,14 +315,20 @@ class TradingSystem:
                     if highest_tp_hit > step:
                         trade['step'] = highest_tp_hit
                         if highest_tp_hit == 1:
-                            trade['last_sl_price'] = entry # تحديث الستوب الحقيقي
+                            trade['last_sl_price'] = entry 
                             self.stats['tp1_reached'] += 1; self.stats['realized_rr'] += 0.5 
-                            msg = f"✅ <b><code>{coin_name}</code></b>\n🎯 TP1 Hit: <code>{trade['tps'][0]:.4f}</code>\n🛡️ SL to BE: <code>{entry:.4f}</code>"
+                            msg = f"✅ <b><code>{coin_name}</code></b>
+🎯 TP1 Hit: <code>{trade['tps'][0]:.4f}</code>
+🛡️ SL to BE: <code>{entry:.4f}</code>"
+                            Log.print(f"✅ {sym} hit TP1", Log.GREEN)
                         elif highest_tp_hit == 2:
                             self.stats['tp2_reached'] += 1; self.stats['closed_trades'] += 1
                             self.stats['total_duration_secs'] += duration_secs
                             self.stats['solid_wins'] += 1; self.stats['realized_rr'] += 1.5 
-                            msg = f"🏆 <b><code>{coin_name}</code></b>\n🚀 TP2 Hit: <code>{trade['tps'][1]:.4f}</code>\n✅ Trade Completed!"
+                            msg = f"🏆 <b><code>{coin_name}</code></b>
+🚀 TP2 Hit: <code>{trade['tps'][1]:.4f}</code>
+✅ Trade Completed!"
+                            Log.print(f"🏆 {sym} hit FULL TP2", Log.GREEN)
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
                             
@@ -324,10 +352,18 @@ class TradingSystem:
                     avg_realized_rr = (self.stats.get('realized_rr', 0.0) / closed) if closed > 0 else 0
                     
                     msg = (
-                        f"📊 <b>Daily Report</b>\n━━━━━━━━━━━━━━━\n"
-                        f"🎯 Signals: {self.stats.get('signals', 0)}\n🏆 Full Wins: {wins}\n"
-                        f"🛡️ Break-Evens: {micro}\n🛑 Losses: {losses}\n━━━━━━━━━━━━━━━\n"
-                        f"📈 <b>Win Rate:</b> {wr:.1f}%\n⚖️ <b>Net R:R:</b> {avg_realized_rr:.2f}R"
+                        f"📊 <b>Daily Report</b>
+━━━━━━━━━━━━━━━
+"
+                        f"🎯 Signals: {self.stats.get('signals', 0)}
+🏆 Full Wins: {wins}
+"
+                        f"🛡️ Break-Evens: {micro}
+🛑 Losses: {losses}
+━━━━━━━━━━━━━━━
+"
+                        f"📈 <b>Win Rate:</b> {wr:.1f}%
+⚖️ <b>Net R:R:</b> {avg_realized_rr:.2f}R"
                     )
                     await self.tg.send(msg)
                     self.stats = {k: 0 for k in self.stats.keys() if k != "realized_rr"}
@@ -352,11 +388,11 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V25.1 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V25.2 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asyncio.create_task(bot.initialize())
+    await bot.initialize()
     asyncio.create_task(bot.scan_market())
     asyncio.create_task(bot.monitor_open_trades())
     asyncio.create_task(bot.daily_report())
