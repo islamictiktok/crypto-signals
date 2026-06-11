@@ -36,7 +36,7 @@ class Config:
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state_v22.json"
-    VERSION = "V22000.5 (Ultimate Clean UI)"
+    VERSION = "V22000.6 (1M Pulse Patch)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -320,14 +320,13 @@ class TradingSystem:
             
             sl_roe = StrategyEngine.calc_actual_roe(safe_entry, safe_sl, trade['side'], trade['leverage'])
             
-            # 🛡️ رسالة التليجرام النظيفة والجديدة (UI Touch)
             msg = (
                 f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
                 f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
-                f"💰 Entry: <code>{safe_entry}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🎯 TP1 : <code>{safe_tps[0]}</code> (+{safe_pnls[0]:.1f}%)\n"
-                f"🎯 TP2 : <code>{safe_tps[1]}</code> (+{safe_pnls[1]:.1f}%)\n"
+                f"💰 Entry: <code>{safe_entry}</code>\n"
+                f"🎯 TP1 (Mid BB): <code>{safe_tps[0]}</code> (+{safe_pnls[0]:.1f}%)\n"
+                f"🎯 TP2 (Opp BB): <code>{safe_tps[1]}</code> (+{safe_pnls[1]:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🛑 Stop: <code>{safe_sl}</code> ({sl_roe:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━"
@@ -373,8 +372,8 @@ class TradingSystem:
             
             try:
                 now_after = datetime.now(timezone.utc)
-                minutes_to_wait = 5 - (now_after.minute % 5)
-                seconds_to_wait = (minutes_to_wait * 60) - now_after.second + 2 
+                # 🛡️ تم التعديل: نبض الرادار أصبح كل 1 دقيقة للتوافق مع فريم الدقيقة!
+                seconds_to_wait = 60 - now_after.second + 1
                 
                 Log.print(f"⏳ Next Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
                 await asyncio.sleep(seconds_to_wait)
@@ -391,7 +390,7 @@ class TradingSystem:
                 Log.print(f"🔍 Scan Active | BTC Allows: {btc_allowed_sides} | Scanning {len(scan_list)} pairs...", Log.BLUE)
 
                 if not btc_allowed_sides:
-                    await asyncio.sleep(60); continue
+                    await asyncio.sleep(10); continue
 
                 for sym in scan_list:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
@@ -475,7 +474,7 @@ class TradingSystem:
                             trade['last_sl_price'] = entry 
                             self.stats['tp1_reached'] += 1
                             self.stats['realized_rr'] += 0.5 
-                            msg = f"✅ <b><code>{coin_name}</code></b>\n🎯 TP1 Hit: <code>{trade['tps'][0]}</code>\n🛡️ SL to BE: <code>{entry}</code>"
+                            msg = f"✅ <b><code>{coin_name}</code></b>\n🎯 TP1 Hit: <code>{trade['tps'][0]}</code>\n🛡️ SL moved to BE: <code>{entry}</code>"
                             
                         elif highest_tp_hit == 2:
                             self.stats['tp2_reached'] += 1
