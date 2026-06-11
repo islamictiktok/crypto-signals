@@ -33,7 +33,7 @@ class Config:
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 1800 
     STATE_FILE = "bot_state_v25.json"
-    VERSION = "V25.3 (Final Audited Sniper)"
+    VERSION = "V25.4 (Final Sniper - Perfect UI)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -94,7 +94,6 @@ class StrategyEngine:
             curr = df.iloc[-2]
             prev = df.iloc[-3]
             
-            # فحص دقيق لآخر 3 شموع لتأكيد ملامسة البولنجر
             lowest_3 = df['low'].iloc[-4:-1].min()
             highest_3 = df['high'].iloc[-4:-1].max()
             
@@ -116,7 +115,6 @@ class StrategyEngine:
             side = "LONG" if setup_long else "SHORT"
             atr = float(curr['atr'])
             
-            # حماية الستوب لوز من التذبذبات (Swing Low/High)
             if side == "LONG":
                 lowest_sw = float(df['low'].iloc[-11:-1].min())
                 sl = lowest_sw - (atr * 1.5)
@@ -124,7 +122,6 @@ class StrategyEngine:
                 highest_sw = float(df['high'].iloc[-11:-1].max())
                 sl = highest_sw + (atr * 1.5)
             
-            # 🛡️ الحماية الهندسية من الأعطال (ZeroDivision & Wide SL)
             risk = abs(entry - sl)
             if risk == 0: return None
             
@@ -199,8 +196,13 @@ class TradingSystem:
         safe_tps = trade['tps']
         safe_pnls = trade['pnls']
         
+        # 💡 تم استرجاع نظام التسمية النظيف للعملة
+        market_info = self.exchange.markets.get(sym, {})
+        base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
+        exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
+        
         msg = (
-            f"⚡ <b><code>{sym.replace('/USDT:USDT', '/USDT')}</code></b> | {icon}\n"
+            f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
             f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
             f"💰 Entry: <code>{trade['entry']}</code>\n"
             f"━━━━━━━━━━━━━━━\n"
@@ -213,18 +215,18 @@ class TradingSystem:
         msg_id = await self.tg.send(msg)
         trade['msg_id'] = msg_id
         trade['step'] = 0
+        trade['clean_sym'] = exact_app_name # حفظ الاسم النظيف لاستخدامه في رسائل التحديث
         trade['entry_time'] = int(time.time())
         trade['last_sl_price'] = trade['sl'] 
         self.active_trades[sym] = trade
         self.stats["signals"] += 1
         self.save_state()
-        Log.print(f"🚀 SIGNAL SENT TO TELEGRAM: {sym}", Log.GREEN)
+        Log.print(f"🚀 SIGNAL SENT TO TELEGRAM: {exact_app_name}", Log.GREEN)
 
     async def scan_market(self):
         while self.running:
             try:
                 now_after = datetime.now(timezone.utc)
-                # رادار ذكي يفحص في بداية كل دقيقة بدقة
                 seconds_to_wait = 60 - now_after.second + 1
                 Log.print(f"⏳ Next Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
                 await asyncio.sleep(seconds_to_wait)
@@ -280,7 +282,7 @@ class TradingSystem:
                     step = trade['step']
                     current_sl = trade.get('last_sl_price', trade['sl'])
                     total_tps = len(trade['tps'])
-                    coin_name = sym.replace('/USDT:USDT', '/USDT')
+                    coin_name = trade.get('clean_sym', sym.replace('/USDT:USDT', '/USDT'))
                     
                     duration_secs = int(time.time()) - trade.get('entry_time', int(time.time()))
                     hit_sl = (price <= current_sl) if side == "LONG" else (price >= current_sl)
@@ -291,11 +293,11 @@ class TradingSystem:
                         if step == 0:
                             msg = f"🛑 <b><code>{coin_name}</code></b>\n❌ SL Hit: <code>{current_sl:.4f}</code>"
                             self.stats['full_losses'] += 1; self.stats['realized_rr'] -= 1.0
-                            Log.print(f"🛑 {sym} hit Full SL", Log.RED)
+                            Log.print(f"🛑 {coin_name} hit Full SL", Log.RED)
                         else:
                             msg = f"🛡️ <b><code>{coin_name}</code></b>\n⚠️ Closed at BE: <code>{current_sl:.4f}</code>"
                             self.stats['micro_profits'] += 1
-                            Log.print(f"🛡️ {sym} closed at BE", Log.YELLOW)
+                            Log.print(f"🛡️ {coin_name} closed at BE", Log.YELLOW)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
                         await self.tg.send(msg, trade.get('msg_id'))
@@ -314,13 +316,13 @@ class TradingSystem:
                             trade['last_sl_price'] = entry 
                             self.stats['tp1_reached'] += 1; self.stats['realized_rr'] += 0.5 
                             msg = f"✅ <b><code>{coin_name}</code></b>\n🎯 TP1 Hit: <code>{trade['tps'][0]:.4f}</code>\n🛡️ SL to BE: <code>{entry:.4f}</code>"
-                            Log.print(f"✅ {sym} hit TP1", Log.GREEN)
+                            Log.print(f"✅ {coin_name} hit TP1", Log.GREEN)
                         elif highest_tp_hit == 2:
                             self.stats['tp2_reached'] += 1; self.stats['closed_trades'] += 1
                             self.stats['total_duration_secs'] += duration_secs
                             self.stats['solid_wins'] += 1; self.stats['realized_rr'] += 1.5 
                             msg = f"🏆 <b><code>{coin_name}</code></b>\n🚀 TP2 Hit: <code>{trade['tps'][1]:.4f}</code>\n✅ Trade Completed!"
-                            Log.print(f"🏆 {sym} hit FULL TP2", Log.GREEN)
+                            Log.print(f"🏆 {coin_name} hit FULL TP2", Log.GREEN)
                             self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
                             del self.active_trades[sym]
                             
@@ -372,7 +374,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V25.3 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V25.4 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
