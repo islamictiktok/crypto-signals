@@ -32,8 +32,8 @@ class Config:
     MAX_LEVERAGE_CAP = 20 
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 1800 
-    STATE_FILE = "bot_state_v25.json"
-    VERSION = "V25.4 (Final Sniper - Perfect UI)"
+    STATE_FILE = "bot_state_v26_1.json"
+    VERSION = "V26.1 (LuxAlgo Perfect Match)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -67,7 +67,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (Audited Pure Crossover)
+# 2. محرك الاستراتيجية (Perfect Crossover Logic)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -76,17 +76,27 @@ class StrategyEngine:
         return float(((exit_price - entry) / entry) * 100.0 * lev) if side == "LONG" else float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def analyze_mtf(symbol, m30_data):
+    def analyze_mtf(symbol, m30_data, btc_allowed_sides):
         try:
             df = pd.DataFrame(m30_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 60: return None
+            if len(df) < 110: return None 
             
+            # 1. Bollinger Bands
             bb = ta.bbands(df['close'], length=20, std=2.5)
             df['bbl'] = bb.iloc[:, 0]; df['bbm'] = bb.iloc[:, 1]; df['bbu'] = bb.iloc[:, 2]
             
+            # 2. LuxAlgo Ultimate RSI Setup (يطابق الصورة بالضبط)
+            # الخط الأبيض (RSI 14 RMA)
             df['rsi_base'] = ta.rsi(df['close'], length=14)
+            # الخط البرتقالي (EMA 14 للـ RSI)
             df['rsi_signal'] = ta.ema(df['rsi_base'], length=14)
+            
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            
+            # 3. الدروع الواقية
+            df['ema100'] = ta.ema(df['close'], length=100)
+            adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
+            df['adx'] = adx_df['ADX_14'] if adx_df is not None and not adx_df.empty else 0
             
             df.dropna(inplace=True)
             if len(df) < 5: return None
@@ -94,27 +104,44 @@ class StrategyEngine:
             curr = df.iloc[-2]
             prev = df.iloc[-3]
             
-            lowest_3 = df['low'].iloc[-4:-1].min()
-            highest_3 = df['high'].iloc[-4:-1].max()
+            # قراءة الدروع
+            close_price = float(curr['close'])
+            ema100 = float(curr['ema100'])
+            adx = float(curr['adx'])
             
-            near_lower_bb = (lowest_3 <= curr['bbl'] * 1.002)
-            near_upper_bb = (highest_3 >= curr['bbu'] * 0.998)
+            trend_up = close_price > ema100
+            trend_down = close_price < ema100
+            is_ranging = adx < 30 # يمنع الدخول في الانهيارات القوية
             
+            # 💡 تعديل دقة ملامسة البولنجر (مقارنة كل شمعة من آخر 3 بشريط البولنجر الخاص بها)
+            # نبحث في الشموع (الحالية المغلقة، واللي قبلها، واللي قبلها)
+            last_3_lows = df['low'].iloc[-4:-1].values
+            last_3_highs = df['high'].iloc[-4:-1].values
+            last_3_bbls = df['bbl'].iloc[-4:-1].values
+            last_3_bbus = df['bbu'].iloc[-4:-1].values
+            
+            bb_lower_touched = any(l <= bbl * 1.002 for l, bbl in zip(last_3_lows, last_3_bbls))
+            bb_upper_touched = any(h >= bbu * 0.998 for h, bbu in zip(last_3_highs, last_3_bbus))
+            
+            # مناطق RSI (أقل من 50 للشراء، أكبر من 50 للبيع)
             rsi_below_50 = float(curr['rsi_base']) < 50
             rsi_above_50 = float(curr['rsi_base']) > 50
             
+            # 💡 التقاطع الدقيق (White crosses Orange)
             bullish_cross = (prev['rsi_base'] <= prev['rsi_signal']) and (curr['rsi_base'] > curr['rsi_signal'])
             bearish_cross = (prev['rsi_base'] >= prev['rsi_signal']) and (curr['rsi_base'] < curr['rsi_signal'])
             
-            setup_long = near_lower_bb and rsi_below_50 and bullish_cross
-            setup_short = near_upper_bb and rsi_above_50 and bearish_cross
+            # تجميع الشروط المصفحة
+            setup_long = ("LONG" in btc_allowed_sides) and is_ranging and trend_up and bb_lower_touched and rsi_below_50 and bullish_cross
+            setup_short = ("SHORT" in btc_allowed_sides) and is_ranging and trend_down and bb_upper_touched and rsi_above_50 and bearish_cross
             
             if not setup_long and not setup_short: return None
             
-            entry = float(curr['close'])
+            entry = close_price
             side = "LONG" if setup_long else "SHORT"
             atr = float(curr['atr'])
             
+            # الستوب لوز (أدنى/أعلى نقطة في آخر 10 شموع)
             if side == "LONG":
                 lowest_sw = float(df['low'].iloc[-11:-1].min())
                 sl = lowest_sw - (atr * 1.5)
@@ -128,22 +155,33 @@ class StrategyEngine:
             sl_distance_pct = (risk / entry) * 100
             if sl_distance_pct < 0.1 or sl_distance_pct > 10.0: return None 
             
-            tp1 = max(curr['bbm'], entry + risk * 1.0) if side == "LONG" else min(curr['bbm'], entry - risk * 1.0)
-            tp2 = max(curr['bbu'], entry + risk * 2.0) if side == "LONG" else min(curr['bbl'], entry - risk * 2.0)
+            # الهدف الأول: 1% ربح أو Mid BB (أيهما أبعد لتأمين الصفقة)
+            min_tp_distance = entry * 0.01 
+            structural_tp1_dist = abs(curr['bbm'] - entry)
+            actual_tp1_dist = max(structural_tp1_dist, min_tp_distance)
+            
+            if side == "LONG":
+                tp1 = entry + actual_tp1_dist
+                tp2 = curr['bbu']
+            else:
+                tp1 = entry - actual_tp1_dist
+                tp2 = curr['bbl']
+            
+            if (side == "LONG" and tp2 <= tp1) or (side == "SHORT" and tp2 >= tp1): return None
             
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             
             tps = [tp1, tp2]
             pnls = [StrategyEngine.calc_actual_roe(entry, t, side, lev) for t in tps]
             
-            Log.print(f"🎯 {symbol}: Verified Sniper Crossover Triggered!", Log.GREEN)
+            Log.print(f"🎯 {symbol}: LuxAlgo Perfect Crossover Triggered!", Log.GREEN)
             return {"symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls, "leverage": lev}
         except Exception as e: 
             Log.print(f"Engine Error: {e}", Log.RED)
             return None
 
 # ==========================================
-# 3. نظام التداول الآمن (Trading System)
+# 3. نظام التداول الآمن
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -188,6 +226,27 @@ class TradingSystem:
         await self.tg.stop()
         await self.exchange.close()
 
+    async def get_btc_allowed_sides(self):
+        try:
+            btc_res = await fetch_with_retry(self.exchange.fetch_ohlcv, "BTC/USDT", '30m', limit=200)
+            if not btc_res: return ["LONG", "SHORT"]
+            df = pd.DataFrame(btc_res, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            df['ema50'] = ta.ema(df['close'], length=50)
+            df['ema100'] = ta.ema(df['close'], length=100)
+            adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
+            df['adx'] = adx_df['ADX_14'] if adx_df is not None else 0
+            df.dropna(inplace=True)
+            if len(df) < 2: return ["LONG", "SHORT"]
+            
+            curr = df.iloc[-2]
+            btc_strong_up = (curr['close'] > curr['ema50']) and (curr['ema50'] > curr['ema100']) and (curr['adx'] > 35)
+            btc_strong_down = (curr['close'] < curr['ema50']) and (curr['ema50'] < curr['ema100']) and (curr['adx'] > 35)
+            
+            if btc_strong_up: return ["LONG"] 
+            elif btc_strong_down: return ["SHORT"] 
+            return ["LONG", "SHORT"] 
+        except: return ["LONG", "SHORT"]
+
     async def execute_trade(self, trade):
         sym = trade['symbol']
         icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
@@ -196,7 +255,6 @@ class TradingSystem:
         safe_tps = trade['tps']
         safe_pnls = trade['pnls']
         
-        # 💡 تم استرجاع نظام التسمية النظيف للعملة
         market_info = self.exchange.markets.get(sym, {})
         base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
         exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
@@ -215,7 +273,7 @@ class TradingSystem:
         msg_id = await self.tg.send(msg)
         trade['msg_id'] = msg_id
         trade['step'] = 0
-        trade['clean_sym'] = exact_app_name # حفظ الاسم النظيف لاستخدامه في رسائل التحديث
+        trade['clean_sym'] = exact_app_name 
         trade['entry_time'] = int(time.time())
         trade['last_sl_price'] = trade['sl'] 
         self.active_trades[sym] = trade
@@ -235,15 +293,17 @@ class TradingSystem:
                 keys_to_delete = [k for k, v in self.cooldown_list.items() if (current_time - v) > Config.COOLDOWN_SECONDS]
                 for k in keys_to_delete: del self.cooldown_list[k]
 
+                btc_allowed = await self.get_btc_allowed_sides()
+
                 tickers = await self.exchange.fetch_tickers()
                 scan_list = [c for c in tickers.keys() if 'USDT:USDT' in c and c not in self.active_trades and c not in self.cooldown_list]
                 
-                Log.print(f"🔍 Pure Sniper Scan Active | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
+                Log.print(f"🔍 LuxAlgo Scan Active | BTC Allowed: {btc_allowed} | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
 
                 sem = asyncio.Semaphore(10)
                 async def fetch_pair_data(sym):
                     async with sem:
-                        m30_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=100) 
+                        m30_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=150) 
                         return sym, m30_res
 
                 tasks = [fetch_pair_data(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
@@ -252,7 +312,7 @@ class TradingSystem:
                 for sym, m30_res in results:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     if not m30_res: continue
-                    res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, m30_res)
+                    res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, m30_res, btc_allowed)
                     if res: await self.execute_trade(res)
                 gc.collect()
             except Exception as e:
@@ -374,7 +434,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V25.4 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V26.1 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
