@@ -23,7 +23,7 @@ class Config:
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg")
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TF_MACRO = '30m'   
+    TF_MACRO = '5m'    # 💡 تم التحويل لسكالبينج 5 دقائق
     TOP_COINS_LIMIT = 75 
     MAX_TRADES_AT_ONCE = 5 
     MIN_24H_VOLUME_USDT = 10_000_000 
@@ -31,9 +31,9 @@ class Config:
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 20 
     MAX_MARGIN_RISK_PCT = 15.0 
-    COOLDOWN_SECONDS = 1800 
-    STATE_FILE = "bot_state_v26_1.json"
-    VERSION = "V26.1 (LuxAlgo Perfect Match)"
+    COOLDOWN_SECONDS = 900 # 💡 تقليل وقت الحظر لـ 15 دقيقة فقط ليناسب السكالبينج
+    STATE_FILE = "bot_state_v27.json"
+    VERSION = "V27.0 (5m Fast Scalper)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -67,7 +67,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (Perfect Crossover Logic)
+# 2. محرك الاستراتيجية (5m Scalper Engine)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -76,24 +76,18 @@ class StrategyEngine:
         return float(((exit_price - entry) / entry) * 100.0 * lev) if side == "LONG" else float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def analyze_mtf(symbol, m30_data, btc_allowed_sides):
+    def analyze_mtf(symbol, df_data, btc_allowed_sides):
         try:
-            df = pd.DataFrame(m30_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            df = pd.DataFrame(df_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df) < 110: return None 
             
-            # 1. Bollinger Bands
             bb = ta.bbands(df['close'], length=20, std=2.5)
             df['bbl'] = bb.iloc[:, 0]; df['bbm'] = bb.iloc[:, 1]; df['bbu'] = bb.iloc[:, 2]
             
-            # 2. LuxAlgo Ultimate RSI Setup (يطابق الصورة بالضبط)
-            # الخط الأبيض (RSI 14 RMA)
             df['rsi_base'] = ta.rsi(df['close'], length=14)
-            # الخط البرتقالي (EMA 14 للـ RSI)
             df['rsi_signal'] = ta.ema(df['rsi_base'], length=14)
-            
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
             
-            # 3. الدروع الواقية
             df['ema100'] = ta.ema(df['close'], length=100)
             adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
             df['adx'] = adx_df['ADX_14'] if adx_df is not None and not adx_df.empty else 0
@@ -104,17 +98,14 @@ class StrategyEngine:
             curr = df.iloc[-2]
             prev = df.iloc[-3]
             
-            # قراءة الدروع
             close_price = float(curr['close'])
             ema100 = float(curr['ema100'])
             adx = float(curr['adx'])
             
             trend_up = close_price > ema100
             trend_down = close_price < ema100
-            is_ranging = adx < 30 # يمنع الدخول في الانهيارات القوية
+            is_ranging = adx < 30 
             
-            # 💡 تعديل دقة ملامسة البولنجر (مقارنة كل شمعة من آخر 3 بشريط البولنجر الخاص بها)
-            # نبحث في الشموع (الحالية المغلقة، واللي قبلها، واللي قبلها)
             last_3_lows = df['low'].iloc[-4:-1].values
             last_3_highs = df['high'].iloc[-4:-1].values
             last_3_bbls = df['bbl'].iloc[-4:-1].values
@@ -123,15 +114,12 @@ class StrategyEngine:
             bb_lower_touched = any(l <= bbl * 1.002 for l, bbl in zip(last_3_lows, last_3_bbls))
             bb_upper_touched = any(h >= bbu * 0.998 for h, bbu in zip(last_3_highs, last_3_bbus))
             
-            # مناطق RSI (أقل من 50 للشراء، أكبر من 50 للبيع)
             rsi_below_50 = float(curr['rsi_base']) < 50
             rsi_above_50 = float(curr['rsi_base']) > 50
             
-            # 💡 التقاطع الدقيق (White crosses Orange)
             bullish_cross = (prev['rsi_base'] <= prev['rsi_signal']) and (curr['rsi_base'] > curr['rsi_signal'])
             bearish_cross = (prev['rsi_base'] >= prev['rsi_signal']) and (curr['rsi_base'] < curr['rsi_signal'])
             
-            # تجميع الشروط المصفحة
             setup_long = ("LONG" in btc_allowed_sides) and is_ranging and trend_up and bb_lower_touched and rsi_below_50 and bullish_cross
             setup_short = ("SHORT" in btc_allowed_sides) and is_ranging and trend_down and bb_upper_touched and rsi_above_50 and bearish_cross
             
@@ -141,7 +129,6 @@ class StrategyEngine:
             side = "LONG" if setup_long else "SHORT"
             atr = float(curr['atr'])
             
-            # الستوب لوز (أدنى/أعلى نقطة في آخر 10 شموع)
             if side == "LONG":
                 lowest_sw = float(df['low'].iloc[-11:-1].min())
                 sl = lowest_sw - (atr * 1.5)
@@ -155,8 +142,8 @@ class StrategyEngine:
             sl_distance_pct = (risk / entry) * 100
             if sl_distance_pct < 0.1 or sl_distance_pct > 10.0: return None 
             
-            # الهدف الأول: 1% ربح أو Mid BB (أيهما أبعد لتأمين الصفقة)
-            min_tp_distance = entry * 0.01 
+            # 💡 تعديل الهدف للسكالبينج (0.5% كحد أدنى بدلاً من 1%)
+            min_tp_distance = entry * 0.005 
             structural_tp1_dist = abs(curr['bbm'] - entry)
             actual_tp1_dist = max(structural_tp1_dist, min_tp_distance)
             
@@ -174,7 +161,7 @@ class StrategyEngine:
             tps = [tp1, tp2]
             pnls = [StrategyEngine.calc_actual_roe(entry, t, side, lev) for t in tps]
             
-            Log.print(f"🎯 {symbol}: LuxAlgo Perfect Crossover Triggered!", Log.GREEN)
+            Log.print(f"🎯 {symbol}: 5m Scalper Crossover Triggered!", Log.GREEN)
             return {"symbol": symbol, "side": side, "entry": entry, "sl": sl, "tps": tps, "pnls": pnls, "leverage": lev}
         except Exception as e: 
             Log.print(f"Engine Error: {e}", Log.RED)
@@ -228,7 +215,7 @@ class TradingSystem:
 
     async def get_btc_allowed_sides(self):
         try:
-            btc_res = await fetch_with_retry(self.exchange.fetch_ohlcv, "BTC/USDT", '30m', limit=200)
+            btc_res = await fetch_with_retry(self.exchange.fetch_ohlcv, "BTC/USDT", Config.TF_MACRO, limit=200)
             if not btc_res: return ["LONG", "SHORT"]
             df = pd.DataFrame(btc_res, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             df['ema50'] = ta.ema(df['close'], length=50)
@@ -279,14 +266,16 @@ class TradingSystem:
         self.active_trades[sym] = trade
         self.stats["signals"] += 1
         self.save_state()
-        Log.print(f"🚀 SIGNAL SENT TO TELEGRAM: {exact_app_name}", Log.GREEN)
+        Log.print(f"🚀 SIGNAL SENT: {exact_app_name}", Log.GREEN)
 
     async def scan_market(self):
         while self.running:
             try:
                 now_after = datetime.now(timezone.utc)
-                seconds_to_wait = 60 - now_after.second + 1
-                Log.print(f"⏳ Next Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
+                # 💡 النبض الذكي: يفحص كل 5 دقائق بالضبط (00, 05, 10, 15...)
+                minutes_to_wait = 5 - (now_after.minute % 5)
+                seconds_to_wait = (minutes_to_wait * 60) - now_after.second + 2 
+                Log.print(f"⏳ Next 5m Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
                 await asyncio.sleep(seconds_to_wait)
 
                 current_time = int(datetime.now(timezone.utc).timestamp())
@@ -298,22 +287,22 @@ class TradingSystem:
                 tickers = await self.exchange.fetch_tickers()
                 scan_list = [c for c in tickers.keys() if 'USDT:USDT' in c and c not in self.active_trades and c not in self.cooldown_list]
                 
-                Log.print(f"🔍 LuxAlgo Scan Active | BTC Allowed: {btc_allowed} | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
+                Log.print(f"🔍 5m Scalper Scan | BTC Allowed: {btc_allowed} | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
 
                 sem = asyncio.Semaphore(10)
                 async def fetch_pair_data(sym):
                     async with sem:
-                        m30_res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=150) 
-                        return sym, m30_res
+                        res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=150) 
+                        return sym, res
 
                 tasks = [fetch_pair_data(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
                 results = await asyncio.gather(*tasks)
 
-                for sym, m30_res in results:
+                for sym, res in results:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    if not m30_res: continue
-                    res = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, m30_res, btc_allowed)
-                    if res: await self.execute_trade(res)
+                    if not res: continue
+                    analysis = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, res, btc_allowed)
+                    if analysis: await self.execute_trade(analysis)
                 gc.collect()
             except Exception as e:
                 Log.print(f"Scan Loop Error: {e}", Log.RED)
@@ -353,11 +342,11 @@ class TradingSystem:
                         if step == 0:
                             msg = f"🛑 <b><code>{coin_name}</code></b>\n❌ SL Hit: <code>{current_sl:.4f}</code>"
                             self.stats['full_losses'] += 1; self.stats['realized_rr'] -= 1.0
-                            Log.print(f"🛑 {coin_name} hit Full SL", Log.RED)
+                            Log.print(f"🛑 {coin_name} hit Full SL", RED)
                         else:
                             msg = f"🛡️ <b><code>{coin_name}</code></b>\n⚠️ Closed at BE: <code>{current_sl:.4f}</code>"
                             self.stats['micro_profits'] += 1
-                            Log.print(f"🛡️ {coin_name} closed at BE", Log.YELLOW)
+                            Log.print(f"🛡️ {coin_name} closed at BE", YELLOW)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
                         await self.tg.send(msg, trade.get('msg_id'))
@@ -434,7 +423,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V26.1 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V27.0 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
