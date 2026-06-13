@@ -36,7 +36,7 @@ class Config:
     VERSION = "V30.1 (Clean UI)"
 
 class Log:
-    GREEN = ' [92m'; YELLOW = ' [93m'; RED = ' [91m'; BLUE = ' [94m'; RESET = ' [0m'
+    GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
     @staticmethod
     def print(msg, color=RESET):
         ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
@@ -206,22 +206,15 @@ class TradingSystem:
         base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
         exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
         
-        # 💡 تم مسح (Mid) من الهدف
+        # 💡 تم مسح كلمة Mid من الهدف هنا
         msg = (
-            f"⚡ <b><code>{exact_app_name}</code></b> | {icon}
-"
-            f"⚖️ Leverage: <b>{trade['leverage']}x</b>
-"
-            f"💰 Entry: <code>{trade['entry']}</code>
-"
-            f"━━━━━━━━━━━━━━━
-"
-            f"🎯 Target : <code>{trade['tp']:.4f}</code> (+{trade['pnl']:.1f}%)
-"
-            f"━━━━━━━━━━━━━━━
-"
-            f"🛑 Stop: <code>{trade['sl']:.4f}</code> ({sl_roe:.1f}%)
-"
+            f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
+            f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
+            f"💰 Entry: <code>{trade['entry']}</code>\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🎯 Target : <code>{trade['tp']:.4f}</code> (+{trade['pnl']:.1f}%)\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🛑 Stop: <code>{trade['sl']:.4f}</code> ({sl_roe:.1f}%)\n"
             f"━━━━━━━━━━━━━━━"
         )
         msg_id = await self.tg.send(msg)
@@ -305,8 +298,7 @@ class TradingSystem:
                         self.stats['total_duration_secs'] += duration_secs
                         self.stats['losses'] += 1
                         self.stats['realized_rr'] -= 1.0
-                        msg = f"🛑 <b><code>{coin_name}</code></b>
-❌ SL Hit: <code>{sl:.4f}</code>"
+                        msg = f"🛑 <b><code>{coin_name}</code></b>\n❌ SL Hit: <code>{sl:.4f}</code>"
                         Log.print(f"🛑 {coin_name} hit SL", Log.RED)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
@@ -324,9 +316,7 @@ class TradingSystem:
                         rr = reward / risk if risk > 0 else 0
                         self.stats['realized_rr'] += rr
                         
-                        msg = f"🏆 <b><code>{coin_name}</code></b>
-🚀 Target Hit: <code>{tp:.4f}</code>
-✅ Trade Completed! (+{rr:.1f}R)"
+                        msg = f"🏆 <b><code>{coin_name}</code></b>\n🚀 Target Hit: <code>{tp:.4f}</code>\n✅ Trade Completed! (+{rr:.1f}R)"
                         Log.print(f"🏆 {coin_name} hit Target", Log.GREEN)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
@@ -350,19 +340,12 @@ class TradingSystem:
                     wr = (wins / closed * 100) if closed > 0 else 0
                     avg_realized_rr = (self.stats.get('realized_rr', 0.0))
                     
-                    # 💡 تم مسح (LinReg) من عنوان التقرير
+                    # 💡 تم مسح كلمة LinReg من عنوان التقرير هنا
                     msg = (
-                        f"📊 <b>Daily Report</b>
-━━━━━━━━━━━━━━━
-"
-                        f"🎯 Signals: {self.stats.get('signals', 0)}
-🏆 Wins: {wins}
-"
-                        f"🛑 Losses: {losses}
-━━━━━━━━━━━━━━━
-"
-                        f"📈 <b>Win Rate:</b> {wr:.1f}%
-⚖️ <b>Net R:R:</b> {avg_realized_rr:.2f}R"
+                        f"📊 <b>Daily Report</b>\n━━━━━━━━━━━━━━━\n"
+                        f"🎯 Signals: {self.stats.get('signals', 0)}\n🏆 Wins: {wins}\n"
+                        f"🛑 Losses: {losses}\n━━━━━━━━━━━━━━━\n"
+                        f"📈 <b>Win Rate:</b> {wr:.1f}%\n⚖️ <b>Net R:R:</b> {avg_realized_rr:.2f}R"
                     )
                     await self.tg.send(msg)
                     self.stats = {k: 0 for k in self.stats.keys() if k != "realized_rr"}
