@@ -23,7 +23,7 @@ class Config:
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg")
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TF_MACRO = '30m'    # إطار الـ 30 دقيقة المغلق
+    TF_MACRO = '30m'    
     TOP_COINS_LIMIT = 75 
     MAX_TRADES_AT_ONCE = 5 
     MIN_24H_VOLUME_USDT = 10_000_000 
@@ -32,8 +32,8 @@ class Config:
     MAX_LEVERAGE_CAP = 20 
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 1800 
-    STATE_FILE = "bot_state_v31.json"
-    VERSION = "V31.0 (Clean Sweep - Single Target)"
+    STATE_FILE = "bot_state_v31_1.json"
+    VERSION = "V31.1 (Reclaim Master)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -67,7 +67,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (Dynamic Channel Rejection)
+# 2. محرك الاستراتيجية (Dynamic Channel & Reclaim)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -81,13 +81,13 @@ class StrategyEngine:
             df = pd.DataFrame(df_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df) < 110: return None 
             
-            # بناء القناة السعرية للانحدار الخطي (LinReg 100, 2)
+            # بناء القناة السعرية (LinReg 100, 2)
             linreg_median = ta.linreg(df['close'], length=100)
             linreg_std = ta.stdev(df['close'], length=100)
             
-            df['bbm'] = linreg_median # خط المنتصف
-            df['bbl'] = linreg_median - (2 * linreg_std) # الحد السفلي
-            df['bbu'] = linreg_median + (2 * linreg_std) # الحد العلوي
+            df['bbm'] = linreg_median 
+            df['bbl'] = linreg_median - (2 * linreg_std) 
+            df['bbu'] = linreg_median + (2 * linreg_std) 
             
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
             df.dropna(inplace=True)
@@ -101,24 +101,23 @@ class StrategyEngine:
             tolerance_bb_inv = 0.998
 
             # --- تحليل LONG (الشراء) ---
-            # حالة 1: الارتداد من الحد السفلي الأزرق إلى الخط الأوسط البني
+            # 💡 التعديل هنا: دمج سيناريو الـ Fakeout/Reclaim الذي ذكرته
             hit_lower_bull = (curr['low'] <= curr['bbl'] * tolerance_bb) or (prev['low'] <= prev['bbl'] * tolerance_bb)
-            rejection_bull = (curr['close'] > curr['open']) # إغلاق شمعة خضراء
+            # الشمعة خضراء، والأهم: أغلقت *داخل* القناة (فوق الخط السفلي) لتأكيد أن الكسر كان فخاً
+            rejection_bull = (curr['close'] > curr['open']) and (curr['close'] > curr['bbl']) 
             setup_long_from_bottom = hit_lower_bull and rejection_bull
             
-            # حالة 2: الارتداد من الخط الأوسط البني إلى الحد العلوي الأزرق
             hit_middle_bull = (curr['low'] <= curr['bbm'] * tolerance_bb) or (prev['low'] <= prev['bbm'] * tolerance_bb)
-            setup_long_from_middle = hit_middle_bull and rejection_bull and (curr['close'] > curr['bbm'])
+            setup_long_from_middle = hit_middle_bull and (curr['close'] > curr['open']) and (curr['close'] > curr['bbm'])
 
             # --- تحليل SHORT (البيع) ---
-            # حالة 1: الارتداد من الحد العلوي الأزرق إلى الخط الأوسط البني
             hit_upper_bear = (curr['high'] >= curr['bbu'] * tolerance_bb_inv) or (prev['high'] >= prev['bbu'] * tolerance_bb_inv)
-            rejection_bear = (curr['close'] < curr['open']) # إغلاق شمعة حمراء
+            # الشمعة حمراء، والأهم: أغلقت *داخل* القناة (تحت الخط العلوي)
+            rejection_bear = (curr['close'] < curr['open']) and (curr['close'] < curr['bbu'])
             setup_short_from_top = hit_upper_bear and rejection_bear
             
-            # حالة 2: الارتداد من الخط الأوسط البني إلى الحد السفلي الأزرق
             hit_middle_bear = (curr['high'] >= curr['bbm'] * tolerance_bb_inv) or (prev['high'] >= prev['bbm'] * tolerance_bb_inv)
-            setup_short_from_middle = hit_middle_bear and rejection_bear and (curr['close'] < curr['bbm'])
+            setup_short_from_middle = hit_middle_bear and (curr['close'] < curr['open']) and (curr['close'] < curr['bbm'])
             
             is_long = ("LONG" in btc_allowed_sides) and (setup_long_from_bottom or setup_long_from_middle)
             is_short = ("SHORT" in btc_allowed_sides) and (setup_short_from_top or setup_short_from_middle)
@@ -129,7 +128,6 @@ class StrategyEngine:
             side = "LONG" if is_long else "SHORT"
             atr = float(curr['atr'])
             
-            # الستوب لوز (تحت/فوق قاع أو قمة شمعة الرفض مباشرة)
             if side == "LONG":
                 lowest_point = min(curr['low'], prev['low'])
                 sl = lowest_point - (atr * 0.5)
@@ -143,17 +141,16 @@ class StrategyEngine:
             sl_distance_pct = (risk / entry) * 100
             if sl_distance_pct < 0.1 or sl_distance_pct > 10.0: return None 
             
-            # 💡 منطق الهدف الواحد والذكي (Single Target Logic)
             if side == "LONG":
                 if setup_long_from_bottom and not setup_long_from_middle:
-                    tp = float(curr['bbm']) # من الخارجي للأوسط
+                    tp = float(curr['bbm']) 
                 else:
-                    tp = float(curr['bbu']) # من الأوسط للخارجي
+                    tp = float(curr['bbu']) 
             else:
                 if setup_short_from_top and not setup_short_from_middle:
-                    tp = float(curr['bbm']) # من الخارجي للأوسط
+                    tp = float(curr['bbm']) 
                 else:
-                    tp = float(curr['bbl']) # من الأوسط للخارجي
+                    tp = float(curr['bbl']) 
             
             reward = abs(tp - entry)
             if reward < (entry * 0.005): return None 
@@ -161,14 +158,14 @@ class StrategyEngine:
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             pnl = StrategyEngine.calc_actual_roe(entry, tp, side, lev)
             
-            Log.print(f"🎯 {symbol}: Sniper Triggered!", Log.GREEN)
+            Log.print(f"🎯 {symbol}: Reclaim Pattern Triggered!", Log.GREEN)
             return {"symbol": symbol, "side": side, "entry": entry, "sl": sl, "tp": tp, "pnl": pnl, "leverage": lev}
         except Exception as e: 
             Log.print(f"Engine Error: {e}", Log.RED)
             return None
 
 # ==========================================
-# 3. نظام التداول الآمن (Trading System)
+# 3. نظام التداول الآمن
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -224,7 +221,6 @@ class TradingSystem:
         base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
         exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
         
-        # 💡 واجهة رسائل نظيفة تماماً وهدف واحد بدون كلمات استراتيجية
         msg = (
             f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
             f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
@@ -248,7 +244,6 @@ class TradingSystem:
         while self.running:
             try:
                 now_after = datetime.now(timezone.utc)
-                # رادار النصف ساعة الذكي والمقاوم للأرقام السالبة
                 minutes_to_wait = 30 - (now_after.minute % 30)
                 seconds_to_wait = (minutes_to_wait * 60) - now_after.second + 2 
                 Log.print(f"⏳ Next 30m Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
@@ -358,7 +353,6 @@ class TradingSystem:
                     wr = (wins / closed * 100) if closed > 0 else 0
                     avg_realized_rr = (self.stats.get('realized_rr', 0.0))
                     
-                    # 💡 تقرير يومي نظيف وخالٍ من المصطلحات الفنية
                     msg = (
                         f"📊 <b>Daily Report</b>\n━━━━━━━━━━━━━━━\n"
                         f"🎯 Signals: {self.stats.get('signals', 0)}\n🏆 Wins: {wins}\n"
@@ -388,7 +382,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V31.0 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V31.1 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
