@@ -23,7 +23,8 @@ class Config:
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg")
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TF_MACRO = '30m'    
+    TF_1 = '30m'    # فريم الزناد
+    TF_2 = '1h'     # فريم التأكيد الهيكلي
     TOP_COINS_LIMIT = 75 
     MAX_TRADES_AT_ONCE = 5 
     MIN_24H_VOLUME_USDT = 10_000_000 
@@ -31,9 +32,9 @@ class Config:
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 20 
     MAX_MARGIN_RISK_PCT = 15.0 
-    COOLDOWN_SECONDS = 1800 
-    STATE_FILE = "bot_state_v31_1.json"
-    VERSION = "V31.1 (Reclaim Master)"
+    COOLDOWN_SECONDS = 3600 
+    STATE_FILE = "bot_state_v35.json"
+    VERSION = "V35.0 (Omni-Matrix Perfected)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -67,7 +68,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (Dynamic Channel & Reclaim)
+# 2. محرك الاستراتيجية (Omni-Matrix Engine)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -76,64 +77,94 @@ class StrategyEngine:
         return float(((exit_price - entry) / entry) * 100.0 * lev) if side == "LONG" else float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def analyze_mtf(symbol, df_data, btc_allowed_sides):
+    def calc_linreg_channels(df_data):
+        df = pd.DataFrame(df_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        if len(df) < 110: return None
+        df['lsma'] = ta.linreg(df['close'], length=100)
+        df['stdev'] = ta.stdev(df['close'], length=100)
+        df['bbm'] = df['lsma'] 
+        df['bbl'] = df['lsma'] - (2 * df['stdev']) 
+        df['bbu'] = df['lsma'] + (2 * df['stdev']) 
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        df.dropna(inplace=True)
+        return df if len(df) >= 5 else None
+
+    @staticmethod
+    def analyze_mtf(symbol, df_30m_data, df_1h_data, btc_allowed_sides):
         try:
-            df = pd.DataFrame(df_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 110: return None 
+            df_30 = StrategyEngine.calc_linreg_channels(df_30m_data)
+            df_1h = StrategyEngine.calc_linreg_channels(df_1h_data)
             
-            # بناء القناة السعرية (LinReg 100, 2)
-            linreg_median = ta.linreg(df['close'], length=100)
-            linreg_std = ta.stdev(df['close'], length=100)
+            if df_30 is None or df_1h is None: return None
             
-            df['bbm'] = linreg_median 
-            df['bbl'] = linreg_median - (2 * linreg_std) 
-            df['bbu'] = linreg_median + (2 * linreg_std) 
+            curr_30 = df_30.iloc[-2] 
+            prev_30 = df_30.iloc[-3]
             
-            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            df.dropna(inplace=True)
-            if len(df) < 5: return None
+            curr_1h = df_1h.iloc[-2] 
+            prev_1h = df_1h.iloc[-3]
             
-            curr = df.iloc[-2] # الشمعة المغلقة لتوها
-            prev = df.iloc[-3] # الشمعة السابقة
-            
-            close_price = float(curr['close'])
-            tolerance_bb = 1.002
-            tolerance_bb_inv = 0.998
+            close_price = float(curr_30['close'])
+            tolerance = 1.002
+            tolerance_inv = 0.998
 
-            # --- تحليل LONG (الشراء) ---
-            # 💡 التعديل هنا: دمج سيناريو الـ Fakeout/Reclaim الذي ذكرته
-            hit_lower_bull = (curr['low'] <= curr['bbl'] * tolerance_bb) or (prev['low'] <= prev['bbl'] * tolerance_bb)
-            # الشمعة خضراء، والأهم: أغلقت *داخل* القناة (فوق الخط السفلي) لتأكيد أن الكسر كان فخاً
-            rejection_bull = (curr['close'] > curr['open']) and (curr['close'] > curr['bbl']) 
-            setup_long_from_bottom = hit_lower_bull and rejection_bull
-            
-            hit_middle_bull = (curr['low'] <= curr['bbm'] * tolerance_bb) or (prev['low'] <= prev['bbm'] * tolerance_bb)
-            setup_long_from_middle = hit_middle_bull and (curr['close'] > curr['open']) and (curr['close'] > curr['bbm'])
+            # ========================================================
+            # 🛡️ 1. بناء مستويات فريم الساعة (1H Structural Walls)
+            # ========================================================
+            h1_at_lower_band = (curr_1h['low'] <= curr_1h['bbl'] * tolerance) or (prev_1h['low'] <= prev_1h['bbl'] * tolerance)
+            h1_at_mid_support = ((curr_1h['low'] <= curr_1h['bbm'] * tolerance) and (curr_1h['close'] >= curr_1h['bbm'] * 0.998)) or ((prev_1h['low'] <= prev_1h['bbm'] * tolerance) and (prev_1h['close'] >= prev_1h['bbm'] * 0.998))
+            h1_major_support = h1_at_lower_band or h1_at_mid_support
 
-            # --- تحليل SHORT (البيع) ---
-            hit_upper_bear = (curr['high'] >= curr['bbu'] * tolerance_bb_inv) or (prev['high'] >= prev['bbu'] * tolerance_bb_inv)
-            # الشمعة حمراء، والأهم: أغلقت *داخل* القناة (تحت الخط العلوي)
-            rejection_bear = (curr['close'] < curr['open']) and (curr['close'] < curr['bbu'])
-            setup_short_from_top = hit_upper_bear and rejection_bear
-            
-            hit_middle_bear = (curr['high'] >= curr['bbm'] * tolerance_bb_inv) or (prev['high'] >= prev['bbm'] * tolerance_bb_inv)
-            setup_short_from_middle = hit_middle_bear and (curr['close'] < curr['open']) and (curr['close'] < curr['bbm'])
-            
-            is_long = ("LONG" in btc_allowed_sides) and (setup_long_from_bottom or setup_long_from_middle)
-            is_short = ("SHORT" in btc_allowed_sides) and (setup_short_from_top or setup_short_from_middle)
-            
+            h1_at_upper_band = (curr_1h['high'] >= curr_1h['bbu'] * tolerance_inv) or (prev_1h['high'] >= prev_1h['bbu'] * tolerance_inv)
+            h1_at_mid_resistance = ((curr_1h['high'] >= curr_1h['bbm'] * tolerance_inv) and (curr_1h['close'] <= curr_1h['bbm'] * 1.002)) or ((prev_1h['high'] >= prev_1h['bbm'] * tolerance_inv) and (prev_1h['close'] <= prev_1h['bbm'] * 1.002))
+            h1_major_resistance = h1_at_upper_band or h1_at_mid_resistance
+
+            # ========================================================
+            # 🎯 2. بناء زنادات فريم الـ 30 دقيقة (30m Execution Triggers)
+            # ========================================================
+            # شروط الصعود (Bullish Triggers)
+            m30_reclaim_low = ((curr_30['low'] <= curr_30['bbl'] * tolerance) or (prev_30['low'] <= prev_30['bbl'] * tolerance)) and (curr_30['close'] > curr_30['open']) and (curr_30['close'] > curr_30['bbl'])
+            m30_reclaim_mid = ((curr_30['low'] <= curr_30['bbm'] * tolerance) or (prev_30['low'] <= prev_30['bbm'] * tolerance)) and (curr_30['close'] > curr_30['open']) and (curr_30['close'] > curr_30['bbm'])
+            m30_breakout_up = (prev_30['high'] >= prev_30['bbu'] * tolerance_inv) and (curr_30['close'] > curr_30['open']) and (curr_30['close'] > curr_30['bbu'])
+
+            # شروط الهبوط (Bearish Triggers)
+            m30_reclaim_up = ((curr_30['high'] >= curr_30['bbu'] * tolerance_inv) or (prev_30['high'] >= prev_30['bbu'] * tolerance_inv)) and (curr_30['close'] < curr_30['open']) and (curr_30['close'] < curr_30['bbu'])
+            m30_reclaim_mid_bear = ((curr_30['high'] >= curr_30['bbm'] * tolerance_inv) or (prev_30['high'] >= prev_30['bbm'] * tolerance_inv)) and (curr_30['close'] < curr_30['open']) and (curr_30['close'] < curr_30['bbm'])
+            m30_breakdown_down = (prev_30['low'] <= prev_30['bbl'] * tolerance) and (curr_30['close'] < curr_30['open']) and (curr_30['close'] < curr_30['bbl'])
+
+            # ========================================================
+            # 🤝 3. مصفوفة الاحتمالات الكاملة (12 حالة دخول محكمة)
+            # ========================================================
+            # الحالات الست الكاملة للشراء (LONG)
+            long_1 = m30_reclaim_low and h1_at_lower_band       # قاع مزدوج مثالي
+            long_2 = m30_reclaim_low and h1_at_mid_support      # ارتداد قاع 30م من دعم منتصف الساعة
+            long_3 = m30_reclaim_mid and h1_at_lower_band       # ارتداد منتصف 30م بينما الساعة في القاع
+            long_4 = m30_reclaim_mid and h1_at_mid_support      # استمرار ترند صاعد على الفريمين
+            long_5 = m30_breakout_up and h1_at_mid_support      # اختراق حافة 30م مدعوم بزخم الساعة الصاعد
+            long_6 = m30_breakout_up and h1_at_lower_band       # بداية انفجار ترند صاعد جديد كلياً
+
+            is_long = ("LONG" in btc_allowed_sides) and (long_1 or long_2 or long_3 or long_4 or long_5 or long_6)
+
+            # الحالات الست الكاملة للبيع (SHORT)
+            short_1 = m30_reclaim_up and h1_at_upper_band       # قمة مزدوجة مثالية
+            short_2 = m30_reclaim_up and h1_at_mid_resistance    # ارتداد قمة 30م من مقاومة منتصف الساعة
+            short_3 = m30_reclaim_mid_bear and h1_at_upper_band # ارتداد منتصف 30م بينما الساعة في القمة
+            short_4 = m30_reclaim_mid_bear and h1_at_mid_resistance # استمرار ترند هابط على الفريمين
+            short_5 = m30_breakdown_down and h1_at_mid_resistance   # انهيار حافة 30م مدعوم بزخم الساعة الهابط
+            short_6 = m30_breakdown_down and h1_at_upper_band   # بداية انهيار ترند هابط جديد كلياً
+
+            is_short = ("SHORT" in btc_allowed_sides) and (short_1 or short_2 or short_3 or short_4 or short_5 or short_6)
+
             if not is_long and not is_short: return None
             
             entry = close_price
             side = "LONG" if is_long else "SHORT"
-            atr = float(curr['atr'])
+            atr = float(curr_30['atr'])
             
+            # الستوب لوز محمي خلف ذيول شمعة الارتداد في الـ 30 دقيقة
             if side == "LONG":
-                lowest_point = min(curr['low'], prev['low'])
-                sl = lowest_point - (atr * 0.5)
+                sl = min(curr_30['low'], prev_30['low']) - (atr * 0.5)
             else:
-                highest_point = max(curr['high'], prev['high'])
-                sl = highest_point + (atr * 0.5)
+                sl = max(curr_30['high'], prev_30['high']) + (atr * 0.5)
             
             risk = abs(entry - sl)
             if risk == 0: return None
@@ -141,31 +172,41 @@ class StrategyEngine:
             sl_distance_pct = (risk / entry) * 100
             if sl_distance_pct < 0.1 or sl_distance_pct > 10.0: return None 
             
+            # ========================================================
+            # 🎯 4. توجيه الأهداف الديناميكي والمحمي (Giant Candle Fix)
+            # ========================================================
             if side == "LONG":
-                if setup_long_from_bottom and not setup_long_from_middle:
-                    tp = float(curr['bbm']) 
-                else:
-                    tp = float(curr['bbu']) 
+                if m30_reclaim_low and (entry < curr_30['bbm']):
+                    tp = float(curr_30['bbm']) # هدف منطقي للخط الأوسط
+                elif entry < curr_30['bbu']:
+                    tp = float(curr_30['bbu']) # هدف نقل للعلوي (لأن الشمعة ابتلعت الأوسط)
+                else: 
+                    tp = entry + (atr * 2.0)   # اختراق للعلوي، هدف زخم حر
             else:
-                if setup_short_from_top and not setup_short_from_middle:
-                    tp = float(curr['bbm']) 
-                else:
-                    tp = float(curr['bbl']) 
+                if m30_reclaim_up and (entry > curr_30['bbm']):
+                    tp = float(curr_30['bbm']) # هدف منطقي للخط الأوسط
+                elif entry > curr_30['bbl']:
+                    tp = float(curr_30['bbl']) # هدف نقل للسفلي (لأن الشمعة ابتلعت الأوسط)
+                else: 
+                    tp = entry - (atr * 2.0)   # كسر للسفلي، هدف زخم حر
             
             reward = abs(tp - entry)
+            
+            # فلاتر الأمان المالية الصارمة لحماية المحفظة
             if reward < (entry * 0.005): return None 
+            if reward < (risk * 0.6): return None # فلتر نسبة العائد للمخاطرة (R:R Ratio)
             
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             pnl = StrategyEngine.calc_actual_roe(entry, tp, side, lev)
             
-            Log.print(f"🎯 {symbol}: Reclaim Pattern Triggered!", Log.GREEN)
+            Log.print(f"🎯 {symbol}: Matrix Core Signal Generated!", Log.GREEN)
             return {"symbol": symbol, "side": side, "entry": entry, "sl": sl, "tp": tp, "pnl": pnl, "leverage": lev}
         except Exception as e: 
             Log.print(f"Engine Error: {e}", Log.RED)
             return None
 
 # ==========================================
-# 3. نظام التداول الآمن
+# 3. نظام التداول الآمن والتحكم
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -221,6 +262,7 @@ class TradingSystem:
         base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
         exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
         
+        # 💡 رسائل تليجرام نظيفة كلياً 
         msg = (
             f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
             f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
@@ -244,9 +286,10 @@ class TradingSystem:
         while self.running:
             try:
                 now_after = datetime.now(timezone.utc)
+                # دالة حساب الوقت المحكمة لمنع الأرقام السالبة نهائياً طوال الـ 24 ساعة
                 minutes_to_wait = 30 - (now_after.minute % 30)
                 seconds_to_wait = (minutes_to_wait * 60) - now_after.second + 2 
-                Log.print(f"⏳ Next 30m Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
+                Log.print(f"⏳ Next Matrix Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
                 await asyncio.sleep(seconds_to_wait)
 
                 current_time = int(datetime.now(timezone.utc).timestamp())
@@ -257,21 +300,22 @@ class TradingSystem:
                 tickers = await self.exchange.fetch_tickers()
                 scan_list = [c for c in tickers.keys() if 'USDT:USDT' in c and c not in self.active_trades and c not in self.cooldown_list]
                 
-                Log.print(f"🔍 30m Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
+                Log.print(f"🔍 Matrix Pulse Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
 
-                sem = asyncio.Semaphore(10)
-                async def fetch_pair_data(sym):
+                sem = asyncio.Semaphore(5) 
+                async def fetch_dual_tf(sym):
                     async with sem:
-                        res = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=150) 
-                        return sym, res
+                        res_30 = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_1, limit=150)
+                        res_1h = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_2, limit=150)
+                        return sym, res_30, res_1h
 
-                tasks = [fetch_pair_data(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
+                tasks = [fetch_dual_tf(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
                 results = await asyncio.gather(*tasks)
 
-                for sym, res in results:
+                for sym, res_30, res_1h in results:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    if not res: continue
-                    analysis = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, res, btc_allowed)
+                    if not res_30 or not res_1h: continue
+                    analysis = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, res_30, res_1h, btc_allowed)
                     if analysis: await self.execute_trade(analysis)
                 gc.collect()
             except Exception as e:
@@ -382,7 +426,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V31.1 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V35.0 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
