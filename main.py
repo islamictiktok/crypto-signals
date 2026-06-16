@@ -23,8 +23,9 @@ class Config:
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg")
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TF_1 = '30m'    
-    TF_2 = '1h'     
+    TF_1 = '15m'    # فريم الدخول (الزناد)
+    TF_2 = '1h'     # فريم التأكيد
+    TF_3 = '4h'     # فريم الاتجاه العام
     TOP_COINS_LIMIT = 75 
     MAX_TRADES_AT_ONCE = 5 
     MIN_24H_VOLUME_USDT = 10_000_000 
@@ -33,8 +34,8 @@ class Config:
     MAX_LEVERAGE_CAP = 20 
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v36_1.json"
-    VERSION = "V36.1 (Omni-Matrix Pro)"
+    STATE_FILE = "bot_state_v38.json"
+    VERSION = "V38.1 (Pure LinReg + MACD Core - Ultra Stable)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -46,7 +47,7 @@ class Log:
 async def fetch_with_retry(coro, *args, retries=3, delay=1.5, **kwargs):
     for i in range(retries):
         try: return await coro(*args, **kwargs)
-        except: 
+        except Exception as e: 
             if i == retries - 1: return None
             await asyncio.sleep(delay)
 
@@ -55,20 +56,24 @@ class TelegramNotifier:
         self.base_url = f"https://api.telegram.org/bot{Config.TELEGRAM_TOKEN}/sendMessage"
         self.session = None
     async def start(self): 
-        if not self.session: self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+        if not self.session or self.session.closed: 
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
     async def stop(self): 
-        if self.session: await self.session.close()
+        if self.session and not self.session.closed: 
+            await self.session.close()
     async def send(self, text, reply_to=None):
-        if not self.session: await self.start()
-        payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-        if reply_to: payload["reply_to_message_id"] = reply_to
         try:
+            await self.start()
+            payload = {"chat_id": Config.CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+            if reply_to: payload["reply_to_message_id"] = reply_to
             async with self.session.post(self.base_url, json=payload) as resp:
-                return (await resp.json()).get('result', {}).get('message_id') if resp.status == 200 else None
+                if resp.status == 200:
+                    return (await resp.json()).get('result', {}).get('message_id')
+                return None
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (Quantum Confidence Engine)
+# 2. محرك الاستراتيجية (Pure LinReg & MACD)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -77,145 +82,117 @@ class StrategyEngine:
         return float(((exit_price - entry) / entry) * 100.0 * lev) if side == "LONG" else float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def calc_indicators(df_data):
-        df = pd.DataFrame(df_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        # 💡 تم رفع التحقق ليتناسب مع الحد الجديد (limit=200)
-        if len(df) < 150: return None
-        
-        df['lsma'] = ta.linreg(df['close'], length=100)
-        df['stdev'] = ta.stdev(df['close'], length=100)
-        df['bbm'] = df['lsma'] 
-        df['bbl'] = df['lsma'] - (2 * df['stdev']) 
-        df['bbu'] = df['lsma'] + (2 * df['stdev']) 
-        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-        
-        df['ema20'] = ta.ema(df['close'], length=20)
-        df['ema50'] = ta.ema(df['close'], length=50)
-        adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
-        df['adx'] = adx_df['ADX_14'] if adx_df is not None and not adx_df.empty else 0
-        
-        df.dropna(inplace=True)
-        return df if len(df) >= 5 else None
+    def calc_indicators(df_data, linreg_len=50):
+        try:
+            df = pd.DataFrame(df_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            if len(df) < 150: return None
+            
+            # 1. Linear Regression
+            df['lsma'] = ta.linreg(df['close'], length=linreg_len)
+            df['stdev'] = ta.stdev(df['close'], length=linreg_len)
+            df['bbu'] = df['lsma'] + (2 * df['stdev']) 
+            df['bbl'] = df['lsma'] - (2 * df['stdev']) 
+            
+            # الميل (Slope)
+            df['slope'] = df['lsma'] - df['lsma'].shift(1)
+            
+            # 2. MACD (12, 26, 9)
+            macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+            if macd is not None and not macd.empty:
+                df['macd'] = macd.iloc[:, 0]    # MACD Line
+                df['macdh'] = macd.iloc[:, 1]   # Histogram
+                df['macds'] = macd.iloc[:, 2]   # Signal Line
+            else:
+                return None
+                
+            # 3. Volume & ATR
+            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            df['vol_sma'] = ta.sma(df['vol'], length=20)
+            
+            df.dropna(inplace=True)
+            return df if len(df) >= 5 else None
+        except Exception:
+            return None
 
     @staticmethod
-    def analyze_mtf(symbol, df_30m_data, df_1h_data, btc_allowed_sides):
+    def analyze_mtf(symbol, df_15m_data, df_1h_data, df_4h_data, btc_allowed_sides):
         try:
-            df_30 = StrategyEngine.calc_indicators(df_30m_data)
-            df_1h = StrategyEngine.calc_indicators(df_1h_data)
+            df_15m = StrategyEngine.calc_indicators(df_15m_data, linreg_len=50)
+            df_1h = StrategyEngine.calc_indicators(df_1h_data, linreg_len=50)
+            df_4h = StrategyEngine.calc_indicators(df_4h_data, linreg_len=50)
             
-            if df_30 is None or df_1h is None: return None
+            if df_15m is None or df_1h is None or df_4h is None: return None
             
-            curr_30 = df_30.iloc[-2] 
-            prev_30 = df_30.iloc[-3]
+            curr_15m = df_15m.iloc[-2] 
+            prev_15m = df_15m.iloc[-3]
             
             curr_1h = df_1h.iloc[-2] 
-            prev_1h = df_1h.iloc[-3]
+            curr_4h = df_4h.iloc[-2]
             
-            close_price = float(curr_30['close'])
+            entry = float(curr_15m['close'])
             tolerance = 1.002
             tolerance_inv = 0.998
 
             # ========================================================
-            # 🛡️ 1. فلتر الاتجاه المعزز
+            # 🔍 أولاً: تحديد الاتجاه العام (4H & 1H Trend)
             # ========================================================
-            h1_adx = float(curr_1h['adx'])
+            is_flat_4h = abs(curr_4h['slope']) < (curr_4h['close'] * 0.0001)
+            is_flat_1h = abs(curr_1h['slope']) < (curr_1h['close'] * 0.0001)
             
-            is_sideways = h1_adx < 20  
-            is_uptrend = (curr_1h['ema20'] > curr_1h['ema50']) and (curr_1h['close'] > curr_1h['ema20']) and not is_sideways
-            is_downtrend = (curr_1h['ema20'] < curr_1h['ema50']) and (curr_1h['close'] < curr_1h['ema20']) and not is_sideways
+            if is_flat_4h or is_flat_1h: return None
 
-            if is_sideways: return None 
-
-            # ========================================================
-            # 🧱 2. مستويات فريم الساعة 
-            # ========================================================
-            h1_at_lower_band = (curr_1h['low'] <= curr_1h['bbl'] * tolerance) or (prev_1h['low'] <= prev_1h['bbl'] * tolerance)
-            h1_at_mid_support = ((curr_1h['low'] <= curr_1h['bbm'] * tolerance) and (curr_1h['close'] >= curr_1h['bbm'] * 0.998))
-
-            h1_at_upper_band = (curr_1h['high'] >= curr_1h['bbu'] * tolerance_inv) or (prev_1h['high'] >= prev_1h['bbu'] * tolerance_inv)
-            h1_at_mid_resistance = ((curr_1h['high'] >= curr_1h['bbm'] * tolerance_inv) and (curr_1h['close'] <= curr_1h['bbm'] * 1.002))
+            trend_up = (curr_4h['slope'] > 0) and (curr_1h['slope'] > 0)
+            trend_down = (curr_4h['slope'] < 0) and (curr_1h['slope'] < 0)
 
             # ========================================================
-            # 🎯 3. زنادات فريم الـ 30 دقيقة 
+            # 📈 ثانياً: تأكيد الـ MACD والفوليوم (15m Momentum)
             # ========================================================
-            m30_reclaim_low = ((curr_30['low'] <= curr_30['bbl'] * tolerance) or (prev_30['low'] <= prev_30['bbl'] * tolerance)) and (curr_30['close'] > curr_30['open']) and (curr_30['close'] > curr_30['bbl'])
-            m30_reclaim_mid_bull = ((curr_30['low'] <= curr_30['bbm'] * tolerance) or (prev_30['low'] <= prev_30['bbm'] * tolerance)) and (curr_30['close'] > curr_30['open']) and (curr_30['close'] > curr_30['bbm'])
-            m30_breakout_up = (prev_30['high'] >= prev_30['bbu'] * tolerance_inv) and (curr_30['close'] > curr_30['open']) and (curr_30['close'] > curr_30['bbu'])
+            macd_bull_cross = (prev_15m['macd'] <= prev_15m['macds']) and (curr_15m['macd'] > curr_15m['macds'])
+            macd_bear_cross = (prev_15m['macd'] >= prev_15m['macds']) and (curr_15m['macd'] < curr_15m['macds'])
+            
+            hist_bull = (curr_15m['macdh'] > 0) and (curr_15m['macdh'] > prev_15m['macdh'])
+            hist_bear = (curr_15m['macdh'] < 0) and (curr_15m['macdh'] < prev_15m['macdh'])
 
-            m30_reclaim_up = ((curr_30['high'] >= curr_30['bbu'] * tolerance_inv) or (prev_30['high'] >= prev_30['bbu'] * tolerance_inv)) and (curr_30['close'] < curr_30['open']) and (curr_30['close'] < curr_30['bbu'])
-            m30_reclaim_mid_bear = ((curr_30['high'] >= curr_30['bbm'] * tolerance_inv) or (prev_30['high'] >= prev_30['bbm'] * tolerance_inv)) and (curr_30['close'] < curr_30['open']) and (curr_30['close'] < curr_30['bbm'])
-            m30_breakdown_down = (prev_30['low'] <= prev_30['bbl'] * tolerance) and (curr_30['close'] < curr_30['open']) and (curr_30['close'] < curr_30['bbl'])
+            macd_below_zero = curr_15m['macd'] <= 0.001
+            macd_above_zero = curr_15m['macd'] >= -0.001
+
+            vol_supports = curr_15m['vol'] > curr_15m['vol_sma']
 
             # ========================================================
-            # 💯 4. محرك الثقة الكوانتي 
+            # 🎯 ثالثاً: سيناريوهات الدخول (Price Action Setups)
             # ========================================================
-            long_1 = m30_reclaim_low and h1_at_lower_band       
-            long_2 = m30_reclaim_low and h1_at_mid_support      
-            long_3 = m30_reclaim_mid_bull and h1_at_lower_band  
-            long_4 = m30_reclaim_mid_bull and h1_at_mid_support 
-            long_5 = m30_breakout_up and h1_at_mid_support      
-            long_6 = m30_breakout_up and h1_at_lower_band       
+            is_long = False
+            is_short = False
 
-            short_1 = m30_reclaim_up and h1_at_upper_band       
-            short_2 = m30_reclaim_up and h1_at_mid_resistance   
-            short_3 = m30_reclaim_mid_bear and h1_at_upper_band 
-            short_4 = m30_reclaim_mid_bear and h1_at_mid_resistance 
-            short_5 = m30_breakdown_down and h1_at_mid_resistance   
-            short_6 = m30_breakdown_down and h1_at_upper_band   
+            if ("LONG" in btc_allowed_sides) and trend_up and (curr_15m['slope'] > 0):
+                pullback_long = (curr_15m['low'] <= curr_15m['lsma'] * tolerance) and (curr_15m['close'] >= curr_15m['lsma'])
+                breakout_long = (prev_15m['close'] < prev_15m['lsma']) and (curr_15m['close'] > curr_15m['lsma'])
+                
+                if (pullback_long or breakout_long) and macd_bull_cross and hist_bull and macd_below_zero and vol_supports:
+                    is_long = True
 
-            base_score = 0
-            is_long_signal = False
-            is_short_signal = False
-
-            if long_1: base_score = 60; is_long_signal = True
-            elif long_2 or long_3: base_score = 45; is_long_signal = True
-            elif long_5 or long_6: base_score = 40; is_long_signal = True
-            elif long_4: base_score = 20; is_long_signal = True
-
-            if short_1: base_score = 60; is_short_signal = True
-            elif short_2 or short_3: base_score = 45; is_short_signal = True
-            elif short_5 or short_6: base_score = 40; is_short_signal = True
-            elif short_4: base_score = 20; is_short_signal = True
-
-            is_long = ("LONG" in btc_allowed_sides) and is_long_signal and is_uptrend
-            is_short = ("SHORT" in btc_allowed_sides) and is_short_signal and is_downtrend
+            if ("SHORT" in btc_allowed_sides) and trend_down and (curr_15m['slope'] < 0):
+                pullback_short = (curr_15m['high'] >= curr_15m['lsma'] * tolerance_inv) and (curr_15m['close'] <= curr_15m['lsma'])
+                breakdown_short = (prev_15m['close'] > prev_15m['lsma']) and (curr_15m['close'] < curr_15m['lsma'])
+                
+                if (pullback_short or breakdown_short) and macd_bear_cross and hist_bear and macd_above_zero and vol_supports:
+                    is_short = True
 
             if not is_long and not is_short: return None
 
-            bonus = 0
-            penalty = 0
-
-            candle_range = curr_30['high'] - curr_30['low']
-            if candle_range > 0:
-                if is_long:
-                    lower_wick = min(curr_30['open'], curr_30['close']) - curr_30['low']
-                    if (lower_wick / candle_range) >= 0.5: bonus += 20 
-                else:
-                    upper_wick = curr_30['high'] - max(curr_30['open'], curr_30['close'])
-                    if (upper_wick / candle_range) >= 0.5: bonus += 20 
-                
-                body = abs(curr_30['close'] - curr_30['open'])
-                if (body / candle_range) < 0.15: penalty += 15
-
-            if curr_30['atr'] > prev_30['atr']: bonus += 20
-            if curr_30['adx'] < 20: penalty += 20
-
-            confidence = max(0, min(100, base_score + bonus - penalty))
-
-            if confidence < 75: return None 
-
             # ========================================================
-            # 🎯 5. الحسابات النهائية 
+            # 🛑 رابعاً: الستوب لوز والأهداف (Risk Management)
             # ========================================================
-            entry = close_price
             side = "LONG" if is_long else "SHORT"
-            atr = float(curr_30['atr'])
+            atr = float(curr_15m['atr'])
             
             if side == "LONG":
-                sl = min(curr_30['low'], prev_30['low']) - (atr * 0.5)
+                sl = curr_15m['lsma'] - (1.5 * atr)
+                if sl >= entry: sl = curr_15m['low'] - (1.0 * atr)
             else:
-                sl = max(curr_30['high'], prev_30['high']) + (atr * 0.5)
-            
+                sl = curr_15m['lsma'] + (1.5 * atr)
+                if sl <= entry: sl = curr_15m['high'] + (1.0 * atr)
+
             risk = abs(entry - sl)
             if risk == 0: return None
             
@@ -223,36 +200,28 @@ class StrategyEngine:
             if sl_distance_pct < 0.1 or sl_distance_pct > 10.0: return None 
             
             if side == "LONG":
-                if m30_reclaim_low and (entry < curr_30['bbm']):
-                    tp = float(curr_30['bbm']) 
-                elif entry < curr_30['bbu']:
-                    tp = float(curr_30['bbu']) 
-                else: 
-                    tp = entry + (atr * 2.0)   
+                target_rr = entry + (risk * 2.0)
+                target_channel = float(curr_15m['bbu'])
+                tp = max(target_rr, target_channel)
             else:
-                if m30_reclaim_up and (entry > curr_30['bbm']):
-                    tp = float(curr_30['bbm']) 
-                elif entry > curr_30['bbl']:
-                    tp = float(curr_30['bbl']) 
-                else: 
-                    tp = entry - (atr * 2.0)   
+                target_rr = entry - (risk * 2.0)
+                target_channel = float(curr_15m['bbl'])
+                tp = min(target_rr, target_channel)
             
             reward = abs(tp - entry)
-            if reward < (entry * 0.005): return None 
-            if reward < (risk * 0.6): return None 
+            if reward < (risk * 1.8): return None 
             
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             pnl = StrategyEngine.calc_actual_roe(entry, tp, side, lev)
             
-            Log.print(f"🎯 {symbol}: Signal Generated! [Confidence: {int(confidence)}%]", Log.GREEN)
+            Log.print(f"🎯 {symbol}: LinReg+MACD Core Signal Generated!", Log.GREEN)
             
             return {
                 "symbol": symbol, "side": side, "entry": entry, 
-                "sl": sl, "tp": tp, "pnl": pnl, "leverage": lev, 
-                "confidence": confidence # 💡 تم تمرير الثقة للعرض
+                "sl": sl, "tp": tp, "pnl": pnl, "leverage": lev
             }
         except Exception as e: 
-            Log.print(f"Engine Error: {e}", Log.RED)
+            # أي خطأ صامت أثناء حساب المؤشرات لا يوقف السيرفر
             return None
 
 # ==========================================
@@ -290,9 +259,12 @@ class TradingSystem:
     async def initialize(self):
         await self.tg.start()
         Log.print("🔄 Loading Markets from MEXC...", Log.YELLOW)
-        await self.exchange.load_markets()
-        self.load_state() 
-        Log.print(f"🚀 ENGINE ONLINE: {Config.VERSION}", Log.GREEN)
+        try:
+            await self.exchange.load_markets()
+            self.load_state() 
+            Log.print(f"🚀 ENGINE ONLINE: {Config.VERSION}", Log.GREEN)
+        except Exception as e:
+            Log.print(f"Error loading markets: {e}", Log.RED)
 
     async def shutdown(self):
         self.running = False
@@ -313,11 +285,8 @@ class TradingSystem:
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
             
-            # 💡 إضافة الـ Confidence Score لرسالة التليجرام
-            conf = int(trade.get('confidence', 0))
             msg = (
                 f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
-                f"🧠 Confidence: <b>{conf}%</b>\n"
                 f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
                 f"💰 Entry: <code>{trade['entry']}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
@@ -342,7 +311,7 @@ class TradingSystem:
         while self.running:
             try:
                 now_after = datetime.now(timezone.utc)
-                minutes_to_wait = 30 - (now_after.minute % 30)
+                minutes_to_wait = 15 - (now_after.minute % 15)
                 seconds_to_wait = (minutes_to_wait * 60) - now_after.second + 2 
                 Log.print(f"⏳ Next Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
                 await asyncio.sleep(seconds_to_wait)
@@ -352,31 +321,44 @@ class TradingSystem:
                 for k in keys_to_delete: del self.cooldown_list[k]
 
                 btc_allowed = await self.get_btc_allowed_sides()
-                tickers = await self.exchange.fetch_tickers()
+                
+                try:
+                    tickers = await self.exchange.fetch_tickers()
+                except Exception as fetch_err:
+                    Log.print(f"Failed to fetch tickers: {fetch_err}", Log.RED)
+                    await asyncio.sleep(10)
+                    continue
+
                 scan_list = [c for c in tickers.keys() if 'USDT:USDT' in c and c not in self.active_trades and c not in self.cooldown_list]
                 
-                Log.print(f"🔍 Matrix Pulse Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
+                Log.print(f"🔍 LinReg+MACD Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
 
-                sem = asyncio.Semaphore(5) 
-                async def fetch_dual_tf(sym):
+                # حماية الشبكة - طلب 4 عملات بالتزامن كحد أقصى لمنع الحظر
+                sem = asyncio.Semaphore(4) 
+                async def fetch_multi_tf(sym):
                     async with sem:
-                        # 💡 تم رفع الـ Limit إلى 200 لتسخين المؤشرات
-                        res_30 = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_1, limit=200)
+                        res_15 = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_1, limit=200)
                         res_1h = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_2, limit=200)
-                        return sym, res_30, res_1h
+                        res_4h = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_3, limit=200)
+                        return sym, res_15, res_1h, res_4h
 
-                tasks = [fetch_dual_tf(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
-                results = await asyncio.gather(*tasks)
+                tasks = [fetch_multi_tf(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                for sym, res_30, res_1h in results:
+                for res in results:
+                    if isinstance(res, Exception) or not res: continue
+                    sym, res_15, res_1h, res_4h = res
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    if not res_30 or not res_1h: continue
-                    analysis = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, res_30, res_1h, btc_allowed)
+                    if not res_15 or not res_1h or not res_4h: continue
+                    
+                    # 💡 تشغيل الحسابات الرياضية في Thread منفصل لمنع تجميد السيرفر
+                    analysis = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, res_15, res_1h, res_4h, btc_allowed)
                     if analysis: await self.execute_trade(analysis)
+                
                 gc.collect()
             except Exception as e:
-                Log.print(f"Scan Loop Error: {e}", Log.RED)
-                await asyncio.sleep(5)
+                Log.print(f"Scan Loop Critical Error: {e}", Log.RED)
+                await asyncio.sleep(10)
 
     async def monitor_open_trades(self):
         while self.running:
@@ -482,7 +464,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V36.1 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V38.1 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
