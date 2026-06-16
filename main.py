@@ -24,7 +24,7 @@ class Config:
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     TF_1 = '15m'    # فريم الدخول (الزناد)
-    TF_2 = '1h'     # فريم التأكيد
+    TF_2 = '1h'     # فريم التأكيد (زخم واتجاه)
     TF_3 = '4h'     # فريم الاتجاه العام
     TOP_COINS_LIMIT = 75 
     MAX_TRADES_AT_ONCE = 5 
@@ -34,8 +34,8 @@ class Config:
     MAX_LEVERAGE_CAP = 20 
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v38.json"
-    VERSION = "V38.1 (Pure LinReg + MACD Core - Ultra Stable)"
+    STATE_FILE = "bot_state_v40.json"
+    VERSION = "V40.0 (HFT-Lite Master Edition)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -47,7 +47,7 @@ class Log:
 async def fetch_with_retry(coro, *args, retries=3, delay=1.5, **kwargs):
     for i in range(retries):
         try: return await coro(*args, **kwargs)
-        except Exception as e: 
+        except Exception: 
             if i == retries - 1: return None
             await asyncio.sleep(delay)
 
@@ -73,7 +73,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (Pure LinReg & MACD)
+# 2. محرك الاستراتيجية (HFT-Lite Logic)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -87,28 +87,43 @@ class StrategyEngine:
             df = pd.DataFrame(df_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df) < 150: return None
             
-            # 1. Linear Regression
+            # 1. Linear Regression (True Channel)
             df['lsma'] = ta.linreg(df['close'], length=linreg_len)
             df['stdev'] = ta.stdev(df['close'], length=linreg_len)
             df['bbu'] = df['lsma'] + (2 * df['stdev']) 
             df['bbl'] = df['lsma'] - (2 * df['stdev']) 
             
-            # الميل (Slope)
+            # 🔥 الإصلاح 1: R-Squared آمن و Normalized Slope
             df['slope'] = df['lsma'] - df['lsma'].shift(1)
+            df['norm_slope'] = (df['slope'] / df['close']) * 100
             
-            # 2. MACD (12, 26, 9)
+            x = pd.Series(range(len(df)), index=df.index)
+            corr = df['close'].rolling(linreg_len).corr(x)
+            df['r_sq'] = corr.fillna(0) ** 2 # حماية من الـ NaN
+            
+            # 🔥 الإصلاح 3: Market Regime (Bollinger Width Squeeze)
+            bb = ta.bbands(df['close'], length=20, std=2)
+            if bb is not None and not bb.empty:
+                df['bbw'] = (bb.iloc[:, 2] - bb.iloc[:, 0]) / bb.iloc[:, 1] # Width
+                df['bbw_sma'] = ta.sma(df['bbw'], length=20)
+            else:
+                df['bbw'] = 0
+                df['bbw_sma'] = 0
+
+            # 2. Volume Filter
+            df['vol_sma'] = ta.sma(df['vol'], length=20)
+            
+            # 3. MACD
             macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
             if macd is not None and not macd.empty:
-                df['macd'] = macd.iloc[:, 0]    # MACD Line
-                df['macdh'] = macd.iloc[:, 1]   # Histogram
-                df['macds'] = macd.iloc[:, 2]   # Signal Line
+                df['macd'] = macd.iloc[:, 0]    
+                df['macdh'] = macd.iloc[:, 1]   
+                df['macds'] = macd.iloc[:, 2]   
             else:
                 return None
                 
-            # 3. Volume & ATR
+            # 4. ATR
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            df['vol_sma'] = ta.sma(df['vol'], length=20)
-            
             df.dropna(inplace=True)
             return df if len(df) >= 5 else None
         except Exception:
@@ -127,6 +142,8 @@ class StrategyEngine:
             prev_15m = df_15m.iloc[-3]
             
             curr_1h = df_1h.iloc[-2] 
+            prev_1h = df_1h.iloc[-3]
+            
             curr_4h = df_4h.iloc[-2]
             
             entry = float(curr_15m['close'])
@@ -134,61 +151,68 @@ class StrategyEngine:
             tolerance_inv = 0.998
 
             # ========================================================
-            # 🔍 أولاً: تحديد الاتجاه العام (4H & 1H Trend)
+            # 🔥 1. فلتر الأسواق العرضية والانفجار (Market Regime)
             # ========================================================
-            is_flat_4h = abs(curr_4h['slope']) < (curr_4h['close'] * 0.0001)
-            is_flat_1h = abs(curr_1h['slope']) < (curr_1h['close'] * 0.0001)
-            
-            if is_flat_4h or is_flat_1h: return None
+            # R-Squared والميل للـ 4H والـ 1H
+            is_choppy_4h = (curr_4h['r_sq'] < 0.4) or (abs(curr_4h['norm_slope']) < 0.03)
+            is_choppy_1h = (curr_1h['r_sq'] < 0.4) or (abs(curr_1h['norm_slope']) < 0.03)
+            if is_choppy_4h or is_choppy_1h: return None
 
-            trend_up = (curr_4h['slope'] > 0) and (curr_1h['slope'] > 0)
-            trend_down = (curr_4h['slope'] < 0) and (curr_1h['slope'] < 0)
+            trend_up = (curr_4h['norm_slope'] > 0) and (curr_1h['norm_slope'] > 0)
+            trend_down = (curr_4h['norm_slope'] < 0) and (curr_1h['norm_slope'] < 0)
 
-            # ========================================================
-            # 📈 ثانياً: تأكيد الـ MACD والفوليوم (15m Momentum)
-            # ========================================================
-            macd_bull_cross = (prev_15m['macd'] <= prev_15m['macds']) and (curr_15m['macd'] > curr_15m['macds'])
-            macd_bear_cross = (prev_15m['macd'] >= prev_15m['macds']) and (curr_15m['macd'] < curr_15m['macds'])
-            
-            hist_bull = (curr_15m['macdh'] > 0) and (curr_15m['macdh'] > prev_15m['macdh'])
-            hist_bear = (curr_15m['macdh'] < 0) and (curr_15m['macdh'] < prev_15m['macdh'])
-
-            macd_below_zero = curr_15m['macd'] <= 0.001
-            macd_above_zero = curr_15m['macd'] >= -0.001
-
-            vol_supports = curr_15m['vol'] > curr_15m['vol_sma']
+            # فلتر تمدد التقلبات (Volatility Expansion)
+            # يجب أن يكون البولينجر باند في مرحلة تمدد بعد الخنق (Squeeze Breakout)
+            volatility_expansion = curr_15m['bbw'] > curr_15m['bbw_sma']
 
             # ========================================================
-            # 🎯 ثالثاً: سيناريوهات الدخول (Price Action Setups)
+            # 🔥 2. الدخول المبكر للماكد والمحاذاة (Early MACD & Alignment)
+            # ========================================================
+            # الدخول مع بداية تغير الهيستوجرام على الـ 15 دقيقة (Early Timing)
+            m15_macd_bull_early = curr_15m['macdh'] > prev_15m['macdh']
+            m15_macd_bear_early = curr_15m['macdh'] < prev_15m['macdh']
+
+            # تأكيد زخم فريم الساعة لتقليل ضوضاء الـ 15m (Multi-TF Momentum)
+            h1_macd_bull_align = curr_1h['macdh'] >= prev_1h['macdh']
+            h1_macd_bear_align = curr_1h['macdh'] <= prev_1h['macdh']
+
+            # تأكيد الفوليوم
+            vol_ok = curr_15m['vol'] > curr_15m['vol_sma']
+
+            # ========================================================
+            # 🎯 3. سيناريوهات البرايس أكشن (Entry Logic)
             # ========================================================
             is_long = False
             is_short = False
 
-            if ("LONG" in btc_allowed_sides) and trend_up and (curr_15m['slope'] > 0):
+            if ("LONG" in btc_allowed_sides) and trend_up and (curr_15m['norm_slope'] > 0):
                 pullback_long = (curr_15m['low'] <= curr_15m['lsma'] * tolerance) and (curr_15m['close'] >= curr_15m['lsma'])
                 breakout_long = (prev_15m['close'] < prev_15m['lsma']) and (curr_15m['close'] > curr_15m['lsma'])
                 
-                if (pullback_long or breakout_long) and macd_bull_cross and hist_bull and macd_below_zero and vol_supports:
+                # تجميع شروط النخبة
+                if (pullback_long or breakout_long) and m15_macd_bull_early and h1_macd_bull_align and vol_ok and volatility_expansion:
                     is_long = True
 
-            if ("SHORT" in btc_allowed_sides) and trend_down and (curr_15m['slope'] < 0):
+            if ("SHORT" in btc_allowed_sides) and trend_down and (curr_15m['norm_slope'] < 0):
                 pullback_short = (curr_15m['high'] >= curr_15m['lsma'] * tolerance_inv) and (curr_15m['close'] <= curr_15m['lsma'])
                 breakdown_short = (prev_15m['close'] > prev_15m['lsma']) and (curr_15m['close'] < curr_15m['lsma'])
                 
-                if (pullback_short or breakdown_short) and macd_bear_cross and hist_bear and macd_above_zero and vol_supports:
+                # تجميع شروط النخبة
+                if (pullback_short or breakdown_short) and m15_macd_bear_early and h1_macd_bear_align and vol_ok and volatility_expansion:
                     is_short = True
 
             if not is_long and not is_short: return None
 
             # ========================================================
-            # 🛑 رابعاً: الستوب لوز والأهداف (Risk Management)
+            # 🛑 4. إدارة المخاطر (Risk Management)
             # ========================================================
             side = "LONG" if is_long else "SHORT"
             atr = float(curr_15m['atr'])
             
+            # الستوب لوز أسفل/أعلى القناة مع مساحة للتنفس
             if side == "LONG":
                 sl = curr_15m['lsma'] - (1.5 * atr)
-                if sl >= entry: sl = curr_15m['low'] - (1.0 * atr)
+                if sl >= entry: sl = curr_15m['low'] - (1.0 * atr) 
             else:
                 sl = curr_15m['lsma'] + (1.5 * atr)
                 if sl <= entry: sl = curr_15m['high'] + (1.0 * atr)
@@ -199,6 +223,7 @@ class StrategyEngine:
             sl_distance_pct = (risk / entry) * 100
             if sl_distance_pct < 0.1 or sl_distance_pct > 10.0: return None 
             
+            # الأهداف: R:R 1:2 أو حد القناة العلوي/السفلي (الأبعد)
             if side == "LONG":
                 target_rr = entry + (risk * 2.0)
                 target_channel = float(curr_15m['bbu'])
@@ -214,14 +239,13 @@ class StrategyEngine:
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             pnl = StrategyEngine.calc_actual_roe(entry, tp, side, lev)
             
-            Log.print(f"🎯 {symbol}: LinReg+MACD Core Signal Generated!", Log.GREEN)
+            Log.print(f"🎯 {symbol}: HFT-Lite Master Signal!", Log.GREEN)
             
             return {
                 "symbol": symbol, "side": side, "entry": entry, 
                 "sl": sl, "tp": tp, "pnl": pnl, "leverage": lev
             }
         except Exception as e: 
-            # أي خطأ صامت أثناء حساب المؤشرات لا يوقف السيرفر
             return None
 
 # ==========================================
@@ -305,7 +329,7 @@ class TradingSystem:
             self.save_state()
             Log.print(f"🚀 SIGNAL SENT: {exact_app_name}", Log.GREEN)
         except Exception as e:
-            Log.print(f"Execute Trade Error for {trade.get('symbol', 'Unknown')}: {e}", Log.RED)
+            pass
 
     async def scan_market(self):
         while self.running:
@@ -324,16 +348,14 @@ class TradingSystem:
                 
                 try:
                     tickers = await self.exchange.fetch_tickers()
-                except Exception as fetch_err:
-                    Log.print(f"Failed to fetch tickers: {fetch_err}", Log.RED)
+                except:
                     await asyncio.sleep(10)
                     continue
 
                 scan_list = [c for c in tickers.keys() if 'USDT:USDT' in c and c not in self.active_trades and c not in self.cooldown_list]
                 
-                Log.print(f"🔍 LinReg+MACD Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
+                Log.print(f"🔍 Matrix Pro Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
 
-                # حماية الشبكة - طلب 4 عملات بالتزامن كحد أقصى لمنع الحظر
                 sem = asyncio.Semaphore(4) 
                 async def fetch_multi_tf(sym):
                     async with sem:
@@ -351,13 +373,12 @@ class TradingSystem:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     if not res_15 or not res_1h or not res_4h: continue
                     
-                    # 💡 تشغيل الحسابات الرياضية في Thread منفصل لمنع تجميد السيرفر
                     analysis = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, res_15, res_1h, res_4h, btc_allowed)
                     if analysis: await self.execute_trade(analysis)
                 
                 gc.collect()
             except Exception as e:
-                Log.print(f"Scan Loop Critical Error: {e}", Log.RED)
+                Log.print(f"Scan Loop Error: {e}", Log.RED)
                 await asyncio.sleep(10)
 
     async def monitor_open_trades(self):
@@ -420,7 +441,7 @@ class TradingSystem:
                         self.save_state()
                         
             except Exception as e: 
-                Log.print(f"Monitor Error: {e}", Log.RED)
+                pass
             await asyncio.sleep(2)
 
     async def daily_report(self):
@@ -464,7 +485,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V38.1 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V40.0 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
