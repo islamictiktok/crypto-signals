@@ -23,9 +23,8 @@ class Config:
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg")
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TF_1 = '15m'    # فريم الدخول (الزناد)
-    TF_2 = '1h'     # فريم التأكيد (زخم واتجاه)
-    TF_3 = '4h'     # فريم الاتجاه العام
+    TF_ENTRY = '5m'     # إطار التأكيد والدخول (سحب السيولة)
+    TF_TREND = '15m'    # إطار الاتجاه العام (EMA 200)
     TOP_COINS_LIMIT = 75 
     MAX_TRADES_AT_ONCE = 5 
     MIN_24H_VOLUME_USDT = 10_000_000 
@@ -33,9 +32,9 @@ class Config:
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 20 
     MAX_MARGIN_RISK_PCT = 15.0 
-    COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v40.json"
-    VERSION = "V40.0 (HFT-Lite Master Edition)"
+    COOLDOWN_SECONDS = 1800 
+    STATE_FILE = "bot_state_v43.json"
+    VERSION = "V43.0 (Ultimate SMC Sniper)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -73,7 +72,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (HFT-Lite Logic)
+# 2. محرك الاستراتيجية (Ultimate SMC Logic)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -82,164 +81,156 @@ class StrategyEngine:
         return float(((exit_price - entry) / entry) * 100.0 * lev) if side == "LONG" else float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def calc_indicators(df_data, linreg_len=50):
+    def calc_15m_trend(df_data):
         try:
             df = pd.DataFrame(df_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 150: return None
+            if len(df) < 250: return None
             
-            # 1. Linear Regression (True Channel)
-            df['lsma'] = ta.linreg(df['close'], length=linreg_len)
-            df['stdev'] = ta.stdev(df['close'], length=linreg_len)
-            df['bbu'] = df['lsma'] + (2 * df['stdev']) 
-            df['bbl'] = df['lsma'] - (2 * df['stdev']) 
-            
-            # 🔥 الإصلاح 1: R-Squared آمن و Normalized Slope
-            df['slope'] = df['lsma'] - df['lsma'].shift(1)
-            df['norm_slope'] = (df['slope'] / df['close']) * 100
-            
-            x = pd.Series(range(len(df)), index=df.index)
-            corr = df['close'].rolling(linreg_len).corr(x)
-            df['r_sq'] = corr.fillna(0) ** 2 # حماية من الـ NaN
-            
-            # 🔥 الإصلاح 3: Market Regime (Bollinger Width Squeeze)
-            bb = ta.bbands(df['close'], length=20, std=2)
-            if bb is not None and not bb.empty:
-                df['bbw'] = (bb.iloc[:, 2] - bb.iloc[:, 0]) / bb.iloc[:, 1] # Width
-                df['bbw_sma'] = ta.sma(df['bbw'], length=20)
-            else:
-                df['bbw'] = 0
-                df['bbw_sma'] = 0
-
-            # 2. Volume Filter
-            df['vol_sma'] = ta.sma(df['vol'], length=20)
-            
-            # 3. MACD
-            macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-            if macd is not None and not macd.empty:
-                df['macd'] = macd.iloc[:, 0]    
-                df['macdh'] = macd.iloc[:, 1]   
-                df['macds'] = macd.iloc[:, 2]   
-            else:
-                return None
-                
-            # 4. ATR
-            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            # EMA 200 لتحديد الاتجاه
+            df['ema200'] = ta.ema(df['close'], length=200)
             df.dropna(inplace=True)
             return df if len(df) >= 5 else None
         except Exception:
             return None
 
     @staticmethod
-    def analyze_mtf(symbol, df_15m_data, df_1h_data, df_4h_data, btc_allowed_sides):
+    def calc_5m_triggers(df_data):
         try:
-            df_15m = StrategyEngine.calc_indicators(df_15m_data, linreg_len=50)
-            df_1h = StrategyEngine.calc_indicators(df_1h_data, linreg_len=50)
-            df_4h = StrategyEngine.calc_indicators(df_4h_data, linreg_len=50)
+            df = pd.DataFrame(df_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            if len(df) < 60: return None
             
-            if df_15m is None or df_1h is None or df_4h is None: return None
+            # المؤشرات المذكورة في النص
+            df['rsi'] = ta.rsi(df['close'], length=14)
+            df['vol_sma'] = ta.sma(df['vol'], length=20)
+            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+            df['vwap'] = ta.vwap(df['high'], df['low'], df['close'], df['vol']) # VWAP لفلترة الإشارات الكاذبة
             
+            df.dropna(inplace=True)
+            return df if len(df) >= 5 else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def analyze_mtf(symbol, df_5m_data, df_15m_data, btc_allowed_sides):
+        try:
+            df_5m = StrategyEngine.calc_5m_triggers(df_5m_data)
+            df_15m = StrategyEngine.calc_15m_trend(df_15m_data)
+            
+            if df_5m is None or df_15m is None: return None
+            
+            curr_5m = df_5m.iloc[-2]  
+            prev_5m = df_5m.iloc[-3]  
             curr_15m = df_15m.iloc[-2] 
-            prev_15m = df_15m.iloc[-3]
             
-            curr_1h = df_1h.iloc[-2] 
-            prev_1h = df_1h.iloc[-3]
+            entry = float(curr_5m['close'])
+
+            # ========================================================
+            # 1. تحديد الاتجاه العام (EMA 200)
+            # ========================================================
+            trend_up = curr_15m['close'] > curr_15m['ema200']
+            trend_down = curr_15m['close'] < curr_15m['ema200']
+
+            # ========================================================
+            # 2. تحديد السيولة (Liquidity Pools)
+            # ========================================================
+            lookback_df = df_5m.iloc[-42:-2] # فحص القمم والقيعان السابقة
             
-            curr_4h = df_4h.iloc[-2]
+            swing_low_idx = lookback_df['low'].idxmin()
+            swing_low_val = float(lookback_df.loc[swing_low_idx, 'low'])
+            rsi_at_swing_low = float(lookback_df.loc[swing_low_idx, 'rsi'])
+
+            swing_high_idx = lookback_df['high'].idxmax()
+            swing_high_val = float(lookback_df.loc[swing_high_idx, 'high'])
+            rsi_at_swing_high = float(lookback_df.loc[swing_high_idx, 'rsi'])
+
+            # ========================================================
+            # 3. التأكيد (VWAP, Volume, PA Rejection, CHoCH)
+            # ========================================================
+            vol_supports = curr_5m['vol'] > curr_5m['vol_sma']
             
-            entry = float(curr_15m['close'])
-            tolerance = 1.002
-            tolerance_inv = 0.998
+            # VWAP Filter لمعرفة السعر العادل
+            vwap_bullish = curr_5m['close'] > curr_5m['vwap']
+            vwap_bearish = curr_5m['close'] < curr_5m['vwap']
+
+            # شمعة رفض قوية
+            body = abs(curr_5m['close'] - curr_5m['open'])
+            lower_wick = min(curr_5m['open'], curr_5m['close']) - curr_5m['low']
+            upper_wick = curr_5m['high'] - max(curr_5m['open'], curr_5m['close'])
+            
+            # 1. Pin Bar
+            is_bull_pin = (lower_wick >= 2 * body) and (lower_wick >= 2 * upper_wick)
+            is_bear_pin = (upper_wick >= 2 * body) and (upper_wick >= 2 * lower_wick)
+
+            # 2. Bullish/Bearish Engulfing
+            is_bull_engulf = (prev_5m['close'] < prev_5m['open']) and (curr_5m['close'] > curr_5m['open']) and (curr_5m['close'] > prev_5m['open']) and (curr_5m['open'] < prev_5m['close'])
+            is_bear_engulf = (prev_5m['close'] > prev_5m['open']) and (curr_5m['close'] < curr_5m['open']) and (curr_5m['close'] < prev_5m['open']) and (curr_5m['open'] > prev_5m['close'])
+
+            # 3. CHoCH
+            is_bull_choch = curr_5m['close'] > prev_5m['high']
+            is_bear_choch = curr_5m['close'] < prev_5m['low']
+
+            confirm_bull = is_bull_pin or is_bull_engulf or is_bull_choch
+            confirm_bear = is_bear_pin or is_bear_engulf or is_bear_choch
 
             # ========================================================
-            # 🔥 1. فلتر الأسواق العرضية والانفجار (Market Regime)
-            # ========================================================
-            # R-Squared والميل للـ 4H والـ 1H
-            is_choppy_4h = (curr_4h['r_sq'] < 0.4) or (abs(curr_4h['norm_slope']) < 0.03)
-            is_choppy_1h = (curr_1h['r_sq'] < 0.4) or (abs(curr_1h['norm_slope']) < 0.03)
-            if is_choppy_4h or is_choppy_1h: return None
-
-            trend_up = (curr_4h['norm_slope'] > 0) and (curr_1h['norm_slope'] > 0)
-            trend_down = (curr_4h['norm_slope'] < 0) and (curr_1h['norm_slope'] < 0)
-
-            # فلتر تمدد التقلبات (Volatility Expansion)
-            # يجب أن يكون البولينجر باند في مرحلة تمدد بعد الخنق (Squeeze Breakout)
-            volatility_expansion = curr_15m['bbw'] > curr_15m['bbw_sma']
-
-            # ========================================================
-            # 🔥 2. الدخول المبكر للماكد والمحاذاة (Early MACD & Alignment)
-            # ========================================================
-            # الدخول مع بداية تغير الهيستوجرام على الـ 15 دقيقة (Early Timing)
-            m15_macd_bull_early = curr_15m['macdh'] > prev_15m['macdh']
-            m15_macd_bear_early = curr_15m['macdh'] < prev_15m['macdh']
-
-            # تأكيد زخم فريم الساعة لتقليل ضوضاء الـ 15m (Multi-TF Momentum)
-            h1_macd_bull_align = curr_1h['macdh'] >= prev_1h['macdh']
-            h1_macd_bear_align = curr_1h['macdh'] <= prev_1h['macdh']
-
-            # تأكيد الفوليوم
-            vol_ok = curr_15m['vol'] > curr_15m['vol_sma']
-
-            # ========================================================
-            # 🎯 3. سيناريوهات البرايس أكشن (Entry Logic)
+            # 🎯 4. شروط الدخول الحرفية للنص
             # ========================================================
             is_long = False
             is_short = False
 
-            if ("LONG" in btc_allowed_sides) and trend_up and (curr_15m['norm_slope'] > 0):
-                pullback_long = (curr_15m['low'] <= curr_15m['lsma'] * tolerance) and (curr_15m['close'] >= curr_15m['lsma'])
-                breakout_long = (prev_15m['close'] < prev_15m['lsma']) and (curr_15m['close'] > curr_15m['lsma'])
+            sweep_lowest = min(curr_5m['low'], prev_5m['low'])
+            sweep_highest = max(curr_5m['high'], prev_5m['high'])
+
+            # 🟢 أقوى نموذج شراء
+            if ("LONG" in btc_allowed_sides) and trend_up:
+                liquidity_grab_bull = (sweep_lowest < swing_low_val) and (curr_5m['close'] > swing_low_val)
+                bull_divergence = curr_5m['rsi'] > rsi_at_swing_low
                 
-                # تجميع شروط النخبة
-                if (pullback_long or breakout_long) and m15_macd_bull_early and h1_macd_bull_align and vol_ok and volatility_expansion:
+                if liquidity_grab_bull and vol_supports and bull_divergence and confirm_bull and vwap_bullish:
                     is_long = True
 
-            if ("SHORT" in btc_allowed_sides) and trend_down and (curr_15m['norm_slope'] < 0):
-                pullback_short = (curr_15m['high'] >= curr_15m['lsma'] * tolerance_inv) and (curr_15m['close'] <= curr_15m['lsma'])
-                breakdown_short = (prev_15m['close'] > prev_15m['lsma']) and (curr_15m['close'] < curr_15m['lsma'])
+            # 🔴 أقوى نموذج بيع
+            if ("SHORT" in btc_allowed_sides) and trend_down:
+                liquidity_grab_bear = (sweep_highest > swing_high_val) and (curr_5m['close'] < swing_high_val)
+                bear_divergence = curr_5m['rsi'] < rsi_at_swing_high
                 
-                # تجميع شروط النخبة
-                if (pullback_short or breakdown_short) and m15_macd_bear_early and h1_macd_bear_align and vol_ok and volatility_expansion:
+                if liquidity_grab_bear and vol_supports and bear_divergence and confirm_bear and vwap_bearish:
                     is_short = True
 
             if not is_long and not is_short: return None
 
             # ========================================================
-            # 🛑 4. إدارة المخاطر (Risk Management)
+            # 🛑 5. الوقف والهدف المتعدد (Dynamic TP & Strict SL)
             # ========================================================
             side = "LONG" if is_long else "SHORT"
-            atr = float(curr_15m['atr'])
+            atr = float(curr_5m['atr'])
             
-            # الستوب لوز أسفل/أعلى القناة مع مساحة للتنفس
+            # الوقف: أسفل/أعلى منطقة سحب السيولة مباشرة
             if side == "LONG":
-                sl = curr_15m['lsma'] - (1.5 * atr)
-                if sl >= entry: sl = curr_15m['low'] - (1.0 * atr) 
+                sl = sweep_lowest - (0.1 * atr) # مسافة أمان صغيرة جداً
             else:
-                sl = curr_15m['lsma'] + (1.5 * atr)
-                if sl <= entry: sl = curr_15m['high'] + (1.0 * atr)
+                sl = sweep_highest + (0.1 * atr)
 
             risk = abs(entry - sl)
             if risk == 0: return None
             
             sl_distance_pct = (risk / entry) * 100
-            if sl_distance_pct < 0.1 or sl_distance_pct > 10.0: return None 
+            if sl_distance_pct > 5.0: return None # حماية من الشموع الجنونية
             
-            # الأهداف: R:R 1:2 أو حد القناة العلوي/السفلي (الأبعد)
+            # 🎯 الهدف: (أقرب قمة أو 1:3 RRR أو السيولة المقابلة)
+            target_1_3_rrr = entry + (risk * 3.0) if side == "LONG" else entry - (risk * 3.0)
+            target_opposite_liq = swing_high_val if side == "LONG" else swing_low_val
+            
             if side == "LONG":
-                target_rr = entry + (risk * 2.0)
-                target_channel = float(curr_15m['bbu'])
-                tp = max(target_rr, target_channel)
+                # نختار الهدف الذي يوفر الربح الأفضل ويحقق السيولة
+                tp = max(target_1_3_rrr, target_opposite_liq) if target_opposite_liq > entry else target_1_3_rrr
             else:
-                target_rr = entry - (risk * 2.0)
-                target_channel = float(curr_15m['bbl'])
-                tp = min(target_rr, target_channel)
-            
-            reward = abs(tp - entry)
-            if reward < (risk * 1.8): return None 
-            
+                tp = min(target_1_3_rrr, target_opposite_liq) if target_opposite_liq < entry else target_1_3_rrr
+
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             pnl = StrategyEngine.calc_actual_roe(entry, tp, side, lev)
             
-            Log.print(f"🎯 {symbol}: HFT-Lite Master Signal!", Log.GREEN)
+            Log.print(f"🎯 {symbol}: Smart Money Concept Triggered!", Log.GREEN)
             
             return {
                 "symbol": symbol, "side": side, "entry": entry, 
@@ -309,12 +300,13 @@ class TradingSystem:
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
             
+            # 💡 رسالة تليجرام نظيفة تماماً بدون أسماء استراتيجيات أو مصطلحات فنية
             msg = (
                 f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
                 f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
                 f"💰 Entry: <code>{trade['entry']}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🎯 Target : <code>{trade['tp']:.4f}</code> (+{trade['pnl']:.1f}%)\n"
+                f"🎯 Target: <code>{trade['tp']:.4f}</code> (+{trade['pnl']:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🛑 Stop: <code>{trade['sl']:.4f}</code> ({sl_roe:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━"
@@ -335,7 +327,8 @@ class TradingSystem:
         while self.running:
             try:
                 now_after = datetime.now(timezone.utc)
-                minutes_to_wait = 15 - (now_after.minute % 15)
+                # فحص كل 5 دقائق لمواكبة فريم الزناد
+                minutes_to_wait = 5 - (now_after.minute % 5)
                 seconds_to_wait = (minutes_to_wait * 60) - now_after.second + 2 
                 Log.print(f"⏳ Next Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
                 await asyncio.sleep(seconds_to_wait)
@@ -354,26 +347,25 @@ class TradingSystem:
 
                 scan_list = [c for c in tickers.keys() if 'USDT:USDT' in c and c not in self.active_trades and c not in self.cooldown_list]
                 
-                Log.print(f"🔍 Matrix Pro Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
+                Log.print(f"🔍 Deep Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
 
-                sem = asyncio.Semaphore(4) 
+                sem = asyncio.Semaphore(5) 
                 async def fetch_multi_tf(sym):
                     async with sem:
-                        res_15 = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_1, limit=200)
-                        res_1h = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_2, limit=200)
-                        res_4h = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_3, limit=200)
-                        return sym, res_15, res_1h, res_4h
+                        res_5m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_ENTRY, limit=150)
+                        res_15m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_TREND, limit=250)
+                        return sym, res_5m, res_15m
 
                 tasks = [fetch_multi_tf(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
                 for res in results:
                     if isinstance(res, Exception) or not res: continue
-                    sym, res_15, res_1h, res_4h = res
+                    sym, res_5m, res_15m = res
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    if not res_15 or not res_1h or not res_4h: continue
+                    if not res_5m or not res_15m: continue
                     
-                    analysis = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, res_15, res_1h, res_4h, btc_allowed)
+                    analysis = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, res_5m, res_15m, btc_allowed)
                     if analysis: await self.execute_trade(analysis)
                 
                 gc.collect()
@@ -485,7 +477,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V40.0 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V43.0 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
