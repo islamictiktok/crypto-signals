@@ -33,8 +33,8 @@ class Config:
     MAX_LEVERAGE_CAP = 20 
     MAX_MARGIN_RISK_PCT = 15.0 
     COOLDOWN_SECONDS = 1800 
-    STATE_FILE = "bot_state_v43.json"
-    VERSION = "V43.0 (Ultimate SMC Sniper)"
+    STATE_FILE = "bot_state_v44.json"
+    VERSION = "V44.0 (SMC Liquidity Sniper - Final)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -86,7 +86,6 @@ class StrategyEngine:
             df = pd.DataFrame(df_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df) < 250: return None
             
-            # EMA 200 لتحديد الاتجاه
             df['ema200'] = ta.ema(df['close'], length=200)
             df.dropna(inplace=True)
             return df if len(df) >= 5 else None
@@ -99,15 +98,24 @@ class StrategyEngine:
             df = pd.DataFrame(df_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             if len(df) < 60: return None
             
-            # المؤشرات المذكورة في النص
+            # 💡 تحويل الوقت لفهرس زمني لحل مشكلة الـ VWAP جذرياً
+            df['datetime'] = pd.to_datetime(df['time'], unit='ms')
+            df.set_index('datetime', inplace=True)
+            
             df['rsi'] = ta.rsi(df['close'], length=14)
             df['vol_sma'] = ta.sma(df['vol'], length=20)
             df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            df['vwap'] = ta.vwap(df['high'], df['low'], df['close'], df['vol']) # VWAP لفلترة الإشارات الكاذبة
             
+            vwap_result = ta.vwap(df['high'], df['low'], df['close'], df['vol'])
+            if vwap_result is not None:
+                df['vwap'] = vwap_result
+            else:
+                df['vwap'] = df['close']
+            
+            df.reset_index(inplace=True)
             df.dropna(inplace=True)
             return df if len(df) >= 5 else None
-        except Exception:
+        except Exception as e:
             return None
 
     @staticmethod
@@ -125,7 +133,7 @@ class StrategyEngine:
             entry = float(curr_5m['close'])
 
             # ========================================================
-            # 1. تحديد الاتجاه العام (EMA 200)
+            # 1. تحديد الاتجاه العام (EMA 200 على 15 دقيقة)
             # ========================================================
             trend_up = curr_15m['close'] > curr_15m['ema200']
             trend_down = curr_15m['close'] < curr_15m['ema200']
@@ -133,7 +141,7 @@ class StrategyEngine:
             # ========================================================
             # 2. تحديد السيولة (Liquidity Pools)
             # ========================================================
-            lookback_df = df_5m.iloc[-42:-2] # فحص القمم والقيعان السابقة
+            lookback_df = df_5m.iloc[-42:-2] 
             
             swing_low_idx = lookback_df['low'].idxmin()
             swing_low_val = float(lookback_df.loc[swing_low_idx, 'low'])
@@ -148,24 +156,22 @@ class StrategyEngine:
             # ========================================================
             vol_supports = curr_5m['vol'] > curr_5m['vol_sma']
             
-            # VWAP Filter لمعرفة السعر العادل
             vwap_bullish = curr_5m['close'] > curr_5m['vwap']
             vwap_bearish = curr_5m['close'] < curr_5m['vwap']
 
-            # شمعة رفض قوية
             body = abs(curr_5m['close'] - curr_5m['open'])
             lower_wick = min(curr_5m['open'], curr_5m['close']) - curr_5m['low']
             upper_wick = curr_5m['high'] - max(curr_5m['open'], curr_5m['close'])
             
-            # 1. Pin Bar
+            # Pin Bar
             is_bull_pin = (lower_wick >= 2 * body) and (lower_wick >= 2 * upper_wick)
             is_bear_pin = (upper_wick >= 2 * body) and (upper_wick >= 2 * lower_wick)
 
-            # 2. Bullish/Bearish Engulfing
+            # Engulfing
             is_bull_engulf = (prev_5m['close'] < prev_5m['open']) and (curr_5m['close'] > curr_5m['open']) and (curr_5m['close'] > prev_5m['open']) and (curr_5m['open'] < prev_5m['close'])
             is_bear_engulf = (prev_5m['close'] > prev_5m['open']) and (curr_5m['close'] < curr_5m['open']) and (curr_5m['close'] < prev_5m['open']) and (curr_5m['open'] > prev_5m['close'])
 
-            # 3. CHoCH
+            # CHoCH
             is_bull_choch = curr_5m['close'] > prev_5m['high']
             is_bear_choch = curr_5m['close'] < prev_5m['low']
 
@@ -173,7 +179,7 @@ class StrategyEngine:
             confirm_bear = is_bear_pin or is_bear_engulf or is_bear_choch
 
             # ========================================================
-            # 🎯 4. شروط الدخول الحرفية للنص
+            # 🎯 4. شروط الدخول الحرفية
             # ========================================================
             is_long = False
             is_short = False
@@ -181,7 +187,6 @@ class StrategyEngine:
             sweep_lowest = min(curr_5m['low'], prev_5m['low'])
             sweep_highest = max(curr_5m['high'], prev_5m['high'])
 
-            # 🟢 أقوى نموذج شراء
             if ("LONG" in btc_allowed_sides) and trend_up:
                 liquidity_grab_bull = (sweep_lowest < swing_low_val) and (curr_5m['close'] > swing_low_val)
                 bull_divergence = curr_5m['rsi'] > rsi_at_swing_low
@@ -189,7 +194,6 @@ class StrategyEngine:
                 if liquidity_grab_bull and vol_supports and bull_divergence and confirm_bull and vwap_bullish:
                     is_long = True
 
-            # 🔴 أقوى نموذج بيع
             if ("SHORT" in btc_allowed_sides) and trend_down:
                 liquidity_grab_bear = (sweep_highest > swing_high_val) and (curr_5m['close'] < swing_high_val)
                 bear_divergence = curr_5m['rsi'] < rsi_at_swing_high
@@ -205,9 +209,8 @@ class StrategyEngine:
             side = "LONG" if is_long else "SHORT"
             atr = float(curr_5m['atr'])
             
-            # الوقف: أسفل/أعلى منطقة سحب السيولة مباشرة
             if side == "LONG":
-                sl = sweep_lowest - (0.1 * atr) # مسافة أمان صغيرة جداً
+                sl = sweep_lowest - (0.1 * atr) 
             else:
                 sl = sweep_highest + (0.1 * atr)
 
@@ -215,14 +218,12 @@ class StrategyEngine:
             if risk == 0: return None
             
             sl_distance_pct = (risk / entry) * 100
-            if sl_distance_pct > 5.0: return None # حماية من الشموع الجنونية
+            if sl_distance_pct > 5.0: return None 
             
-            # 🎯 الهدف: (أقرب قمة أو 1:3 RRR أو السيولة المقابلة)
             target_1_3_rrr = entry + (risk * 3.0) if side == "LONG" else entry - (risk * 3.0)
             target_opposite_liq = swing_high_val if side == "LONG" else swing_low_val
             
             if side == "LONG":
-                # نختار الهدف الذي يوفر الربح الأفضل ويحقق السيولة
                 tp = max(target_1_3_rrr, target_opposite_liq) if target_opposite_liq > entry else target_1_3_rrr
             else:
                 tp = min(target_1_3_rrr, target_opposite_liq) if target_opposite_liq < entry else target_1_3_rrr
@@ -300,13 +301,13 @@ class TradingSystem:
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
             
-            # 💡 رسالة تليجرام نظيفة تماماً بدون أسماء استراتيجيات أو مصطلحات فنية
+            # رسالة التليجرام النظيفة
             msg = (
                 f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
                 f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
                 f"💰 Entry: <code>{trade['entry']}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🎯 Target: <code>{trade['tp']:.4f}</code> (+{trade['pnl']:.1f}%)\n"
+                f"🎯 Target : <code>{trade['tp']:.4f}</code> (+{trade['pnl']:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🛑 Stop: <code>{trade['sl']:.4f}</code> ({sl_roe:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━"
@@ -327,10 +328,12 @@ class TradingSystem:
         while self.running:
             try:
                 now_after = datetime.now(timezone.utc)
-                # فحص كل 5 دقائق لمواكبة فريم الزناد
                 minutes_to_wait = 5 - (now_after.minute % 5)
                 seconds_to_wait = (minutes_to_wait * 60) - now_after.second + 2 
-                Log.print(f"⏳ Next Pulse in {int(seconds_to_wait)}s...", Log.YELLOW)
+                
+                active_count = len(self.active_trades)
+                Log.print(f"⏳ Next Pulse in {int(seconds_to_wait)}s... [Active Trades: {active_count}]", Log.YELLOW)
+                
                 await asyncio.sleep(seconds_to_wait)
 
                 current_time = int(datetime.now(timezone.utc).timestamp())
@@ -347,7 +350,7 @@ class TradingSystem:
 
                 scan_list = [c for c in tickers.keys() if 'USDT:USDT' in c and c not in self.active_trades and c not in self.cooldown_list]
                 
-                Log.print(f"🔍 Deep Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
+                Log.print(f"🔍 SMC Pro Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
 
                 sem = asyncio.Semaphore(5) 
                 async def fetch_multi_tf(sym):
@@ -477,7 +480,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V43.0 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V44.0 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
