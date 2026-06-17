@@ -23,18 +23,18 @@ class Config:
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg")
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TF_ENTRY = '15m'    # فريم الدخول والتحليل اللحظي
-    TF_TREND = '1h'     # فريم تأكيد الاتجاه الصارم
+    TF_MACRO = '4h'     # فريم الاتجاه ورسم الفيبوناتشي
+    TF_ENTRY = '15m'    # فريم المراقبة للدخول (الزناد)
     TOP_COINS_LIMIT = 75 
     MAX_TRADES_AT_ONCE = 5 
     MIN_24H_VOLUME_USDT = 10_000_000 
     MAX_ALLOWED_SPREAD = 0.005 
     MIN_LEVERAGE = 2  
-    MAX_LEVERAGE_CAP = 20 
-    MAX_MARGIN_RISK_PCT = 15.0 
+    MAX_LEVERAGE_CAP = 50 # 💡 تم الرفع إلى 50 حسب الطلب
+    MAX_MARGIN_RISK_PCT = 30.0 # 💡 تم الرفع من 15 إلى 30 حسب الطلب
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v45_1.json"
-    VERSION = "V45.1 (Titan Confluence Engine - Production)"
+    STATE_FILE = "bot_state_v46_1.json"
+    VERSION = "V46.1 (Fibonacci Body Sniper Pro)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -72,7 +72,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك التوافق والمؤشرات (Confluence Engine)
+# 2. محرك الاستراتيجية (Fibonacci Body-to-Body Logic)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -81,153 +81,110 @@ class StrategyEngine:
         return float(((exit_price - entry) / entry) * 100.0 * lev) if side == "LONG" else float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def calc_indicators(df_data):
-        try:
-            df = pd.DataFrame(df_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df) < 250: return None
+    def identify_swings_body(df, lookback=20):
+        # الاعتماد حصرياً على الأجسام (Open/Close) وتجاهل الذيول
+        df['body_max'] = df[['open', 'close']].max(axis=1)
+        df['body_min'] = df[['open', 'close']].min(axis=1)
+        
+        last_idx = len(df) - 1
+        window = df.iloc[max(0, last_idx - lookback):last_idx]
+        
+        # القمة من الأجسام
+        swing_high_idx = window['body_max'].idxmax()
+        swing_high_val = float(window.loc[swing_high_idx, 'body_max'])
+        
+        # القاع من الأجسام
+        swing_low_idx = window['body_min'].idxmin()
+        swing_low_val = float(window.loc[swing_low_idx, 'body_min'])
+        
+        if swing_high_idx > swing_low_idx:
+            trend = "UP" 
+        else:
+            trend = "DOWN" 
             
-            # حماية الجداول والفهارس الزمنية لمنع أي تعارض في مكتبات pandas_ta
-            df['datetime'] = pd.to_datetime(df['time'], unit='ms')
-            df.set_index('datetime', inplace=True)
-            
-            # 1. الاتجاه: المتوسطات المتحركة الأسية (EMA 50 & EMA 200)
-            df['ema50'] = ta.ema(df['close'], length=50)
-            df['ema200'] = ta.ema(df['close'], length=200)
-            
-            # 2. مستويات السيولة والتذبذب: Bollinger Bands
-            bb = ta.bbands(df['close'], length=20, std=2)
-            if bb is not None and not bb.empty:
-                df['bbl'] = bb.iloc[:, 0]
-                df['bbm'] = bb.iloc[:, 1]
-                df['bbu'] = bb.iloc[:, 2]
-            else:
-                return None
-                
-            # 3. الزخم الرقمي: Stochastic RSI (K & D Lines)
-            stochrsi = ta.stochrsi(df['close'], length=14, rsi_length=14, k=3, d=3)
-            if stochrsi is not None and not stochrsi.empty:
-                df['srsi_k'] = stochrsi.iloc[:, 0]
-                df['srsi_d'] = stochrsi.iloc[:, 1]
-            else:
-                return None
-                
-            # 4. تدفق السيولة الذكية: On-Balance Volume (OBV)
-            df['obv'] = ta.obv(df['close'], df['vol'])
-            df['obv_sma'] = ta.sma(df['obv'], length=20) 
-            
-            # 5. قياس الحجم وإدارة الأهداف
-            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-            
-            df.dropna(inplace=True)
-            df.reset_index(inplace=True)
-            return df if len(df) >= 5 else None
-        except Exception:
-            return None
+        return trend, swing_high_val, swing_low_val
 
     @staticmethod
-    def analyze_mtf(symbol, df_15m_data, df_1h_data, btc_allowed_sides):
+    def analyze_mtf(symbol, df_15m_data, df_4h_data, btc_allowed_sides):
         try:
-            df_15m = StrategyEngine.calc_indicators(df_15m_data)
-            df_1h = StrategyEngine.calc_indicators(df_1h_data)
+            df_4h = pd.DataFrame(df_4h_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            df_15m = pd.DataFrame(df_15m_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             
-            if df_15m is None or df_1h is None: return None
+            if len(df_4h) < 30 or len(df_15m) < 5: return None
+            
+            # 1. الاتجاه العام على 4H
+            trend_4h, swing_high, swing_low = StrategyEngine.identify_swings_body(df_4h, lookback=20)
             
             curr_15m = df_15m.iloc[-2]  
-            prev_15m = df_15m.iloc[-3]  
-            curr_1h = df_1h.iloc[-2] 
+            entry = float(curr_15m['close']) 
             
-            entry = float(curr_15m['close'])
-
-            # ========================================================
-            # 1. فلترة الاتجاه المتوافق (EMA Dual-Timeframe Alignment)
-            # ========================================================
-            trend_up_1h = curr_1h['close'] > curr_1h['ema200']
-            trend_up_15m = (curr_15m['close'] > curr_15m['ema200']) and (curr_15m['ema50'] > curr_15m['ema200'])
-            macro_trend_up = trend_up_1h and trend_up_15m
-
-            trend_down_1h = curr_1h['close'] < curr_1h['ema200']
-            trend_down_15m = (curr_15m['close'] < curr_15m['ema200']) and (curr_15m['ema50'] < curr_15m['ema200'])
-            macro_trend_down = trend_down_1h and trend_down_15m
-
-            # ========================================================
-            # 2. حجم تدفق الأموال الحقيقي (OBV Flow Confirmation)
-            # ========================================================
-            obv_bullish = curr_15m['obv'] > curr_15m['obv_sma']
-            obv_bearish = curr_15m['obv'] < curr_15m['obv_sma']
-
-            # ========================================================
-            # 3. تقاطعات الزخم السريعة (Stochastic RSI Extreme Signals)
-            # ========================================================
-            # شراء: تقاطع صاعد في قاع التشبع البيعي (< 30)
-            srsi_bull_cross = (prev_15m['srsi_k'] <= prev_15m['srsi_d']) and (curr_15m['srsi_k'] > curr_15m['srsi_d'])
-            srsi_oversold = curr_15m['srsi_k'] < 30
-
-            # بيع: تقاطع هابط في قمة التشبع الشرائي (> 70)
-            srsi_bear_cross = (prev_15m['srsi_k'] >= prev_15m['srsi_d']) and (curr_15m['srsi_k'] < curr_15m['srsi_d'])
-            srsi_overbought = curr_15m['srsi_k'] > 70
-
-            # ========================================================
-            # 🎯 4. زناد التنفيذ المجمع (Confluence Execution)
-            # ========================================================
             is_long = False
             is_short = False
+            sl = 0.0
+            tp = 0.0
 
-            if ("LONG" in btc_allowed_sides) and macro_trend_up:
-                # السعر يرتد من مناطق دعم قوية (الخط السفلي للبولينجر أو EMA50)
-                value_area = (curr_15m['low'] <= curr_15m['bbl'] * 1.002) or (curr_15m['low'] <= curr_15m['ema50'] * 1.002)
-                if value_area and srsi_bull_cross and srsi_oversold and obv_bullish:
+            fib_range = swing_high - swing_low
+            if fib_range <= 0: return None 
+
+            # 💡 زيادة السماحية لمنع تفويت الفرص إذا ارتد السعر قبل لمس 0.706 مباشرة
+            lower_tolerance = entry * 0.0010 
+            upper_tolerance = entry * 0.0055 
+
+            if trend_4h == "UP" and ("LONG" in btc_allowed_sides):
+                # الشراء عند 0.706
+                fib_0_706_entry = swing_high - (fib_range * 0.706)
+                # الوقف عند 0.79
+                fib_0_79_sl = swing_high - (fib_range * 0.79)
+                
+                # السماحية (دخول أعلى بقليل من الخط لاصطياد الارتداد المبكر)
+                if (fib_0_706_entry - lower_tolerance) <= entry <= (fib_0_706_entry + upper_tolerance):
                     is_long = True
+                    sl = fib_0_79_sl
+                    
+                    # 🎯 الهدف العكسي: من الدخول وحتى أعلى قمة (0.706 من هذه المسافة)
+                    reverse_range = swing_high - entry
+                    tp = entry + (reverse_range * 0.706)
 
-            if ("SHORT" in btc_allowed_sides) and macro_trend_down:
-                # السعر يرتد من مناطق مقاومة قوية (الخط العلوي للبولينجر أو EMA50)
-                value_area = (curr_15m['high'] >= curr_15m['bbu'] * 0.998) or (curr_15m['high'] >= curr_15m['ema50'] * 0.998)
-                if value_area and srsi_bear_cross and srsi_overbought and obv_bearish:
+            elif trend_4h == "DOWN" and ("SHORT" in btc_allowed_sides):
+                # البيع عند 0.706
+                fib_0_706_entry = swing_low + (fib_range * 0.706)
+                # الوقف عند 0.79
+                fib_0_79_sl = swing_low + (fib_range * 0.79)
+                
+                # السماحية (دخول أسفل بقليل من الخط لاصطياد الارتداد المبكر)
+                if (fib_0_706_entry - upper_tolerance) <= entry <= (fib_0_706_entry + lower_tolerance):
                     is_short = True
+                    sl = fib_0_79_sl
+                    
+                    # 🎯 الهدف العكسي: من الدخول وحتى أدنى قاع (0.706 من هذه المسافة)
+                    reverse_range = entry - swing_low
+                    tp = entry - (reverse_range * 0.706)
 
             if not is_long and not is_short: return None
 
-            # ========================================================
-            # 🛑 5. حسابات الستوب والأهداف الآمنة (ATR Protection)
-            # ========================================================
+            # 3. إدارة المخاطر 
             side = "LONG" if is_long else "SHORT"
-            atr = float(curr_15m['atr'])
-            
-            # الوقف محمي بـ 1.5 ATR لتجنب ضرب الستوب الوهمي
-            if side == "LONG":
-                sl = curr_15m['low'] - (1.5 * atr) 
-            else:
-                sl = curr_15m['high'] + (1.5 * atr)
-
             risk = abs(entry - sl)
+            
             if risk == 0: return None
             
             sl_distance_pct = (risk / entry) * 100
-            if sl_distance_pct > 6.0: return None # تجنب المخاطرات العالية
+            if sl_distance_pct < 0.1 or sl_distance_pct > Config.MAX_MARGIN_RISK_PCT: return None 
             
-            # الهدف: 1:2 RRR كحد أدنى، أو العودة لخط البولينجر المعاكس
-            if side == "LONG":
-                tp_rr = entry + (risk * 2.0)
-                tp_bb = float(curr_15m['bbu'])
-                tp = max(tp_rr, tp_bb)
-            else:
-                tp_rr = entry - (risk * 2.0)
-                tp_bb = float(curr_15m['bbl'])
-                tp = min(tp_rr, tp_bb)
-
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             pnl = StrategyEngine.calc_actual_roe(entry, tp, side, lev)
             
-            Log.print(f"🎯 {symbol}: Titan Indicator Confluence Aligned!", Log.GREEN)
+            Log.print(f"🎯 {symbol}: Fibonacci Body-to-Body Triggered!", Log.GREEN)
             
             return {
                 "symbol": symbol, "side": side, "entry": entry, 
                 "sl": sl, "tp": tp, "pnl": pnl, "leverage": lev
             }
-        except Exception: 
+        except Exception as e: 
             return None
 
 # ==========================================
-# 3. نظام التداول والتحكم والربط الآلي
+# 3. نظام التداول الآمن والتحكم
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -287,15 +244,14 @@ class TradingSystem:
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
             
-            # رسالة التليجرام النظيفة كلياً لحماية الخصوصية
             msg = (
                 f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
                 f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
-                f"💰 Entry: <code>{trade['entry']}</code>\n"
+                f"💰 Entry : <code>{trade['entry']}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"🎯 Target : <code>{trade['tp']:.4f}</code> (+{trade['pnl']:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🛑 Stop: <code>{trade['sl']:.4f}</code> ({sl_roe:.1f}%)\n"
+                f"🛑 Stop : <code>{trade['sl']:.4f}</code> ({sl_roe:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━"
             )
             msg_id = await self.tg.send(msg)
@@ -314,7 +270,6 @@ class TradingSystem:
         while self.running:
             try:
                 now_after = datetime.now(timezone.utc)
-                # استيقاظ دقيق كل 15 دقيقة لمواكبة الشموع وإراحة السيرفر
                 minutes_to_wait = 15 - (now_after.minute % 15)
                 seconds_to_wait = (minutes_to_wait * 60) - now_after.second + 2 
                 
@@ -337,25 +292,26 @@ class TradingSystem:
 
                 scan_list = [c for c in tickers.keys() if 'USDT:USDT' in c and c not in self.active_trades and c not in self.cooldown_list]
                 
-                Log.print(f"🔍 Confluence Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
+                Log.print(f"🔍 Fibonacci Body Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
 
                 sem = asyncio.Semaphore(5) 
                 async def fetch_multi_tf(sym):
                     async with sem:
-                        res_15m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_ENTRY, limit=300)
-                        res_1h = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_TREND, limit=300)
-                        return sym, res_15m, res_1h
+                        # جلب فريم 15 دقيقة للدخول وفريم 4 ساعات للموجة
+                        res_15m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_ENTRY, limit=5)
+                        res_4h = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=30)
+                        return sym, res_15m, res_4h
 
                 tasks = [fetch_multi_tf(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
                 for res in results:
                     if isinstance(res, Exception) or not res: continue
-                    sym, res_15m, res_1h = res
+                    sym, res_15m, res_4h = res
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    if not res_15m or not res_1h: continue
+                    if not res_15m or not res_4h: continue
                     
-                    analysis = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, res_15m, res_1h, btc_allowed)
+                    analysis = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, res_15m, res_4h, btc_allowed)
                     if analysis: await self.execute_trade(analysis)
                 
                 gc.collect()
@@ -396,7 +352,7 @@ class TradingSystem:
                         self.stats['total_duration_secs'] += duration_secs
                         self.stats['losses'] += 1
                         self.stats['realized_rr'] -= 1.0
-                        msg = f"🛑 <b><code>{coin_name}</code></b>\n❌ SL Hit: <code>{sl:.4f}</code>"
+                        msg = f"🛑 <b><code>{coin_name}</code></b>\n❌ SL Hit (Fib 0.79): <code>{sl:.4f}</code>"
                         Log.print(f"🛑 {coin_name} hit SL", Log.RED)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
@@ -414,7 +370,7 @@ class TradingSystem:
                         rr = reward / risk if risk > 0 else 0
                         self.stats['realized_rr'] += rr
                         
-                        msg = f"🏆 <b><code>{coin_name}</code></b>\n🚀 Target Hit: <code>{tp:.4f}</code>\n✅ Trade Completed! (+{rr:.1f}R)"
+                        msg = f"🏆 <b><code>{coin_name}</code></b>\n🚀 Target Hit (Rev 0.706): <code>{tp:.4f}</code>\n✅ Trade Completed! (+{rr:.1f}R)"
                         Log.print(f"🏆 {coin_name} hit Target", Log.GREEN)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
@@ -467,7 +423,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V45.1 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V46.1 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
