@@ -23,18 +23,18 @@ class Config:
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg")
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TF_MACRO = '4h'     # فريم الاتجاه ورسم الفيبوناتشي
-    TF_ENTRY = '15m'    # فريم المراقبة للدخول (الزناد)
+    TF_MACRO = '4h'     
+    TF_ENTRY = '15m'    
     TOP_COINS_LIMIT = 75 
     MAX_TRADES_AT_ONCE = 5 
     MIN_24H_VOLUME_USDT = 10_000_000 
     MAX_ALLOWED_SPREAD = 0.005 
     MIN_LEVERAGE = 2  
-    MAX_LEVERAGE_CAP = 50 # 💡 تم الرفع إلى 50 حسب الطلب
-    MAX_MARGIN_RISK_PCT = 30.0 # 💡 تم الرفع من 15 إلى 30 حسب الطلب
+    MAX_LEVERAGE_CAP = 30 
+    MAX_MARGIN_RISK_PCT = 30.0 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v46_1.json"
-    VERSION = "V46.1 (Fibonacci Body Sniper Pro)"
+    STATE_FILE = "bot_state_v48.json"
+    VERSION = "V48.0 (Stealth Quant Engine + RSI)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -72,7 +72,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية (Fibonacci Body-to-Body Logic)
+# 2. محرك الاستراتيجية المغلق (Stealth Logic)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -82,18 +82,15 @@ class StrategyEngine:
 
     @staticmethod
     def identify_swings_body(df, lookback=20):
-        # الاعتماد حصرياً على الأجسام (Open/Close) وتجاهل الذيول
         df['body_max'] = df[['open', 'close']].max(axis=1)
         df['body_min'] = df[['open', 'close']].min(axis=1)
         
         last_idx = len(df) - 1
         window = df.iloc[max(0, last_idx - lookback):last_idx]
         
-        # القمة من الأجسام
         swing_high_idx = window['body_max'].idxmax()
         swing_high_val = float(window.loc[swing_high_idx, 'body_max'])
         
-        # القاع من الأجسام
         swing_low_idx = window['body_min'].idxmin()
         swing_low_val = float(window.loc[swing_low_idx, 'body_min'])
         
@@ -110,59 +107,56 @@ class StrategyEngine:
             df_4h = pd.DataFrame(df_4h_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             df_15m = pd.DataFrame(df_15m_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             
-            if len(df_4h) < 30 or len(df_15m) < 5: return None
+            if len(df_4h) < 30 or len(df_15m) < 20: return None
             
-            # 1. الاتجاه العام على 4H
+            # حساب الـ RSI على فريم 15 دقيقة
+            df_15m['rsi'] = ta.rsi(df_15m['close'], length=14)
+            df_15m.dropna(inplace=True)
+            if df_15m.empty: return None
+
             trend_4h, swing_high, swing_low = StrategyEngine.identify_swings_body(df_4h, lookback=20)
             
             curr_15m = df_15m.iloc[-2]  
             entry = float(curr_15m['close']) 
+            rsi_val = float(curr_15m['rsi']) # استخراج قيمة الـ RSI الحالية
             
             is_long = False
             is_short = False
             sl = 0.0
             tp = 0.0
 
-            fib_range = swing_high - swing_low
-            if fib_range <= 0: return None 
+            range_val = swing_high - swing_low
+            if range_val <= 0: return None 
 
-            # 💡 زيادة السماحية لمنع تفويت الفرص إذا ارتد السعر قبل لمس 0.706 مباشرة
             lower_tolerance = entry * 0.0010 
             upper_tolerance = entry * 0.0055 
 
             if trend_4h == "UP" and ("LONG" in btc_allowed_sides):
-                # الشراء عند 0.706
-                fib_0_706_entry = swing_high - (fib_range * 0.706)
-                # الوقف عند 0.79
-                fib_0_79_sl = swing_high - (fib_range * 0.79)
+                entry_level = swing_high - (range_val * 0.706)
+                sl_level = swing_high - (range_val * 0.79)
                 
-                # السماحية (دخول أعلى بقليل من الخط لاصطياد الارتداد المبكر)
-                if (fib_0_706_entry - lower_tolerance) <= entry <= (fib_0_706_entry + upper_tolerance):
-                    is_long = True
-                    sl = fib_0_79_sl
-                    
-                    # 🎯 الهدف العكسي: من الدخول وحتى أعلى قمة (0.706 من هذه المسافة)
-                    reverse_range = swing_high - entry
-                    tp = entry + (reverse_range * 0.706)
+                # فحص السماحية + شرط الـ RSI تحت 50
+                if (entry_level - lower_tolerance) <= entry <= (entry_level + upper_tolerance):
+                    if rsi_val < 50:
+                        is_long = True
+                        sl = sl_level
+                        reverse_range = swing_high - entry
+                        tp = entry + (reverse_range * 0.618)
 
             elif trend_4h == "DOWN" and ("SHORT" in btc_allowed_sides):
-                # البيع عند 0.706
-                fib_0_706_entry = swing_low + (fib_range * 0.706)
-                # الوقف عند 0.79
-                fib_0_79_sl = swing_low + (fib_range * 0.79)
+                entry_level = swing_low + (range_val * 0.706)
+                sl_level = swing_low + (range_val * 0.79)
                 
-                # السماحية (دخول أسفل بقليل من الخط لاصطياد الارتداد المبكر)
-                if (fib_0_706_entry - upper_tolerance) <= entry <= (fib_0_706_entry + lower_tolerance):
-                    is_short = True
-                    sl = fib_0_79_sl
-                    
-                    # 🎯 الهدف العكسي: من الدخول وحتى أدنى قاع (0.706 من هذه المسافة)
-                    reverse_range = entry - swing_low
-                    tp = entry - (reverse_range * 0.706)
+                # فحص السماحية + شرط الـ RSI فوق 50
+                if (entry_level - upper_tolerance) <= entry <= (entry_level + lower_tolerance):
+                    if rsi_val > 50:
+                        is_short = True
+                        sl = sl_level
+                        reverse_range = entry - swing_low
+                        tp = entry - (reverse_range * 0.618)
 
             if not is_long and not is_short: return None
 
-            # 3. إدارة المخاطر 
             side = "LONG" if is_long else "SHORT"
             risk = abs(entry - sl)
             
@@ -174,7 +168,7 @@ class StrategyEngine:
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             pnl = StrategyEngine.calc_actual_roe(entry, tp, side, lev)
             
-            Log.print(f"🎯 {symbol}: Fibonacci Body-to-Body Triggered!", Log.GREEN)
+            Log.print(f"🎯 {symbol}: Setup Connected!", Log.GREEN)
             
             return {
                 "symbol": symbol, "side": side, "entry": entry, 
@@ -184,7 +178,7 @@ class StrategyEngine:
             return None
 
 # ==========================================
-# 3. نظام التداول الآمن والتحكم
+# 3. نظام التداول والتحكم
 # ==========================================
 class TradingSystem:
     def __init__(self):
@@ -244,14 +238,15 @@ class TradingSystem:
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
             
+            # رسالة نظيفة بالكامل خالية من المصطلحات الفنية
             msg = (
                 f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
                 f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
-                f"💰 Entry : <code>{trade['entry']}</code>\n"
+                f"💰 Entry: <code>{trade['entry']}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🎯 Target : <code>{trade['tp']:.4f}</code> (+{trade['pnl']:.1f}%)\n"
+                f"🎯 Target: <code>{trade['tp']:.4f}</code> (+{trade['pnl']:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🛑 Stop : <code>{trade['sl']:.4f}</code> ({sl_roe:.1f}%)\n"
+                f"🛑 Stop: <code>{trade['sl']:.4f}</code> ({sl_roe:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━"
             )
             msg_id = await self.tg.send(msg)
@@ -292,13 +287,13 @@ class TradingSystem:
 
                 scan_list = [c for c in tickers.keys() if 'USDT:USDT' in c and c not in self.active_trades and c not in self.cooldown_list]
                 
-                Log.print(f"🔍 Fibonacci Body Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
+                Log.print(f"🔍 Market Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
 
                 sem = asyncio.Semaphore(5) 
                 async def fetch_multi_tf(sym):
                     async with sem:
-                        # جلب فريم 15 دقيقة للدخول وفريم 4 ساعات للموجة
-                        res_15m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_ENTRY, limit=5)
+                        # تم رفع شموع الـ 15 دقيقة إلى 30 لضمان دقة حساب الـ RSI
+                        res_15m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_ENTRY, limit=30)
                         res_4h = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=30)
                         return sym, res_15m, res_4h
 
@@ -352,7 +347,7 @@ class TradingSystem:
                         self.stats['total_duration_secs'] += duration_secs
                         self.stats['losses'] += 1
                         self.stats['realized_rr'] -= 1.0
-                        msg = f"🛑 <b><code>{coin_name}</code></b>\n❌ SL Hit (Fib 0.79): <code>{sl:.4f}</code>"
+                        msg = f"🛑 <b><code>{coin_name}</code></b>\n❌ SL Hit: <code>{sl:.4f}</code>"
                         Log.print(f"🛑 {coin_name} hit SL", Log.RED)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
@@ -370,7 +365,7 @@ class TradingSystem:
                         rr = reward / risk if risk > 0 else 0
                         self.stats['realized_rr'] += rr
                         
-                        msg = f"🏆 <b><code>{coin_name}</code></b>\n🚀 Target Hit (Rev 0.706): <code>{tp:.4f}</code>\n✅ Trade Completed! (+{rr:.1f}R)"
+                        msg = f"🏆 <b><code>{coin_name}</code></b>\n🚀 Target Hit: <code>{tp:.4f}</code>\n✅ Trade Completed! (+{rr:.1f}R)"
                         Log.print(f"🏆 {coin_name} hit Target", Log.GREEN)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
@@ -423,7 +418,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V46.1 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V48.0 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
