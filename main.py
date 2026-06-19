@@ -6,7 +6,6 @@ import time
 import warnings
 from datetime import datetime, timezone
 import pandas as pd
-import pandas_ta as ta
 import ccxt.async_support as ccxt
 import aiohttp
 from fastapi import FastAPI, Response
@@ -33,8 +32,8 @@ class Config:
     MAX_LEVERAGE_CAP = 30 
     MAX_MARGIN_RISK_PCT = 30.0 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v48.json"
-    VERSION = "V48.0 (Stealth Quant Engine + RSI)"
+    STATE_FILE = "bot_state_v50.json"
+    VERSION = "V50.0 (Pure Inverted OTE Sniper)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -72,7 +71,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية المغلق (Stealth Logic)
+# 2. محرك الاستراتيجية المغلق النقي (Pure Inverted Logic)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -107,18 +106,12 @@ class StrategyEngine:
             df_4h = pd.DataFrame(df_4h_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             df_15m = pd.DataFrame(df_15m_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             
-            if len(df_4h) < 30 or len(df_15m) < 20: return None
-            
-            # حساب الـ RSI على فريم 15 دقيقة
-            df_15m['rsi'] = ta.rsi(df_15m['close'], length=14)
-            df_15m.dropna(inplace=True)
-            if df_15m.empty: return None
+            if len(df_4h) < 30 or len(df_15m) < 5: return None
 
             trend_4h, swing_high, swing_low = StrategyEngine.identify_swings_body(df_4h, lookback=20)
             
             curr_15m = df_15m.iloc[-2]  
             entry = float(curr_15m['close']) 
-            rsi_val = float(curr_15m['rsi']) # استخراج قيمة الـ RSI الحالية
             
             is_long = False
             is_short = False
@@ -131,29 +124,27 @@ class StrategyEngine:
             lower_tolerance = entry * 0.0010 
             upper_tolerance = entry * 0.0055 
 
-            if trend_4h == "UP" and ("LONG" in btc_allowed_sides):
+            # 💡 السيناريو المعكوس: الاتجاه صاعد (ندخل SHORT مع فشل النموذج) بدون RSI
+            if trend_4h == "UP" and ("SHORT" in btc_allowed_sides):
                 entry_level = swing_high - (range_val * 0.706)
-                sl_level = swing_high - (range_val * 0.79)
+                tp_level = swing_high - (range_val * 0.79)  # الهدف 0.79
+                sl_level = swing_high - (range_val * 0.618) # الستوب 0.618
                 
-                # فحص السماحية + شرط الـ RSI تحت 50
                 if (entry_level - lower_tolerance) <= entry <= (entry_level + upper_tolerance):
-                    if rsi_val < 50:
-                        is_long = True
-                        sl = sl_level
-                        reverse_range = swing_high - entry
-                        tp = entry + (reverse_range * 0.618)
+                    is_short = True 
+                    tp = tp_level
+                    sl = sl_level
 
-            elif trend_4h == "DOWN" and ("SHORT" in btc_allowed_sides):
+            # 💡 السيناريو المعكوس: الاتجاه هابط (ندخل LONG مع فشل النموذج) بدون RSI
+            elif trend_4h == "DOWN" and ("LONG" in btc_allowed_sides):
                 entry_level = swing_low + (range_val * 0.706)
-                sl_level = swing_low + (range_val * 0.79)
+                tp_level = swing_low + (range_val * 0.79)  # الهدف 0.79
+                sl_level = swing_low + (range_val * 0.618) # الستوب 0.618
                 
-                # فحص السماحية + شرط الـ RSI فوق 50
                 if (entry_level - upper_tolerance) <= entry <= (entry_level + lower_tolerance):
-                    if rsi_val > 50:
-                        is_short = True
-                        sl = sl_level
-                        reverse_range = entry - swing_low
-                        tp = entry - (reverse_range * 0.618)
+                    is_long = True 
+                    tp = tp_level
+                    sl = sl_level
 
             if not is_long and not is_short: return None
 
@@ -238,7 +229,6 @@ class TradingSystem:
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
             
-            # رسالة نظيفة بالكامل خالية من المصطلحات الفنية
             msg = (
                 f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
                 f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
@@ -292,8 +282,8 @@ class TradingSystem:
                 sem = asyncio.Semaphore(5) 
                 async def fetch_multi_tf(sym):
                     async with sem:
-                        # تم رفع شموع الـ 15 دقيقة إلى 30 لضمان دقة حساب الـ RSI
-                        res_15m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_ENTRY, limit=30)
+                        # تم تقليل عدد الشموع إلى 5 فقط لعدم الحاجة لـ RSI مما يزيد سرعة الكود
+                        res_15m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_ENTRY, limit=5)
                         res_4h = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=30)
                         return sym, res_15m, res_4h
 
@@ -418,7 +408,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V48.0 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V50.0 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
