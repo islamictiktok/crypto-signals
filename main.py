@@ -22,18 +22,17 @@ class Config:
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg")
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TF_MACRO = '4h'     
-    TF_ENTRY = '15m'    
+    TF_MAIN = '30m'     # فريم التحليل الأساسي
     TOP_COINS_LIMIT = 75 
+    MIN_24H_VOLUME_USDT = 15_000_000 # 💡 فلتر الفوليوم الجديد: 15 مليون
     MAX_TRADES_AT_ONCE = 5 
-    MIN_24H_VOLUME_USDT = 10_000_000 
     MAX_ALLOWED_SPREAD = 0.005 
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 30 
     MAX_MARGIN_RISK_PCT = 30.0 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v50.json"
-    VERSION = "V50.0 (Pure Inverted OTE Sniper)"
+    STATE_FILE = "bot_state_v51.json"
+    VERSION = "V51.0 (Deep OTE Liquidity Hunter)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -71,7 +70,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية المغلق النقي (Pure Inverted Logic)
+# 2. محرك الاستراتيجية الجديد (Deep OTE 30m)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -80,38 +79,53 @@ class StrategyEngine:
         return float(((exit_price - entry) / entry) * 100.0 * lev) if side == "LONG" else float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def identify_swings_body(df, lookback=20):
-        df['body_max'] = df[['open', 'close']].max(axis=1)
-        df['body_min'] = df[['open', 'close']].min(axis=1)
-        
+    def identify_swings_and_liquidity(df, lookback=25):
+        # 1. نتجاهل الشمعة الحالية (التي لم تغلق)
         last_idx = len(df) - 1
         window = df.iloc[max(0, last_idx - lookback):last_idx]
         
+        # 2. البحث عن القمة والقاع بناءً على "الأجسام" فقط
+        window['body_max'] = window[['open', 'close']].max(axis=1)
+        window['body_min'] = window[['open', 'close']].min(axis=1)
+        
         swing_high_idx = window['body_max'].idxmax()
-        swing_high_val = float(window.loc[swing_high_idx, 'body_max'])
+        swing_high_body = float(window.loc[swing_high_idx, 'body_max'])
         
         swing_low_idx = window['body_min'].idxmin()
-        swing_low_val = float(window.loc[swing_low_idx, 'body_min'])
+        swing_low_body = float(window.loc[swing_low_idx, 'body_min'])
         
-        if swing_high_idx > swing_low_idx:
-            trend = "UP" 
+        # تحديد الاتجاه
+        trend = "UP" if swing_low_idx < swing_high_idx else "DOWN"
+        
+        # 3. تحديد الستوب لوز بناءً على الذيول (السيولة)
+        liquidity_sl = 0.0
+        
+        if trend == "UP":
+            # في الاتجاه الصاعد: نبحث عن "أدنى ذيل" في كل الموجة (تحت مستوى الجسم السفلي)
+            lowest_wick = float(window['low'].min())
+            # نضع الستوب تحت أدنى ذيل بقليل (أقرب منطقة سعرية)
+            liquidity_sl = lowest_wick * 0.999 
         else:
-            trend = "DOWN" 
-            
-        return trend, swing_high_val, swing_low_val
+            # في الاتجاه الهابط: نبحث عن "أعلى ذيل" في كل الموجة (فوق مستوى الجسم العلوي)
+            highest_wick = float(window['high'].max())
+            # نضع الستوب فوق أعلى ذيل بقليل
+            liquidity_sl = highest_wick * 1.001
+
+        return trend, swing_high_body, swing_low_body, liquidity_sl
 
     @staticmethod
-    def analyze_mtf(symbol, df_15m_data, df_4h_data, btc_allowed_sides):
+    def analyze_tf(symbol, df_30m_data, btc_allowed_sides):
         try:
-            df_4h = pd.DataFrame(df_4h_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            df_15m = pd.DataFrame(df_15m_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            df = pd.DataFrame(df_30m_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             
-            if len(df_4h) < 30 or len(df_15m) < 5: return None
+            if len(df) < 30: return None
 
-            trend_4h, swing_high, swing_low = StrategyEngine.identify_swings_body(df_4h, lookback=20)
+            # استخراج الهيكل والسيولة من 25 شمعة سابقة
+            trend, swing_high, swing_low, liquidity_sl = StrategyEngine.identify_swings_and_liquidity(df, lookback=25)
             
-            curr_15m = df_15m.iloc[-2]  
-            entry = float(curr_15m['close']) 
+            # الشمعة الحالية
+            curr_candle = df.iloc[-1]  
+            entry = float(curr_candle['close']) 
             
             is_long = False
             is_short = False
@@ -121,30 +135,32 @@ class StrategyEngine:
             range_val = swing_high - swing_low
             if range_val <= 0: return None 
 
-            lower_tolerance = entry * 0.0010 
-            upper_tolerance = entry * 0.0055 
+            # سماحية الدخول (0.15% حول المستوى)
+            tolerance = entry * 0.0015 
 
-            # 💡 السيناريو المعكوس: الاتجاه صاعد (ندخل SHORT مع فشل النموذج) بدون RSI
-            if trend_4h == "UP" and ("SHORT" in btc_allowed_sides):
-                entry_level = swing_high - (range_val * 0.706)
-                tp_level = swing_high - (range_val * 0.79)  # الهدف 0.79
-                sl_level = swing_high - (range_val * 0.618) # الستوب 0.618
+            if trend == "UP" and ("LONG" in btc_allowed_sides):
+                # الموجة صاعدة (القمة تكونت آخر شيء، السعر يصحح للأسفل)
+                # دخول الشراء: عند مستوى 0.95
+                entry_level = swing_high - (range_val * 0.95)
                 
-                if (entry_level - lower_tolerance) <= entry <= (entry_level + upper_tolerance):
-                    is_short = True 
-                    tp = tp_level
-                    sl = sl_level
+                if (entry_level - tolerance) <= entry <= (entry_level + tolerance):
+                    is_long = True
+                    # الهدف: مستوى 0.50
+                    tp = swing_high - (range_val * 0.50)
+                    # الستوب: أدنى ذيل (تم حسابه مسبقاً)
+                    sl = liquidity_sl
 
-            # 💡 السيناريو المعكوس: الاتجاه هابط (ندخل LONG مع فشل النموذج) بدون RSI
-            elif trend_4h == "DOWN" and ("LONG" in btc_allowed_sides):
-                entry_level = swing_low + (range_val * 0.706)
-                tp_level = swing_low + (range_val * 0.79)  # الهدف 0.79
-                sl_level = swing_low + (range_val * 0.618) # الستوب 0.618
+            elif trend == "DOWN" and ("SHORT" in btc_allowed_sides):
+                # الموجة هابطة (القاع تكون آخر شيء، السعر يصحح للأعلى)
+                # دخول البيع: عند مستوى 0.95
+                entry_level = swing_low + (range_val * 0.95)
                 
-                if (entry_level - upper_tolerance) <= entry <= (entry_level + lower_tolerance):
-                    is_long = True 
-                    tp = tp_level
-                    sl = sl_level
+                if (entry_level - tolerance) <= entry <= (entry_level + tolerance):
+                    is_short = True
+                    # الهدف: مستوى 0.50
+                    tp = swing_low + (range_val * 0.50)
+                    # الستوب: أعلى ذيل (تم حسابه مسبقاً)
+                    sl = liquidity_sl
 
             if not is_long and not is_short: return None
 
@@ -159,7 +175,7 @@ class StrategyEngine:
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             pnl = StrategyEngine.calc_actual_roe(entry, tp, side, lev)
             
-            Log.print(f"🎯 {symbol}: Setup Connected!", Log.GREEN)
+            Log.print(f"🎯 {symbol}: Deep OTE 0.95 Setup Connected!", Log.GREEN)
             
             return {
                 "symbol": symbol, "side": side, "entry": entry, 
@@ -229,6 +245,7 @@ class TradingSystem:
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
             
+            # رسالة مشفرة ونظيفة
             msg = (
                 f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
                 f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
@@ -255,7 +272,8 @@ class TradingSystem:
         while self.running:
             try:
                 now_after = datetime.now(timezone.utc)
-                minutes_to_wait = 15 - (now_after.minute % 15)
+                # البوت يستيقظ كل 30 دقيقة ليتزامن مع الفريم الجديد
+                minutes_to_wait = 30 - (now_after.minute % 30)
                 seconds_to_wait = (minutes_to_wait * 60) - now_after.second + 2 
                 
                 active_count = len(self.active_trades)
@@ -275,28 +293,33 @@ class TradingSystem:
                     await asyncio.sleep(10)
                     continue
 
-                scan_list = [c for c in tickers.keys() if 'USDT:USDT' in c and c not in self.active_trades and c not in self.cooldown_list]
+                # 💡 تصفية العملات بناءً على فوليوم 15 مليون
+                scan_list = []
+                for sym, data in tickers.items():
+                    if 'USDT:USDT' in sym and sym not in self.active_trades and sym not in self.cooldown_list:
+                        vol_usdt = data.get('quoteVolume', 0)
+                        if vol_usdt >= Config.MIN_24H_VOLUME_USDT:
+                            scan_list.append(sym)
                 
-                Log.print(f"🔍 Market Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs...", Log.BLUE)
+                Log.print(f"🔍 30m Deep Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs (Vol > 15M)...", Log.BLUE)
 
                 sem = asyncio.Semaphore(5) 
-                async def fetch_multi_tf(sym):
+                async def fetch_tf(sym):
                     async with sem:
-                        # تم تقليل عدد الشموع إلى 5 فقط لعدم الحاجة لـ RSI مما يزيد سرعة الكود
-                        res_15m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_ENTRY, limit=5)
-                        res_4h = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MACRO, limit=30)
-                        return sym, res_15m, res_4h
+                        # جلب 30 شمعة لفريم 30 دقيقة
+                        res_30m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MAIN, limit=30)
+                        return sym, res_30m
 
-                tasks = [fetch_multi_tf(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
+                tasks = [fetch_tf(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
                 for res in results:
                     if isinstance(res, Exception) or not res: continue
-                    sym, res_15m, res_4h = res
+                    sym, res_30m = res
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    if not res_15m or not res_4h: continue
+                    if not res_30m: continue
                     
-                    analysis = await asyncio.to_thread(StrategyEngine.analyze_mtf, sym, res_15m, res_4h, btc_allowed)
+                    analysis = await asyncio.to_thread(StrategyEngine.analyze_tf, sym, res_30m, btc_allowed)
                     if analysis: await self.execute_trade(analysis)
                 
                 gc.collect()
@@ -408,7 +431,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V50.0 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V51.0 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
