@@ -24,15 +24,15 @@ class Config:
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     TF_MAIN = '30m'     # فريم التحليل الأساسي
     TOP_COINS_LIMIT = 75 
-    MIN_24H_VOLUME_USDT = 15_000_000 # 💡 فلتر الفوليوم الجديد: 15 مليون
+    MIN_24H_VOLUME_USDT = 15_000_000 # 💡 فلتر الفوليوم: 15 مليون
     MAX_TRADES_AT_ONCE = 5 
     MAX_ALLOWED_SPREAD = 0.005 
     MIN_LEVERAGE = 2  
-    MAX_LEVERAGE_CAP = 30 
+    MAX_LEVERAGE_CAP = 50 # 💡 تم التعديل إلى 50 رافعة كحد أقصى
     MAX_MARGIN_RISK_PCT = 30.0 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v51.json"
-    VERSION = "V51.0 (Deep OTE Liquidity Hunter)"
+    STATE_FILE = "bot_state_v51_1.json"
+    VERSION = "V51.1 (Deep OTE Liquidity Hunter)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -101,14 +101,12 @@ class StrategyEngine:
         liquidity_sl = 0.0
         
         if trend == "UP":
-            # في الاتجاه الصاعد: نبحث عن "أدنى ذيل" في كل الموجة (تحت مستوى الجسم السفلي)
+            # في الاتجاه الصاعد: نبحث عن أدنى ذيل، ونضع مسافة إزاحة لأسفل (أقرب منطقة سعرية)
             lowest_wick = float(window['low'].min())
-            # نضع الستوب تحت أدنى ذيل بقليل (أقرب منطقة سعرية)
             liquidity_sl = lowest_wick * 0.999 
         else:
-            # في الاتجاه الهابط: نبحث عن "أعلى ذيل" في كل الموجة (فوق مستوى الجسم العلوي)
+            # في الاتجاه الهابط: نبحث عن أعلى ذيل، ونضع مسافة إزاحة لأعلى (أقرب منطقة سعرية)
             highest_wick = float(window['high'].max())
-            # نضع الستوب فوق أعلى ذيل بقليل
             liquidity_sl = highest_wick * 1.001
 
         return trend, swing_high_body, swing_low_body, liquidity_sl
@@ -123,7 +121,7 @@ class StrategyEngine:
             # استخراج الهيكل والسيولة من 25 شمعة سابقة
             trend, swing_high, swing_low, liquidity_sl = StrategyEngine.identify_swings_and_liquidity(df, lookback=25)
             
-            # الشمعة الحالية
+            # الشمعة الحالية للتحقق من الدخول
             curr_candle = df.iloc[-1]  
             entry = float(curr_candle['close']) 
             
@@ -139,27 +137,21 @@ class StrategyEngine:
             tolerance = entry * 0.0015 
 
             if trend == "UP" and ("LONG" in btc_allowed_sides):
-                # الموجة صاعدة (القمة تكونت آخر شيء، السعر يصحح للأسفل)
-                # دخول الشراء: عند مستوى 0.95
+                # دخول الشراء عند مستوى 0.95
                 entry_level = swing_high - (range_val * 0.95)
                 
                 if (entry_level - tolerance) <= entry <= (entry_level + tolerance):
                     is_long = True
-                    # الهدف: مستوى 0.50
                     tp = swing_high - (range_val * 0.50)
-                    # الستوب: أدنى ذيل (تم حسابه مسبقاً)
                     sl = liquidity_sl
 
             elif trend == "DOWN" and ("SHORT" in btc_allowed_sides):
-                # الموجة هابطة (القاع تكون آخر شيء، السعر يصحح للأعلى)
-                # دخول البيع: عند مستوى 0.95
+                # دخول البيع عند مستوى 0.95
                 entry_level = swing_low + (range_val * 0.95)
                 
                 if (entry_level - tolerance) <= entry <= (entry_level + tolerance):
                     is_short = True
-                    # الهدف: مستوى 0.50
                     tp = swing_low + (range_val * 0.50)
-                    # الستوب: أعلى ذيل (تم حسابه مسبقاً)
                     sl = liquidity_sl
 
             if not is_long and not is_short: return None
@@ -172,10 +164,17 @@ class StrategyEngine:
             sl_distance_pct = (risk / entry) * 100
             if sl_distance_pct < 0.1 or sl_distance_pct > Config.MAX_MARGIN_RISK_PCT: return None 
             
+            # حساب الرافعة المالية
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
+            
+            # حساب العائد المتوقع (ROE)
             pnl = StrategyEngine.calc_actual_roe(entry, tp, side, lev)
             
-            Log.print(f"🎯 {symbol}: Deep OTE 0.95 Setup Connected!", Log.GREEN)
+            # 💡 الشرط الجديد: تجاهل الصفقة إذا كان العائد المتوقع أقل من 10%
+            if pnl < 10.0:
+                return None
+            
+            Log.print(f"🎯 {symbol}: Deep OTE 0.95 Setup Connected! Expected ROE: {pnl:.1f}%", Log.GREEN)
             
             return {
                 "symbol": symbol, "side": side, "entry": entry, 
@@ -306,7 +305,6 @@ class TradingSystem:
                 sem = asyncio.Semaphore(5) 
                 async def fetch_tf(sym):
                     async with sem:
-                        # جلب 30 شمعة لفريم 30 دقيقة
                         res_30m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MAIN, limit=30)
                         return sym, res_30m
 
@@ -431,7 +429,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V51.0 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V51.1 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
