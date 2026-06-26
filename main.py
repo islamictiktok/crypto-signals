@@ -6,6 +6,7 @@ import time
 import warnings
 from datetime import datetime, timezone
 import pandas as pd
+import pandas_ta as ta
 import ccxt.async_support as ccxt
 import aiohttp
 from fastapi import FastAPI, Response
@@ -22,17 +23,17 @@ class Config:
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg")
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TF_MAIN = '30m'     # فريم التحليل الأساسي
+    TF_MAIN = '30m'     
     TOP_COINS_LIMIT = 75 
-    MIN_24H_VOLUME_USDT = 15_000_000 # 💡 فلتر الفوليوم: 15 مليون
+    MIN_24H_VOLUME_USDT = 15_000_000 
     MAX_TRADES_AT_ONCE = 5 
     MAX_ALLOWED_SPREAD = 0.005 
     MIN_LEVERAGE = 2  
-    MAX_LEVERAGE_CAP = 50 # 💡 تم التعديل إلى 50 رافعة كحد أقصى
+    MAX_LEVERAGE_CAP = 50 
     MAX_MARGIN_RISK_PCT = 30.0 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v51_1.json"
-    VERSION = "V51.1 (Deep OTE Liquidity Hunter)"
+    STATE_FILE = "bot_state_v52.json"
+    VERSION = "V52.0 (Deep OTE + RSI Filter)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -70,9 +71,14 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية الجديد (Deep OTE 30m)
+# 2. محرك الاستراتيجية الجديد (Deep OTE + RSI)
 # ==========================================
 class StrategyEngine:
+    @staticmethod
+    def format_price(price):
+        # 💡 دالة لحل مشكلة العملات الصفرية والصيغة العلمية
+        return f"{price:.10f}".rstrip('0').rstrip('.')
+
     @staticmethod
     def calc_actual_roe(entry, exit_price, side, lev):
         if entry <= 0: return 0.0 
@@ -80,11 +86,9 @@ class StrategyEngine:
 
     @staticmethod
     def identify_swings_and_liquidity(df, lookback=25):
-        # 1. نتجاهل الشمعة الحالية (التي لم تغلق)
         last_idx = len(df) - 1
         window = df.iloc[max(0, last_idx - lookback):last_idx]
         
-        # 2. البحث عن القمة والقاع بناءً على "الأجسام" فقط
         window['body_max'] = window[['open', 'close']].max(axis=1)
         window['body_min'] = window[['open', 'close']].min(axis=1)
         
@@ -94,18 +98,14 @@ class StrategyEngine:
         swing_low_idx = window['body_min'].idxmin()
         swing_low_body = float(window.loc[swing_low_idx, 'body_min'])
         
-        # تحديد الاتجاه
         trend = "UP" if swing_low_idx < swing_high_idx else "DOWN"
         
-        # 3. تحديد الستوب لوز بناءً على الذيول (السيولة)
         liquidity_sl = 0.0
         
         if trend == "UP":
-            # في الاتجاه الصاعد: نبحث عن أدنى ذيل، ونضع مسافة إزاحة لأسفل (أقرب منطقة سعرية)
             lowest_wick = float(window['low'].min())
             liquidity_sl = lowest_wick * 0.999 
         else:
-            # في الاتجاه الهابط: نبحث عن أعلى ذيل، ونضع مسافة إزاحة لأعلى (أقرب منطقة سعرية)
             highest_wick = float(window['high'].max())
             liquidity_sl = highest_wick * 1.001
 
@@ -116,14 +116,17 @@ class StrategyEngine:
         try:
             df = pd.DataFrame(df_30m_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             
+            # 💡 حساب الـ RSI
+            df['rsi'] = ta.rsi(df['close'], length=14)
+            df.dropna(inplace=True)
+            
             if len(df) < 30: return None
 
-            # استخراج الهيكل والسيولة من 25 شمعة سابقة
             trend, swing_high, swing_low, liquidity_sl = StrategyEngine.identify_swings_and_liquidity(df, lookback=25)
             
-            # الشمعة الحالية للتحقق من الدخول
             curr_candle = df.iloc[-1]  
             entry = float(curr_candle['close']) 
+            rsi_val = float(curr_candle['rsi']) # سحب قيمة RSI الحالية
             
             is_long = False
             is_short = False
@@ -133,26 +136,27 @@ class StrategyEngine:
             range_val = swing_high - swing_low
             if range_val <= 0: return None 
 
-            # سماحية الدخول (0.15% حول المستوى)
             tolerance = entry * 0.0015 
 
             if trend == "UP" and ("LONG" in btc_allowed_sides):
-                # دخول الشراء عند مستوى 0.95
                 entry_level = swing_high - (range_val * 0.95)
                 
+                # 💡 شرط الدخول + فلتر RSI أقل من 45
                 if (entry_level - tolerance) <= entry <= (entry_level + tolerance):
-                    is_long = True
-                    tp = swing_high - (range_val * 0.50)
-                    sl = liquidity_sl
+                    if rsi_val < 45:
+                        is_long = True
+                        tp = swing_high - (range_val * 0.50)
+                        sl = liquidity_sl
 
             elif trend == "DOWN" and ("SHORT" in btc_allowed_sides):
-                # دخول البيع عند مستوى 0.95
                 entry_level = swing_low + (range_val * 0.95)
                 
+                # 💡 شرط الدخول + فلتر RSI أعلى من 55 لضمان التشبع الشرائي
                 if (entry_level - tolerance) <= entry <= (entry_level + tolerance):
-                    is_short = True
-                    tp = swing_low + (range_val * 0.50)
-                    sl = liquidity_sl
+                    if rsi_val > 55:
+                        is_short = True
+                        tp = swing_low + (range_val * 0.50)
+                        sl = liquidity_sl
 
             if not is_long and not is_short: return None
 
@@ -164,17 +168,13 @@ class StrategyEngine:
             sl_distance_pct = (risk / entry) * 100
             if sl_distance_pct < 0.1 or sl_distance_pct > Config.MAX_MARGIN_RISK_PCT: return None 
             
-            # حساب الرافعة المالية
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
-            
-            # حساب العائد المتوقع (ROE)
             pnl = StrategyEngine.calc_actual_roe(entry, tp, side, lev)
             
-            # 💡 الشرط الجديد: تجاهل الصفقة إذا كان العائد المتوقع أقل من 10%
-            if pnl < 10.0:
-                return None
+            # 💡 فلتر العائد المتوقع (أكبر من 10%)
+            if pnl < 10.0: return None
             
-            Log.print(f"🎯 {symbol}: Deep OTE 0.95 Setup Connected! Expected ROE: {pnl:.1f}%", Log.GREEN)
+            Log.print(f"🎯 {symbol}: Setup Connected! RSI: {rsi_val:.1f} | ROE: {pnl:.1f}%", Log.GREEN)
             
             return {
                 "symbol": symbol, "side": side, "entry": entry, 
@@ -244,15 +244,19 @@ class TradingSystem:
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
             
-            # رسالة مشفرة ونظيفة
+            # 💡 تطبيق دالة الفورمات لحل مشكلة الأصفار والصيغة العلمية
+            fmt_entry = StrategyEngine.format_price(trade['entry'])
+            fmt_tp = StrategyEngine.format_price(trade['tp'])
+            fmt_sl = StrategyEngine.format_price(trade['sl'])
+
             msg = (
                 f"⚡ <b><code>{exact_app_name}</code></b> | {icon}\n"
                 f"⚖️ Leverage: <b>{trade['leverage']}x</b>\n"
-                f"💰 Entry: <code>{trade['entry']}</code>\n"
+                f"💰 Entry: <code>{fmt_entry}</code>\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🎯 Target: <code>{trade['tp']:.4f}</code> (+{trade['pnl']:.1f}%)\n"
+                f"🎯 Target: <code>{fmt_tp}</code> (+{trade['pnl']:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"🛑 Stop: <code>{trade['sl']:.4f}</code> ({sl_roe:.1f}%)\n"
+                f"🛑 Stop: <code>{fmt_sl}</code> ({sl_roe:.1f}%)\n"
                 f"━━━━━━━━━━━━━━━"
             )
             msg_id = await self.tg.send(msg)
@@ -271,7 +275,6 @@ class TradingSystem:
         while self.running:
             try:
                 now_after = datetime.now(timezone.utc)
-                # البوت يستيقظ كل 30 دقيقة ليتزامن مع الفريم الجديد
                 minutes_to_wait = 30 - (now_after.minute % 30)
                 seconds_to_wait = (minutes_to_wait * 60) - now_after.second + 2 
                 
@@ -292,7 +295,6 @@ class TradingSystem:
                     await asyncio.sleep(10)
                     continue
 
-                # 💡 تصفية العملات بناءً على فوليوم 15 مليون
                 scan_list = []
                 for sym, data in tickers.items():
                     if 'USDT:USDT' in sym and sym not in self.active_trades and sym not in self.cooldown_list:
@@ -305,7 +307,8 @@ class TradingSystem:
                 sem = asyncio.Semaphore(5) 
                 async def fetch_tf(sym):
                     async with sem:
-                        res_30m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MAIN, limit=30)
+                        # 💡 جلب 50 شمعة بدلاً من 30 لضمان دقة حساب الـ RSI
+                        res_30m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MAIN, limit=50)
                         return sym, res_30m
 
                 tasks = [fetch_tf(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
@@ -358,7 +361,9 @@ class TradingSystem:
                         self.stats['total_duration_secs'] += duration_secs
                         self.stats['losses'] += 1
                         self.stats['realized_rr'] -= 1.0
-                        msg = f"🛑 <b><code>{coin_name}</code></b>\n❌ SL Hit: <code>{sl:.4f}</code>"
+                        
+                        fmt_sl = StrategyEngine.format_price(sl)
+                        msg = f"🛑 <b><code>{coin_name}</code></b>\n❌ SL Hit: <code>{fmt_sl}</code>"
                         Log.print(f"🛑 {coin_name} hit SL", Log.RED)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp()) 
@@ -376,7 +381,8 @@ class TradingSystem:
                         rr = reward / risk if risk > 0 else 0
                         self.stats['realized_rr'] += rr
                         
-                        msg = f"🏆 <b><code>{coin_name}</code></b>\n🚀 Target Hit: <code>{tp:.4f}</code>\n✅ Trade Completed! (+{rr:.1f}R)"
+                        fmt_tp = StrategyEngine.format_price(tp)
+                        msg = f"🏆 <b><code>{coin_name}</code></b>\n🚀 Target Hit: <code>{fmt_tp}</code>\n✅ Trade Completed! (+{rr:.1f}R)"
                         Log.print(f"🏆 {coin_name} hit Target", Log.GREEN)
                         
                         self.cooldown_list[sym] = int(datetime.now(timezone.utc).timestamp())
@@ -429,7 +435,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V51.1 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V52.0 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
