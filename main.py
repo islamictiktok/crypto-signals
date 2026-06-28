@@ -24,6 +24,7 @@ class Config:
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     TF_MAIN = '30m'     
+    TF_MICRO = '1m'     # التأكيد اللحظي السريع
     TOP_COINS_LIMIT = 75 
     MIN_24H_VOLUME_USDT = 15_000_000 
     MAX_TRADES_AT_ONCE = 5 
@@ -32,8 +33,8 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     MAX_MARGIN_RISK_PCT = 30.0 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v52.json"
-    VERSION = "V52.0 (Deep OTE + RSI Filter)"
+    STATE_FILE = "bot_state_v56.json"
+    VERSION = "V56.0 (Pure Hybrid Sniper)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -71,13 +72,12 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية الجديد (Deep OTE + RSI)
+# 2. محرك الاستراتيجية (الهيكل 30m + التأكيد 1m)
 # ==========================================
 class StrategyEngine:
     @staticmethod
     def format_price(price):
-        # 💡 دالة لحل مشكلة العملات الصفرية والصيغة العلمية
-        return f"{price:.10f}".rstrip('0').rstrip('.')
+        return f"{price:.10f}".rstrip('0').rstrip('.') if '.' in f"{price:.10f}" else f"{price:.10f}"
 
     @staticmethod
     def calc_actual_roe(entry, exit_price, side, lev):
@@ -86,8 +86,9 @@ class StrategyEngine:
 
     @staticmethod
     def identify_swings_and_liquidity(df, lookback=25):
+        # تجاهل الشمعة الحالية 
         last_idx = len(df) - 1
-        window = df.iloc[max(0, last_idx - lookback):last_idx]
+        window = df.iloc[max(0, last_idx - lookback):last_idx].copy()
         
         window['body_max'] = window[['open', 'close']].max(axis=1)
         window['body_min'] = window[['open', 'close']].min(axis=1)
@@ -112,72 +113,91 @@ class StrategyEngine:
         return trend, swing_high_body, swing_low_body, liquidity_sl
 
     @staticmethod
-    def analyze_tf(symbol, df_30m_data, btc_allowed_sides):
+    async def confirm_micro_tf(exchange, symbol, expected_side):
+        """ 💡 فلتر التأكيد اللحظي (ستوكاستيك + فوليوم انفجاري) """
         try:
-            df = pd.DataFrame(df_30m_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            res_1m = await fetch_with_retry(exchange.fetch_ohlcv, symbol, Config.TF_MICRO, limit=20)
+            if not res_1m or len(res_1m) < 20: return False
             
-            # 💡 حساب الـ RSI
-            df['rsi'] = ta.rsi(df['close'], length=14)
-            df.dropna(inplace=True)
+            df_1m = pd.DataFrame(res_1m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             
-            if len(df) < 30: return None
+            stoch = ta.stoch(df_1m['high'], df_1m['low'], df_1m['close'], k=14, d=3, smooth_k=3)
+            df_1m = pd.concat([df_1m, stoch], axis=1)
+            
+            curr_1m = df_1m.iloc[-1]
+            stoch_k = float(curr_1m['STOCHk_14_3_3'])
+            
+            avg_vol = df_1m['vol'].iloc[-16:-1].mean()
+            curr_vol = float(curr_1m['vol'])
+            
+            # فوليوم أعلى بـ 150% من المتوسط
+            vol_spike = curr_vol > (avg_vol * 1.5)
 
-            trend, swing_high, swing_low, liquidity_sl = StrategyEngine.identify_swings_and_liquidity(df, lookback=25)
+            if expected_side == "LONG":
+                return (stoch_k < 20) and vol_spike
+            elif expected_side == "SHORT":
+                return (stoch_k > 80) and vol_spike
+                
+            return False
+        except: return False
+
+    @staticmethod
+    async def analyze_and_confirm(exchange, symbol, df_30m_data, btc_allowed_sides):
+        try:
+            df_30m = pd.DataFrame(df_30m_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            if len(df_30m) < 30: return None
+
+            trend, swing_high, swing_low, liquidity_sl = StrategyEngine.identify_swings_and_liquidity(df_30m, lookback=25)
             
-            curr_candle = df.iloc[-1]  
+            curr_candle = df_30m.iloc[-1]  
             entry = float(curr_candle['close']) 
-            rsi_val = float(curr_candle['rsi']) # سحب قيمة RSI الحالية
             
-            is_long = False
-            is_short = False
-            sl = 0.0
-            tp = 0.0
-
             range_val = swing_high - swing_low
             if range_val <= 0: return None 
 
             tolerance = entry * 0.0015 
+            
+            potential_side = None
+            tp = 0.0
+            sl = liquidity_sl
 
+            # 1. فحص الملامسة السعرية لـ 0.95
             if trend == "UP" and ("LONG" in btc_allowed_sides):
                 entry_level = swing_high - (range_val * 0.95)
-                
-                # 💡 شرط الدخول + فلتر RSI أقل من 45
                 if (entry_level - tolerance) <= entry <= (entry_level + tolerance):
-                    if rsi_val < 45:
-                        is_long = True
-                        tp = swing_high - (range_val * 0.50)
-                        sl = liquidity_sl
+                    potential_side = "LONG"
+                    tp = swing_high - (range_val * 0.50)
 
             elif trend == "DOWN" and ("SHORT" in btc_allowed_sides):
                 entry_level = swing_low + (range_val * 0.95)
-                
-                # 💡 شرط الدخول + فلتر RSI أعلى من 55 لضمان التشبع الشرائي
                 if (entry_level - tolerance) <= entry <= (entry_level + tolerance):
-                    if rsi_val > 55:
-                        is_short = True
-                        tp = swing_low + (range_val * 0.50)
-                        sl = liquidity_sl
+                    potential_side = "SHORT"
+                    tp = swing_low + (range_val * 0.50)
 
-            if not is_long and not is_short: return None
+            if not potential_side: return None
 
-            side = "LONG" if is_long else "SHORT"
+            # 2. التأكيد اللحظي الفوري عبر فريم 1m
+            is_confirmed = await StrategyEngine.confirm_micro_tf(exchange, symbol, potential_side)
+            if not is_confirmed: 
+                return None
+
+            # 3. إدارة المخاطر وتصفية الصفقات الضعيفة
             risk = abs(entry - sl)
-            
             if risk == 0: return None
             
             sl_distance_pct = (risk / entry) * 100
             if sl_distance_pct < 0.1 or sl_distance_pct > Config.MAX_MARGIN_RISK_PCT: return None 
             
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
-            pnl = StrategyEngine.calc_actual_roe(entry, tp, side, lev)
+            pnl = StrategyEngine.calc_actual_roe(entry, tp, potential_side, lev)
             
-            # 💡 فلتر العائد المتوقع (أكبر من 10%)
+            # فلتر العائد المتوقع > 10%
             if pnl < 10.0: return None
             
-            Log.print(f"🎯 {symbol}: Setup Connected! RSI: {rsi_val:.1f} | ROE: {pnl:.1f}%", Log.GREEN)
+            Log.print(f"🎯 {symbol}: Pure Hybrid Confirmed! Executing {potential_side}...", Log.GREEN)
             
             return {
-                "symbol": symbol, "side": side, "entry": entry, 
+                "symbol": symbol, "side": potential_side, "entry": entry, 
                 "sl": sl, "tp": tp, "pnl": pnl, "leverage": lev
             }
         except Exception as e: 
@@ -244,7 +264,6 @@ class TradingSystem:
             base_coin_name = market_info.get('info', {}).get('baseCoinName', '')
             exact_app_name = f"{base_coin_name}/USDT" if base_coin_name else sym.replace('/USDT:USDT', '/USDT')
             
-            # 💡 تطبيق دالة الفورمات لحل مشكلة الأصفار والصيغة العلمية
             fmt_entry = StrategyEngine.format_price(trade['entry'])
             fmt_tp = StrategyEngine.format_price(trade['tp'])
             fmt_sl = StrategyEngine.format_price(trade['sl'])
@@ -274,14 +293,9 @@ class TradingSystem:
     async def scan_market(self):
         while self.running:
             try:
-                now_after = datetime.now(timezone.utc)
-                minutes_to_wait = 30 - (now_after.minute % 30)
-                seconds_to_wait = (minutes_to_wait * 60) - now_after.second + 2 
-                
-                active_count = len(self.active_trades)
-                Log.print(f"⏳ Next Pulse in {int(seconds_to_wait)}s... [Active Trades: {active_count}]", Log.YELLOW)
-                
-                await asyncio.sleep(seconds_to_wait)
+                # مسح مستمر كل 30 ثانية
+                Log.print(f"🔍 Live Pulse Active... Scanning market. [Active: {len(self.active_trades)}]", Log.YELLOW)
+                await asyncio.sleep(30)
 
                 current_time = int(datetime.now(timezone.utc).timestamp())
                 keys_to_delete = [k for k, v in self.cooldown_list.items() if (current_time - v) > Config.COOLDOWN_SECONDS]
@@ -302,13 +316,10 @@ class TradingSystem:
                         if vol_usdt >= Config.MIN_24H_VOLUME_USDT:
                             scan_list.append(sym)
                 
-                Log.print(f"🔍 30m Deep Scan | Scanning {min(len(scan_list), Config.TOP_COINS_LIMIT)} pairs (Vol > 15M)...", Log.BLUE)
-
                 sem = asyncio.Semaphore(5) 
                 async def fetch_tf(sym):
                     async with sem:
-                        # 💡 جلب 50 شمعة بدلاً من 30 لضمان دقة حساب الـ RSI
-                        res_30m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MAIN, limit=50)
+                        res_30m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MAIN, limit=30)
                         return sym, res_30m
 
                 tasks = [fetch_tf(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
@@ -320,7 +331,7 @@ class TradingSystem:
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
                     if not res_30m: continue
                     
-                    analysis = await asyncio.to_thread(StrategyEngine.analyze_tf, sym, res_30m, btc_allowed)
+                    analysis = await StrategyEngine.analyze_and_confirm(self.exchange, sym, res_30m, btc_allowed)
                     if analysis: await self.execute_trade(analysis)
                 
                 gc.collect()
@@ -435,7 +446,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V52.0 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V56.0 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
