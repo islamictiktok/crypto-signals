@@ -6,7 +6,6 @@ import time
 import warnings
 from datetime import datetime, timezone
 import pandas as pd
-import pandas_ta as ta
 import ccxt.async_support as ccxt
 import aiohttp
 from fastapi import FastAPI, Response
@@ -24,7 +23,6 @@ class Config:
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
     TF_MAIN = '30m'     
-    TF_CONFIRM = '3m'   # الفريم المثالي لرصد الدايفرجينس السريع بدون ضوضاء
     TOP_COINS_LIMIT = 75 
     MIN_24H_VOLUME_USDT = 15_000_000 
     MAX_TRADES_AT_ONCE = 5 
@@ -33,8 +31,8 @@ class Config:
     MAX_LEVERAGE_CAP = 50 
     MAX_MARGIN_RISK_PCT = 30.0 
     COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v57.json"
-    VERSION = "V57.1 (Divergence Hybrid Sniper - Fixed)"
+    STATE_FILE = "bot_state_v58.json"
+    VERSION = "V58.0 (Institutional Wick Sniper)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -72,7 +70,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية وفلتر الدايفرجينس الذكي
+# 2. محرك الاستراتيجية وفلتر الامتصاص السعري
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -111,54 +109,39 @@ class StrategyEngine:
         return trend, swing_high_body, swing_low_body, liquidity_sl
 
     @staticmethod
-    async def check_rsi_divergence(exchange, symbol, expected_side):
+    async def check_wick_rejection(exchange, symbol, expected_side, entry_level):
+        """ 🎯 فلتر الامتصاص والرفض السعري اللحظي (Wick Rejection) على فريم 1m """
         try:
-            res_3m = await fetch_with_retry(exchange.fetch_ohlcv, symbol, Config.TF_CONFIRM, limit=30)
-            if not res_3m or len(res_3m) < 20: return False
+            # نجلب آخر 10 شموع على فريم الدقيقة
+            res_1m = await fetch_with_retry(exchange.fetch_ohlcv, symbol, '1m', limit=10)
+            if not res_1m or len(res_1m) < 5: return False
             
-            df = pd.DataFrame(res_3m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            df['rsi'] = ta.rsi(df['close'], length=9)
+            df = pd.DataFrame(res_1m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
             
-            if df['rsi'].isna().all(): return False
-
-            lookback_candles = 15
-            sub_df = df.iloc[-lookback_candles:].reset_index(drop=True)
-            n = len(sub_df)
-
-            if expected_side == "LONG":
-                p1_idx, p2_idx = -1, -1
-                for i in range(n - 2, 1, -1):
-                    if sub_df.loc[i, 'low'] < sub_df.loc[i-1, 'low'] and sub_df.loc[i, 'low'] < sub_df.loc[i+1, 'low']:
-                        if p2_idx == -1: p2_idx = i
-                        elif p1_idx == -1 and i < p2_idx - 1:
-                            p1_idx = i
-                            break
+            # فحص آخر 3 شموع لضمان التقاط الارتداد الفوري
+            for i in range(len(df)-3, len(df)):
+                c = df.iloc[i]
+                candle_range = c['high'] - c['low']
                 
-                if p1_idx != -1 and p2_idx != -1:
-                    price_low1 = sub_df.loc[p1_idx, 'low']
-                    price_low2 = sub_df.loc[p2_idx, 'low']
-                    rsi_low1 = sub_df.loc[p1_idx, 'rsi']
-                    rsi_low2 = sub_df.loc[p2_idx, 'rsi']
-                    if price_low2 < price_low1 and rsi_low2 > rsi_low1 and rsi_low2 < 35:
-                        return True
-
-            elif expected_side == "SHORT":
-                p1_idx, p2_idx = -1, -1
-                for i in range(n - 2, 1, -1):
-                    if sub_df.loc[i, 'high'] > sub_df.loc[i-1, 'high'] and sub_df.loc[i, 'high'] > sub_df.loc[i+1, 'high']:
-                        if p2_idx == -1: p2_idx = i
-                        elif p1_idx == -1 and i < p2_idx - 1:
-                            p1_idx = i
-                            break
+                if candle_range == 0: continue
                 
-                if p1_idx != -1 and p2_idx != -1:
-                    price_high1 = sub_df.loc[p1_idx, 'high']
-                    price_high2 = sub_df.loc[p2_idx, 'high']
-                    rsi_high1 = sub_df.loc[p1_idx, 'rsi']
-                    rsi_high2 = sub_df.loc[p2_idx, 'rsi']
-                    if price_high2 > price_high1 and rsi_high2 < rsi_high1 and rsi_high2 > 65:
-                        return True
-
+                if expected_side == "LONG":
+                    # 1. هل الشمعة لمست أو نزلت تحت مستوى 0.95؟
+                    if c['low'] <= entry_level * 1.001: 
+                        # 2. حساب طول الذيل السفلي
+                        lower_wick = min(c['open'], c['close']) - c['low']
+                        # 3. هل الذيل يمثل 60% أو أكثر من الشمعة؟ (رفض شرائي عنيف)
+                        if (lower_wick / candle_range) >= 0.60:
+                            return True
+                            
+                elif expected_side == "SHORT":
+                    # 1. هل الشمعة لمست أو صعدت فوق مستوى 0.95؟
+                    if c['high'] >= entry_level * 0.999:
+                        # 2. حساب طول الذيل العلوي
+                        upper_wick = c['high'] - max(c['open'], c['close'])
+                        # 3. هل الذيل يمثل 60% أو أكثر من الشمعة؟ (رفض بيعي عنيف)
+                        if (upper_wick / candle_range) >= 0.60:
+                            return True
             return False
         except: return False
 
@@ -180,7 +163,9 @@ class StrategyEngine:
             potential_side = None
             tp = 0.0
             sl = liquidity_sl
+            entry_level = 0.0
 
+            # 1. فحص الوصول إلى الـ 0.95
             if trend == "UP" and ("LONG" in btc_allowed_sides):
                 entry_level = swing_high - (range_val * 0.95)
                 if (entry_level - tolerance) <= entry <= (entry_level + tolerance):
@@ -195,9 +180,11 @@ class StrategyEngine:
 
             if not potential_side: return None
 
-            has_divergence = await StrategyEngine.check_rsi_divergence(exchange, symbol, potential_side)
-            if not has_divergence: return None 
+            # 🛡️ 2. تفعيل فلتر الرفض السعري المؤسساتي (Wick Rejection)
+            is_rejected = await StrategyEngine.check_wick_rejection(exchange, symbol, potential_side, entry_level)
+            if not is_rejected: return None 
 
+            # 3. حسابات إدارة رأس المال والمخاطر
             risk = abs(entry - sl)
             if risk == 0: return None
             
@@ -206,14 +193,17 @@ class StrategyEngine:
             
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             pnl = StrategyEngine.calc_actual_roe(entry, tp, potential_side, lev)
+            
             if pnl < 10.0: return None
             
-            Log.print(f"🎯 {symbol}: Divergence Verified! Executing {potential_side}...", Log.GREEN)
+            Log.print(f"🎯 {symbol}: Institutional Wick Rejection Verified! Executing {potential_side}...", Log.GREEN)
+            
             return {
                 "symbol": symbol, "side": potential_side, "entry": entry, 
                 "sl": sl, "tp": tp, "pnl": pnl, "leverage": lev
             }
-        except: return None
+        except Exception as e: 
+            return None
 
 # ==========================================
 # 3. نظام التداول والتحكم
@@ -253,7 +243,7 @@ class TradingSystem:
         try:
             await self.exchange.load_markets()
             self.load_state() 
-            Log.print(f"🚀 ENGINE ONLINE: {Config.VERSION}", Log.GREEN) # تم تصحيح هذا السطر من Config إلى Log
+            Log.print(f"🚀 ENGINE ONLINE: {Config.VERSION}", Log.GREEN)
         except Exception as e:
             Log.print(f"Error loading markets: {e}", Log.RED)
 
@@ -299,7 +289,8 @@ class TradingSystem:
             self.stats["signals"] += 1
             self.save_state()
             Log.print(f"🚀 SIGNAL SENT: {exact_app_name}", Log.GREEN)
-        except: pass
+        except Exception as e:
+            pass
 
     async def scan_market(self):
         while self.running:
@@ -312,7 +303,9 @@ class TradingSystem:
                 for k in keys_to_delete: del self.cooldown_list[k]
 
                 btc_allowed = await self.get_btc_allowed_sides()
-                try: tickers = await self.exchange.fetch_tickers()
+                
+                try:
+                    tickers = await self.exchange.fetch_tickers()
                 except:
                     await asyncio.sleep(10)
                     continue
@@ -409,7 +402,8 @@ class TradingSystem:
                         del self.active_trades[sym]
                         self.save_state()
                         
-            except: pass
+            except Exception as e: 
+                pass
             await asyncio.sleep(2)
 
     async def daily_report(self):
@@ -453,7 +447,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V57.1 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V58.0 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
