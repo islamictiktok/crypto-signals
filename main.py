@@ -34,7 +34,7 @@ class Config:
     MAX_MARGIN_RISK_PCT = 30.0 
     COOLDOWN_SECONDS = 3600 
     STATE_FILE = "bot_state_v57.json"
-    VERSION = "V57.0 (Divergence Hybrid Sniper)"
+    VERSION = "V57.1 (Divergence Hybrid Sniper - Fixed)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -112,29 +112,24 @@ class StrategyEngine:
 
     @staticmethod
     async def check_rsi_divergence(exchange, symbol, expected_side):
-        """ 📉 رادار فحص انحراف الزخم اللحظي (Micro RSI Divergence) """
         try:
             res_3m = await fetch_with_retry(exchange.fetch_ohlcv, symbol, Config.TF_CONFIRM, limit=30)
             if not res_3m or len(res_3m) < 20: return False
             
             df = pd.DataFrame(res_3m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            df['rsi'] = ta.rsi(df['close'], length=9) # إعداد سريع وحساس للانعكاسات
+            df['rsi'] = ta.rsi(df['close'], length=9)
             
             if df['rsi'].isna().all(): return False
 
-            # مصفوفة آخر 15 شمعة للبحث عن القيعان/القمم
             lookback_candles = 15
             sub_df = df.iloc[-lookback_candles:].reset_index(drop=True)
             n = len(sub_df)
 
             if expected_side == "LONG":
-                # البحث عن قاعين محليين (قاع السعر ينخفض وقاع الـ RSI يرتفع)
                 p1_idx, p2_idx = -1, -1
                 for i in range(n - 2, 1, -1):
-                    # تعريف القاع المحلي (أقل من الشمعة السابقة والتالية)
                     if sub_df.loc[i, 'low'] < sub_df.loc[i-1, 'low'] and sub_df.loc[i, 'low'] < sub_df.loc[i+1, 'low']:
-                        if p2_idx == -1:
-                            p2_idx = i
+                        if p2_idx == -1: p2_idx = i
                         elif p1_idx == -1 and i < p2_idx - 1:
                             p1_idx = i
                             break
@@ -144,18 +139,14 @@ class StrategyEngine:
                     price_low2 = sub_df.loc[p2_idx, 'low']
                     rsi_low1 = sub_df.loc[p1_idx, 'rsi']
                     rsi_low2 = sub_df.loc[p2_idx, 'rsi']
-                    
-                    # شرط دايفرجينس شرائي (السعر يصنع قاعاً أقل، والـ RSI يصنع قاعاً أعلى في منطقة التشبع البيعي)
                     if price_low2 < price_low1 and rsi_low2 > rsi_low1 and rsi_low2 < 35:
                         return True
 
             elif expected_side == "SHORT":
-                # البحث عن قمتين محليتين (قمة السعر ترتفع وقمة الـ RSI تنخفض)
                 p1_idx, p2_idx = -1, -1
                 for i in range(n - 2, 1, -1):
                     if sub_df.loc[i, 'high'] > sub_df.loc[i-1, 'high'] and sub_df.loc[i, 'high'] > sub_df.loc[i+1, 'high']:
-                        if p2_idx == -1:
-                            p2_idx = i
+                        if p2_idx == -1: p2_idx = i
                         elif p1_idx == -1 and i < p2_idx - 1:
                             p1_idx = i
                             break
@@ -165,14 +156,11 @@ class StrategyEngine:
                     price_high2 = sub_df.loc[p2_idx, 'high']
                     rsi_high1 = sub_df.loc[p1_idx, 'rsi']
                     rsi_high2 = sub_df.loc[p2_idx, 'rsi']
-                    
-                    # شرط دايفرجينس بيعي (السعر يصنع قمة أعلى، والـ RSI يصنع قمة أقل في منطقة التشبع الشرائي)
                     if price_high2 > price_high1 and rsi_high2 < rsi_high1 and rsi_high2 > 65:
                         return True
 
             return False
-        except:
-            return False
+        except: return False
 
     @staticmethod
     async def analyze_and_confirm(exchange, symbol, df_30m_data, btc_allowed_sides):
@@ -189,12 +177,10 @@ class StrategyEngine:
             if range_val <= 0: return None 
 
             tolerance = entry * 0.0015 
-            
             potential_side = None
             tp = 0.0
             sl = liquidity_sl
 
-            # 1. فحص الوصول إلى الـ 0.95
             if trend == "UP" and ("LONG" in btc_allowed_sides):
                 entry_level = swing_high - (range_val * 0.95)
                 if (entry_level - tolerance) <= entry <= (entry_level + tolerance):
@@ -209,12 +195,9 @@ class StrategyEngine:
 
             if not potential_side: return None
 
-            # 📉 2. فلترة الصفقات عبر نظام الـ RSI Divergence الفوري لمنع نزيف السكين الساقطة
             has_divergence = await StrategyEngine.check_rsi_divergence(exchange, symbol, potential_side)
-            if not has_divergence: 
-                return None # نلغي الصفقة فوراً إذا لم يثبت ضعف الزخم وانعكاسه
+            if not has_divergence: return None 
 
-            # 3. حسابات إدارة رأس المال والمخاطر
             risk = abs(entry - sl)
             if risk == 0: return None
             
@@ -223,17 +206,14 @@ class StrategyEngine:
             
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             pnl = StrategyEngine.calc_actual_roe(entry, tp, potential_side, lev)
-            
             if pnl < 10.0: return None
             
             Log.print(f"🎯 {symbol}: Divergence Verified! Executing {potential_side}...", Log.GREEN)
-            
             return {
                 "symbol": symbol, "side": potential_side, "entry": entry, 
                 "sl": sl, "tp": tp, "pnl": pnl, "leverage": lev
             }
-        except Exception as e: 
-            return None
+        except: return None
 
 # ==========================================
 # 3. نظام التداول والتحكم
@@ -273,7 +253,7 @@ class TradingSystem:
         try:
             await self.exchange.load_markets()
             self.load_state() 
-            Log.print(f"🚀 ENGINE ONLINE: {Config.VERSION}", Config.GREEN)
+            Log.print(f"🚀 ENGINE ONLINE: {Config.VERSION}", Log.GREEN) # تم تصحيح هذا السطر من Config إلى Log
         except Exception as e:
             Log.print(f"Error loading markets: {e}", Log.RED)
 
@@ -319,8 +299,7 @@ class TradingSystem:
             self.stats["signals"] += 1
             self.save_state()
             Log.print(f"🚀 SIGNAL SENT: {exact_app_name}", Log.GREEN)
-        except Exception as e:
-            pass
+        except: pass
 
     async def scan_market(self):
         while self.running:
@@ -333,9 +312,7 @@ class TradingSystem:
                 for k in keys_to_delete: del self.cooldown_list[k]
 
                 btc_allowed = await self.get_btc_allowed_sides()
-                
-                try:
-                    tickers = await self.exchange.fetch_tickers()
+                try: tickers = await self.exchange.fetch_tickers()
                 except:
                     await asyncio.sleep(10)
                     continue
@@ -432,8 +409,7 @@ class TradingSystem:
                         del self.active_trades[sym]
                         self.save_state()
                         
-            except Exception as e: 
-                pass
+            except: pass
             await asyncio.sleep(2)
 
     async def daily_report(self):
@@ -477,7 +453,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V57.0 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V57.1 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
