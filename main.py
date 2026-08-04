@@ -6,6 +6,7 @@ import time
 import warnings
 from datetime import datetime, timezone
 import pandas as pd
+import pandas_ta as ta
 import ccxt.async_support as ccxt
 import aiohttp
 from fastapi import FastAPI, Response
@@ -22,7 +23,7 @@ class Config:
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8506270736:AAF676tt1RM4X3lX-wY1Nb0nXlhNwUmwnrg")
     CHAT_ID = os.getenv("CHAT_ID", "-1003653652451")
     RENDER_URL = "https://crypto-signals-w9wx.onrender.com"
-    TF_MAIN = '30m'     
+    TF_MAIN = '5m'      
     TOP_COINS_LIMIT = 75 
     MIN_24H_VOLUME_USDT = 15_000_000 
     MAX_TRADES_AT_ONCE = 5 
@@ -30,9 +31,9 @@ class Config:
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
     MAX_MARGIN_RISK_PCT = 30.0 
-    COOLDOWN_SECONDS = 3600 
-    STATE_FILE = "bot_state_v58.json"
-    VERSION = "V58.0 (Institutional Wick Sniper)"
+    COOLDOWN_SECONDS = 1800  
+    STATE_FILE = "bot_state_v60.json"
+    VERSION = "V60.0 (Bollinger Wick Rejection)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -70,7 +71,7 @@ class TelegramNotifier:
         except: return None
 
 # ==========================================
-# 2. محرك الاستراتيجية وفلتر الامتصاص السعري
+# 2. محرك استراتيجية البولنجر والرفض بالذيل (30%)
 # ==========================================
 class StrategyEngine:
     @staticmethod
@@ -83,120 +84,96 @@ class StrategyEngine:
         return float(((exit_price - entry) / entry) * 100.0 * lev) if side == "LONG" else float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def identify_swings_and_liquidity(df, lookback=25):
-        last_idx = len(df) - 1
-        window = df.iloc[max(0, last_idx - lookback):last_idx].copy()
-        
-        window['body_max'] = window[['open', 'close']].max(axis=1)
-        window['body_min'] = window[['open', 'close']].min(axis=1)
-        
-        swing_high_idx = window['body_max'].idxmax()
-        swing_high_body = float(window.loc[swing_high_idx, 'body_max'])
-        
-        swing_low_idx = window['body_min'].idxmin()
-        swing_low_body = float(window.loc[swing_low_idx, 'body_min'])
-        
-        trend = "UP" if swing_low_idx < swing_high_idx else "DOWN"
-        
-        liquidity_sl = 0.0
-        if trend == "UP":
-            lowest_wick = float(window['low'].min())
-            liquidity_sl = lowest_wick * 0.999 
-        else:
-            highest_wick = float(window['high'].max())
-            liquidity_sl = highest_wick * 1.001
-
-        return trend, swing_high_body, swing_low_body, liquidity_sl
-
-    @staticmethod
-    async def check_wick_rejection(exchange, symbol, expected_side, entry_level):
-        """ 🎯 فلتر الامتصاص والرفض السعري اللحظي (Wick Rejection) على فريم 1m """
+    async def analyze_and_confirm(exchange, symbol, df_5m_data, btc_allowed_sides):
         try:
-            # نجلب آخر 10 شموع على فريم الدقيقة
-            res_1m = await fetch_with_retry(exchange.fetch_ohlcv, symbol, '1m', limit=10)
-            if not res_1m or len(res_1m) < 5: return False
-            
-            df = pd.DataFrame(res_1m, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            
-            # فحص آخر 3 شموع لضمان التقاط الارتداد الفوري
-            for i in range(len(df)-3, len(df)):
-                c = df.iloc[i]
-                candle_range = c['high'] - c['low']
-                
-                if candle_range == 0: continue
-                
-                if expected_side == "LONG":
-                    # 1. هل الشمعة لمست أو نزلت تحت مستوى 0.95؟
-                    if c['low'] <= entry_level * 1.001: 
-                        # 2. حساب طول الذيل السفلي
-                        lower_wick = min(c['open'], c['close']) - c['low']
-                        # 3. هل الذيل يمثل 60% أو أكثر من الشمعة؟ (رفض شرائي عنيف)
-                        if (lower_wick / candle_range) >= 0.60:
-                            return True
-                            
-                elif expected_side == "SHORT":
-                    # 1. هل الشمعة لمست أو صعدت فوق مستوى 0.95؟
-                    if c['high'] >= entry_level * 0.999:
-                        # 2. حساب طول الذيل العلوي
-                        upper_wick = c['high'] - max(c['open'], c['close'])
-                        # 3. هل الذيل يمثل 60% أو أكثر من الشمعة؟ (رفض بيعي عنيف)
-                        if (upper_wick / candle_range) >= 0.60:
-                            return True
-            return False
-        except: return False
+            df = pd.DataFrame(df_5m_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+            if len(df) < 30: return None
 
-    @staticmethod
-    async def analyze_and_confirm(exchange, symbol, df_30m_data, btc_allowed_sides):
-        try:
-            df_30m = pd.DataFrame(df_30m_data, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            if len(df_30m) < 30: return None
-
-            trend, swing_high, swing_low, liquidity_sl = StrategyEngine.identify_swings_and_liquidity(df_30m, lookback=25)
+            # حساب البولنجر باندز
+            bb = ta.bbands(df['close'], length=20, std=2.5)
+            if bb is None or bb.empty: return None
+            df = pd.concat([df, bb], axis=1)
             
-            curr_candle = df_30m.iloc[-1]  
-            entry = float(curr_candle['close']) 
-            
-            range_val = swing_high - swing_low
-            if range_val <= 0: return None 
+            upper_band = 'BBU_20_2.5'
+            mid_band = 'BBM_20_2.5'
+            lower_band = 'BBL_20_2.5'
 
-            tolerance = entry * 0.0015 
+            # الشمعة الأخيرة المغلقة التي سنفحص عليها شروط الذيل والاختراق
+            signal_candle = df.iloc[-2]
+            # الشمعة الحالية الحية التي سيتم الدخول منها
+            live_candle = df.iloc[-1]
+            entry = float(live_candle['close'])
+
+            # متغيرات الشمعة المغلقة
+            c_open = signal_candle['open']
+            c_close = signal_candle['close']
+            c_high = signal_candle['high']
+            c_low = signal_candle['low']
+            c_range = c_high - c_low
+            
+            if c_range == 0: return None
+
+            # حساب طول الذيول
+            lower_wick = min(c_open, c_close) - c_low
+            upper_wick = c_high - max(c_open, c_close)
+
+            # تحديد خطوط البولنجر للشمعة المغلقة
+            bbl = signal_candle[lower_band]
+            bbm = signal_candle[mid_band]
+            bbu = signal_candle[upper_band]
+
             potential_side = None
-            tp = 0.0
-            sl = liquidity_sl
-            entry_level = 0.0
 
-            # 1. فحص الوصول إلى الـ 0.95
-            if trend == "UP" and ("LONG" in btc_allowed_sides):
-                entry_level = swing_high - (range_val * 0.95)
-                if (entry_level - tolerance) <= entry <= (entry_level + tolerance):
-                    potential_side = "LONG"
-                    tp = swing_high - (range_val * 0.50)
+            # 💡 فحص شروط الشراء (LONG)
+            # اختراق أو لمس للخط السفلي أو الأوسط + ذيل سفلي 30% أو أكثر
+            touched_support = (c_low <= bbl) or (c_low <= bbm)
+            if touched_support and (lower_wick / c_range >= 0.30) and ("LONG" in btc_allowed_sides):
+                potential_side = "LONG"
 
-            elif trend == "DOWN" and ("SHORT" in btc_allowed_sides):
-                entry_level = swing_low + (range_val * 0.95)
-                if (entry_level - tolerance) <= entry <= (entry_level + tolerance):
+            # 💡 فحص شروط البيع (SHORT)
+            # اختراق أو لمس للخط العلوي أو الأوسط + ذيل علوي 30% أو أكثر
+            touched_resistance = (c_high >= bbu) or (c_high >= bbm)
+            if touched_resistance and (upper_wick / c_range >= 0.30) and ("SHORT" in btc_allowed_sides):
+                # إذا توافرت الشروط للاثنين (نادر)، نأخذ الذيل الأكبر
+                if potential_side == "LONG":
+                    if upper_wick > lower_wick: potential_side = "SHORT"
+                else:
                     potential_side = "SHORT"
-                    tp = swing_low + (range_val * 0.50)
 
             if not potential_side: return None
 
-            # 🛡️ 2. تفعيل فلتر الرفض السعري المؤسساتي (Wick Rejection)
-            is_rejected = await StrategyEngine.check_wick_rejection(exchange, symbol, potential_side, entry_level)
-            if not is_rejected: return None 
+            # 🛡️ حساب الستوب لوز بناءً على آخر 15 شمعة مغلقة
+            last_15_candles = df.iloc[-16:-1]
+            lowest_of_15 = last_15_candles['low'].min()
+            highest_of_15 = last_15_candles['high'].max()
 
-            # 3. حسابات إدارة رأس المال والمخاطر
+            sl = 0.0
+            tp = 0.0
+
+            if potential_side == "LONG":
+                sl = lowest_of_15 * 0.999
+            else:
+                sl = highest_of_15 * 1.001
+
+            # إدارة المخاطر وتحديد الهدف (1:2 Risk to Reward)
             risk = abs(entry - sl)
             if risk == 0: return None
             
+            if potential_side == "LONG":
+                tp = entry + (risk * 2.0)
+            else:
+                tp = entry - (risk * 2.0)
+                
             sl_distance_pct = (risk / entry) * 100
             if sl_distance_pct < 0.1 or sl_distance_pct > Config.MAX_MARGIN_RISK_PCT: return None 
             
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             pnl = StrategyEngine.calc_actual_roe(entry, tp, potential_side, lev)
             
-            if pnl < 10.0: return None
+            # العائد المتوقع يجب أن يكون 5% على الأقل (لتناسب فريم 5 دقائق)
+            if pnl < 5.0: return None 
             
-            Log.print(f"🎯 {symbol}: Institutional Wick Rejection Verified! Executing {potential_side}...", Log.GREEN)
+            Log.print(f"🎯 {symbol}: BB Wick Rejection (30%) Verified! Executing {potential_side}...", Log.GREEN)
             
             return {
                 "symbol": symbol, "side": potential_side, "entry": entry, 
@@ -320,19 +297,20 @@ class TradingSystem:
                 sem = asyncio.Semaphore(5) 
                 async def fetch_tf(sym):
                     async with sem:
-                        res_30m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MAIN, limit=30)
-                        return sym, res_30m
+                        # جلب آخر 50 شمعة لحسابات البولنجر والـ 15 شمعة للاستوب
+                        res_5m = await fetch_with_retry(self.exchange.fetch_ohlcv, sym, Config.TF_MAIN, limit=50)
+                        return sym, res_5m
 
                 tasks = [fetch_tf(sym) for sym in scan_list[:Config.TOP_COINS_LIMIT]]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
                 for res in results:
                     if isinstance(res, Exception) or not res: continue
-                    sym, res_30m = res
+                    sym, res_5m = res
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
-                    if not res_30m: continue
+                    if not res_5m: continue
                     
-                    analysis = await StrategyEngine.analyze_and_confirm(self.exchange, sym, res_30m, btc_allowed)
+                    analysis = await StrategyEngine.analyze_and_confirm(self.exchange, sym, res_5m, btc_allowed)
                     if analysis: await self.execute_trade(analysis)
                 
                 gc.collect()
@@ -402,8 +380,7 @@ class TradingSystem:
                         del self.active_trades[sym]
                         self.save_state()
                         
-            except Exception as e: 
-                pass
+            except: pass
             await asyncio.sleep(2)
 
     async def daily_report(self):
@@ -447,7 +424,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V58.0 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V60.0 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
