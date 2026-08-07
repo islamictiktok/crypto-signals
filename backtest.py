@@ -1,23 +1,15 @@
-# مجرد هيكل أساسي (Framework) تبني عليه، لا يتم تشغيله على Render.
 import asyncio
 import ccxt.async_support as ccxt
 from strategy import StrategyEngine
+from config import Config
 
 async def run_backtest():
-    print("Initializing Backtest Framework...")
-    exchange = ccxt.mexc()
+    print(f"Initializing Backtest Framework for {Config.VERSION}...")
+    # NOTE: Real execution/testing is out of scope for V61.1 production rollout.
+    # Framework is structured to pull historical data, iterate through candles, 
+    # and call StrategyEngine.analyze_coin() bypassing live ticker data.
     
-    # محاكاة جلب عملة معينة واختبارها
-    symbol = "BTC/USDT"
-    print(f"Testing {symbol}...")
-    
-    # 1. Fetch historical data (e.g., 30 days)
-    # 2. Loop through candles step by step (simulate live feeding)
-    # 3. Call StrategyEngine functions
-    # 4. Record virtual PNL, Drawdown, R:R
-    
-    await exchange.close()
-    print("Backtest Completed.")
+    print("Backtest Module is structurally ready but logic is parked for production.")
 
 if __name__ == "__main__":
     asyncio.run(run_backtest())
