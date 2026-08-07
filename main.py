@@ -11,17 +11,10 @@ from fastapi.responses import HTMLResponse
 import uvicorn
 from contextlib import asynccontextmanager
 
-from config import Config
+from config import Config, Log
 from strategy import StrategyEngine
 
 warnings.filterwarnings("ignore")
-
-class Log:
-    GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
-    @staticmethod
-    def print(msg, color=RESET):
-        ts = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        print(f"{color}[{ts}] {msg}{Log.RESET}", flush=True)
 
 class TradingSystem:
     def __init__(self):
@@ -29,16 +22,21 @@ class TradingSystem:
         self.session = None
         self.active_trades = {}
         self.cooldown_list = {} 
-        self.processed_signals = set()
-        self.stats = {
-            "total_signals": 0, "wins": 0, "losses": 0, 
-            "net_r": 0.0, "total_duration_secs": 0, "closed_trades": 0,
-            "long_wins": 0, "short_wins": 0, "long_losses": 0, "short_losses": 0
+        self.processed_signals = [] # Changed to bounded list
+        
+        # Separated Stats
+        self.lifetime_stats = {
+            "total_signals": 0, "wins": 0, "losses": 0, "net_r": 0.0
+        }
+        self.daily_stats = {
+            "signals": 0, "wins": 0, "losses": 0, "net_r": 0.0,
+            "long_wins": 0, "short_wins": 0, "long_losses": 0, "short_losses": 0,
+            "total_duration_mins": 0, "closed_trades": 0
         }
         self.running = True
 
     async def init_session(self):
-        if not self.session:
+        if not self.session or self.session.closed:
             self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
 
     async def send_tg(self, text, reply_to=None):
@@ -56,8 +54,18 @@ class TradingSystem:
 
     def save_state(self):
         try:
-            with open(Config.STATE_FILE, "w") as f: 
-                json.dump({"version": Config.VERSION, "active_trades": self.active_trades, "cooldown_list": self.cooldown_list, "stats": self.stats, "processed": list(self.processed_signals)}, f)
+            tmp_file = Config.STATE_FILE + ".tmp"
+            data = {
+                "version": Config.VERSION, 
+                "active_trades": self.active_trades, 
+                "cooldown_list": self.cooldown_list, 
+                "lifetime_stats": self.lifetime_stats,
+                "daily_stats": self.daily_stats,
+                "processed": self.processed_signals
+            }
+            with open(tmp_file, "w") as f: 
+                json.dump(data, f)
+            os.replace(tmp_file, Config.STATE_FILE) # Atomic safe replace
         except Exception as e: 
             Log.print(f"State Save Error: {e}", Log.RED)
 
@@ -69,12 +77,17 @@ class TradingSystem:
                     if state.get("version") == Config.VERSION:
                         self.active_trades = state.get("active_trades", {})
                         self.cooldown_list = state.get("cooldown_list", {})
-                        self.stats = state.get("stats", self.stats)
-                        self.processed_signals = set(state.get("processed", []))
+                        self.lifetime_stats = state.get("lifetime_stats", self.lifetime_stats)
+                        self.daily_stats = state.get("daily_stats", self.daily_stats)
+                        self.processed_signals = state.get("processed", [])
             except Exception as e: 
                 Log.print(f"State Load Error: {e}", Log.RED)
 
     async def initialize(self):
+        if not Config.TELEGRAM_TOKEN or not Config.CHAT_ID:
+            Log.print("CRITICAL: TELEGRAM_TOKEN or CHAT_ID missing! Exiting...", Log.RED)
+            import sys; sys.exit(1)
+            
         await self.init_session()
         Log.print("🔄 Loading Markets from MEXC...", Log.YELLOW)
         try:
@@ -87,15 +100,18 @@ class TradingSystem:
     async def shutdown(self):
         self.running = False
         self.save_state()
-        if self.session: await self.session.close()
+        if self.session and not self.session.closed: await self.session.close()
         await self.exchange.close()
 
     async def scan_market(self):
         while self.running:
             try:
-                # Sync timing with 5m candles
-                now = datetime.now(timezone.utc)
-                sleep_secs = 300 - ((now.minute % 5) * 60 + now.second) + 2 # +2s margin
+                # Precise 5m candle sync (+5s margin for safety)
+                now_ts = int(time.time())
+                seconds_since_5m = now_ts % 300
+                sleep_secs = 300 - seconds_since_5m + 5 
+                if sleep_secs <= 0 or sleep_secs > 305: sleep_secs = 10
+                
                 Log.print(f"⏳ Waiting {sleep_secs}s for next 5m close...", Log.YELLOW)
                 await asyncio.sleep(sleep_secs)
 
@@ -108,7 +124,6 @@ class TradingSystem:
                     continue
 
                 tickers = await self.exchange.fetch_tickers()
-                # Sort by volume and select top coins
                 coins = []
                 for sym, data in tickers.items():
                     if 'USDT:USDT' in sym and sym not in self.active_trades and sym not in self.cooldown_list:
@@ -129,11 +144,14 @@ class TradingSystem:
                 for res in results:
                     if isinstance(res, Exception) or not res or "reject_reason" in res: continue
                     
-                    sig_id = f"{res['symbol']}_{res['timestamp']}"
+                    sig_id = f"{res['symbol']}_{res['side']}_{res['timestamp']}"
                     if sig_id in self.processed_signals: continue
                     if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
 
-                    self.processed_signals.add(sig_id)
+                    self.processed_signals.append(sig_id)
+                    # Bound the list to prevent memory leak
+                    self.processed_signals = self.processed_signals[-Config.MAX_PROCESSED_SIGNALS:]
+                    
                     await self.execute_trade(res)
                 
             except Exception as e:
@@ -143,6 +161,9 @@ class TradingSystem:
     async def execute_trade(self, trade):
         try:
             sym = trade['symbol']
+            # Double check to prevent race condition
+            if sym in self.active_trades: return 
+            
             icon = "🟢 LONG" if trade['side'] == "LONG" else "🔴 SHORT"
             sl_roe = StrategyEngine.calc_actual_roe(trade['entry'], trade['sl'], trade['side'], trade['leverage'])
             exact_app_name = sym.replace('/USDT:USDT', '/USDT')
@@ -163,7 +184,7 @@ class TradingSystem:
                 f"📐 ADX: {trade['adx']:.1f}\n"
                 f"₿ BTC Bias: {trade['btc_bias']}\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"V61 Multi-Timeframe"
+                f"V61.1 Multi-Timeframe"
             )
             msg_id = await self.send_tg(msg)
             
@@ -171,7 +192,9 @@ class TradingSystem:
             trade['clean_sym'] = exact_app_name 
             trade['entry_time'] = int(time.time())
             self.active_trades[sym] = trade
-            self.stats["total_signals"] += 1
+            
+            self.lifetime_stats["total_signals"] += 1
+            self.daily_stats["signals"] += 1
             self.save_state()
             Log.print(f"🚀 SIGNAL SENT: {exact_app_name} (Score: {trade['score']})", Log.GREEN)
         except Exception as e:
@@ -195,26 +218,32 @@ class TradingSystem:
                     hit_tp = (price >= trade['tp']) if side == "LONG" else (price <= trade['tp'])
                     
                     if hit_sl or hit_tp:
-                        duration = int((time.time() - trade['entry_time']) / 60)
-                        self.stats['closed_trades'] += 1
-                        self.stats['total_duration_secs'] += duration * 60
+                        duration_mins = int((time.time() - trade['entry_time']) // 60)
+                        self.daily_stats['closed_trades'] += 1
+                        self.daily_stats['total_duration_mins'] += duration_mins
                         
                         if hit_sl:
-                            self.stats['losses'] += 1
-                            self.stats['net_r'] -= 1.0
-                            if side == "LONG": self.stats['long_losses'] += 1
-                            else: self.stats['short_losses'] += 1
+                            self.lifetime_stats['losses'] += 1
+                            self.lifetime_stats['net_r'] -= 1.0
+                            self.daily_stats['losses'] += 1
+                            self.daily_stats['net_r'] -= 1.0
                             
-                            msg = f"🛑 <b>STOP LOSS</b>\nSymbol: <code>{trade['clean_sym']}</code>\nSide: {side}\nResult: -1.0R\nDuration: {duration} mins"
+                            if side == "LONG": self.daily_stats['long_losses'] += 1
+                            else: self.daily_stats['short_losses'] += 1
+                            
+                            msg = f"🛑 <b>STOP LOSS</b>\nSymbol: <code>{trade['clean_sym']}</code>\nSide: {side}\nEntry: {StrategyEngine.format_price(trade['entry'])}\nStop: {StrategyEngine.format_price(trade['sl'])}\nResult: -1.0R\nDuration: {duration_mins} mins\nScore: {trade['score']}/100"
                             Log.print(f"🛑 {sym} hit SL", Log.RED)
                         
-                        if hit_tp:
-                            self.stats['wins'] += 1
-                            self.stats['net_r'] += 2.0
-                            if side == "LONG": self.stats['long_wins'] += 1
-                            else: self.stats['short_wins'] += 1
+                        elif hit_tp: # Used elif to prevent double processing
+                            self.lifetime_stats['wins'] += 1
+                            self.lifetime_stats['net_r'] += 2.0
+                            self.daily_stats['wins'] += 1
+                            self.daily_stats['net_r'] += 2.0
                             
-                            msg = f"🏆 <b>TARGET HIT</b>\nSymbol: <code>{trade['clean_sym']}</code>\nSide: {side}\nResult: +2.0R\nDuration: {duration} mins"
+                            if side == "LONG": self.daily_stats['long_wins'] += 1
+                            else: self.daily_stats['short_wins'] += 1
+                            
+                            msg = f"🏆 <b>TARGET HIT</b>\nSymbol: <code>{trade['clean_sym']}</code>\nSide: {side}\nEntry: {StrategyEngine.format_price(trade['entry'])}\nTarget: {StrategyEngine.format_price(trade['tp'])}\nResult: +2.0R\nDuration: {duration_mins} mins\nScore: {trade['score']}/100"
                             Log.print(f"🏆 {sym} hit Target", Log.GREEN)
                             
                         self.cooldown_list[sym] = int(time.time())
@@ -231,25 +260,27 @@ class TradingSystem:
             try:
                 now = datetime.now(timezone.utc)
                 if now.hour == 0 and now.minute < 5 and now.day != last_sent_day:
-                    closed = self.stats.get('closed_trades', 0)
-                    wins = self.stats.get('wins', 0)
+                    closed = self.daily_stats.get('closed_trades', 0)
+                    wins = self.daily_stats.get('wins', 0)
                     wr = (wins / closed * 100) if closed > 0 else 0
+                    avg_duration = (self.daily_stats['total_duration_mins'] // closed) if closed > 0 else 0
                     
                     msg = (
-                        f"📊 <b>V61 DAILY REPORT</b>\n━━━━━━━━━━━━━━━\n"
-                        f"🎯 Signals: {self.stats['total_signals']}\n"
-                        f"🏆 Wins: {wins} | 🛑 Losses: {self.stats['losses']}\n"
+                        f"📊 <b>V61.1 DAILY REPORT</b>\n━━━━━━━━━━━━━━━\n"
+                        f"🎯 Signals: {self.daily_stats['signals']}\n"
+                        f"🏆 Wins: {wins} | 🛑 Losses: {self.daily_stats['losses']}\n"
                         f"📈 Win Rate: {wr:.1f}%\n"
-                        f"⚖️ Net R: {self.stats['net_r']:.2f}R\n"
+                        f"⚖️ Net R: {self.daily_stats['net_r']:.2f}R\n"
+                        f"⏱️ Avg Duration: {avg_duration}m\n"
                         f"━━━━━━━━━━━━━━━\n"
-                        f"🟢 LONG: {self.stats['long_wins']}W / {self.stats['long_losses']}L\n"
-                        f"🔴 SHORT: {self.stats['short_wins']}W / {self.stats['short_losses']}L"
+                        f"🟢 LONG: {self.daily_stats['long_wins']}W / {self.daily_stats['long_losses']}L\n"
+                        f"🔴 SHORT: {self.daily_stats['short_wins']}W / {self.daily_stats['short_losses']}L"
                     )
                     await self.send_tg(msg)
                     
-                    # Reset daily stats (excluding totals if preferred, but here we reset all for daily view)
-                    self.stats = {k: 0 for k in self.stats.keys() if k != "net_r"}
-                    self.stats["net_r"] = 0.0
+                    # Reset ONLY daily stats, keep lifetime
+                    self.daily_stats = {k: 0 for k in self.daily_stats.keys()}
+                    self.daily_stats["net_r"] = 0.0
                     last_sent_day = now.day
                     self.save_state()
             except Exception as e:
@@ -262,7 +293,8 @@ class TradingSystem:
                 await self.init_session()
                 async with self.session.get(Config.RENDER_URL) as response:
                     await response.read()
-            except: pass
+            except Exception as e: 
+                Log.print(f"KeepAlive Minor Error: {e}", Log.YELLOW)
             await asyncio.sleep(300)
 
 bot = TradingSystem()
