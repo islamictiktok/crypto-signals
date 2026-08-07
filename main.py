@@ -33,7 +33,7 @@ class Config:
     MAX_MARGIN_RISK_PCT = 30.0 
     COOLDOWN_SECONDS = 1800  
     STATE_FILE = "bot_state_v60.json"
-    VERSION = "V60.0 (Bollinger Wick Rejection)"
+    VERSION = "V60.1 (Bollinger Wick Rejection - Fixed)"
 
 class Log:
     GREEN = '\033[92m'; YELLOW = '\033[93m'; RED = '\033[91m'; BLUE = '\033[94m'; RESET = '\033[0m'
@@ -92,49 +92,56 @@ class StrategyEngine:
             # حساب البولنجر باندز
             bb = ta.bbands(df['close'], length=20, std=2.5)
             if bb is None or bb.empty: return None
-            df = pd.concat([df, bb], axis=1)
             
-            upper_band = 'BBU_20_2.5'
-            mid_band = 'BBM_20_2.5'
-            lower_band = 'BBL_20_2.5'
+            # الاستخراج الآمن للأعمدة لمنع الأخطاء الصامتة (BBL, BBM, BBU)
+            bbl_col = bb.columns[0]
+            bbm_col = bb.columns[1]
+            bbu_col = bb.columns[2]
+            
+            df = pd.concat([df, bb], axis=1)
 
             # الشمعة الأخيرة المغلقة التي سنفحص عليها شروط الذيل والاختراق
             signal_candle = df.iloc[-2]
-            # الشمعة الحالية الحية التي سيتم الدخول منها
+            # الشمعة الحالية الحية التي سيتم الدخول منها لحظياً
             live_candle = df.iloc[-1]
             entry = float(live_candle['close'])
 
             # متغيرات الشمعة المغلقة
-            c_open = signal_candle['open']
-            c_close = signal_candle['close']
-            c_high = signal_candle['high']
-            c_low = signal_candle['low']
+            c_open = float(signal_candle['open'])
+            c_close = float(signal_candle['close'])
+            c_high = float(signal_candle['high'])
+            c_low = float(signal_candle['low'])
             c_range = c_high - c_low
             
-            if c_range == 0: return None
+            if c_range <= 0: return None
 
-            # حساب طول الذيول
+            # حساب طول الذيول كنسبة مئوية
             lower_wick = min(c_open, c_close) - c_low
             upper_wick = c_high - max(c_open, c_close)
+            
+            lower_wick_pct = lower_wick / c_range
+            upper_wick_pct = upper_wick / c_range
 
-            # تحديد خطوط البولنجر للشمعة المغلقة
-            bbl = signal_candle[lower_band]
-            bbm = signal_candle[mid_band]
-            bbu = signal_candle[upper_band]
+            bbl = float(signal_candle[bbl_col])
+            bbm = float(signal_candle[bbm_col])
+            bbu = float(signal_candle[bbu_col])
 
             potential_side = None
 
             # 💡 فحص شروط الشراء (LONG)
-            # اختراق أو لمس للخط السفلي أو الأوسط + ذيل سفلي 30% أو أكثر
-            touched_support = (c_low <= bbl) or (c_low <= bbm)
-            if touched_support and (lower_wick / c_range >= 0.30) and ("LONG" in btc_allowed_sides):
+            # الاختراق الحقيقي: القاع يخترق الخط، والإغلاق يعود فوقه
+            pierced_lower = (c_low < bbl) and (c_close > bbl)
+            pierced_mid_down = (c_low < bbm) and (c_close > bbm)
+            
+            if (pierced_lower or pierced_mid_down) and (lower_wick_pct >= 0.30) and ("LONG" in btc_allowed_sides):
                 potential_side = "LONG"
 
             # 💡 فحص شروط البيع (SHORT)
-            # اختراق أو لمس للخط العلوي أو الأوسط + ذيل علوي 30% أو أكثر
-            touched_resistance = (c_high >= bbu) or (c_high >= bbm)
-            if touched_resistance and (upper_wick / c_range >= 0.30) and ("SHORT" in btc_allowed_sides):
-                # إذا توافرت الشروط للاثنين (نادر)، نأخذ الذيل الأكبر
+            # الاختراق الحقيقي: القمة تخترق الخط، والإغلاق يعود تحته
+            pierced_upper = (c_high > bbu) and (c_close < bbu)
+            pierced_mid_up = (c_high > bbm) and (c_close < bbm)
+            
+            if (pierced_upper or pierced_mid_up) and (upper_wick_pct >= 0.30) and ("SHORT" in btc_allowed_sides):
                 if potential_side == "LONG":
                     if upper_wick > lower_wick: potential_side = "SHORT"
                 else:
@@ -144,16 +151,19 @@ class StrategyEngine:
 
             # 🛡️ حساب الستوب لوز بناءً على آخر 15 شمعة مغلقة
             last_15_candles = df.iloc[-16:-1]
-            lowest_of_15 = last_15_candles['low'].min()
-            highest_of_15 = last_15_candles['high'].max()
+            lowest_of_15 = float(last_15_candles['low'].min())
+            highest_of_15 = float(last_15_candles['high'].max())
 
             sl = 0.0
             tp = 0.0
 
+            # حماية لمنع ضرب الستوب الفوري إذا قفز السعر الحي بشكل مفاجئ
             if potential_side == "LONG":
                 sl = lowest_of_15 * 0.999
+                if sl >= entry: return None 
             else:
                 sl = highest_of_15 * 1.001
+                if sl <= entry: return None 
 
             # إدارة المخاطر وتحديد الهدف (1:2 Risk to Reward)
             risk = abs(entry - sl)
@@ -170,8 +180,8 @@ class StrategyEngine:
             lev = max(Config.MIN_LEVERAGE, min(Config.MAX_LEVERAGE_CAP, int(Config.MAX_MARGIN_RISK_PCT / sl_distance_pct)))
             pnl = StrategyEngine.calc_actual_roe(entry, tp, potential_side, lev)
             
-            # العائد المتوقع يجب أن يكون 5% على الأقل (لتناسب فريم 5 دقائق)
-            if pnl < 5.0: return None 
+            # العائد المتوقع قللناه لـ 3% ليتناسب مع سرعة وقصر مسافات فريم 5 دقائق
+            if pnl < 3.0: return None 
             
             Log.print(f"🎯 {symbol}: BB Wick Rejection (30%) Verified! Executing {potential_side}...", Log.GREEN)
             
@@ -413,7 +423,8 @@ class TradingSystem:
         while self.running:
             try:
                 async with aiohttp.ClientSession() as session:
-                    await session.get(Config.RENDER_URL)
+                    async with session.get(Config.RENDER_URL) as response:
+                        await response.read() 
             except: pass
             await asyncio.sleep(300)
 
@@ -424,7 +435,7 @@ app = FastAPI()
 async def favicon(): return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V60.0 ONLINE</h1></body></html>"
+async def root(): return f"<html><body style='background:#0d1117;color:#00ff00;text-align:center;padding:50px;font-family:monospace;'><h1>⚡ QUANT MASTER V60.1 ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
