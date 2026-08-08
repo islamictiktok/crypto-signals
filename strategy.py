@@ -5,14 +5,24 @@ from config import Config, Log
 
 class StrategyEngine:
     @staticmethod
-    def get_dynamic_btc_symbol(exchange):
+    def format_price(price):
+        if price is None or math.isnan(price): return "0.0"
+        return f"{price:.10f}".rstrip('0').rstrip('.') if '.' in f"{price:.10f}" else f"{price:.10f}"
+
+    @staticmethod
+    def calc_actual_roe(entry, exit_price, side, lev):
+        if entry <= 0: return 0.0 
+        return float(((exit_price - entry) / entry) * 100.0 * lev) if side == "LONG" else float(((entry - exit_price) / entry) * 100.0 * lev)
+
+    @staticmethod
+    def get_swap_symbol(exchange, base_coin='BTC'):
         try:
             for sym, market in exchange.markets.items():
-                if market.get('base') == 'BTC' and market.get('quote') == 'USDT' and market.get('swap') and market.get('linear'):
+                if market.get('base') == base_coin and market.get('quote') == 'USDT' and market.get('swap') and market.get('linear'):
                     return sym
         except Exception as e:
-            Log.error("get_dynamic_btc_symbol", str(e))
-        return "BTC/USDT:USDT" # Fallback compliant with CCXT conventions
+            Log.error("get_swap_symbol", str(e))
+        return f"{base_coin}/USDT:USDT"
 
     @staticmethod
     def calc_btc_bias(df_1h):
@@ -20,10 +30,11 @@ class StrategyEngine:
         if df_1h is None or len(df_1h) < 210: return "NEUTRAL"
         
         try:
-            ema50 = ta.ema(df_1h['close'], length=50)
-            ema200 = ta.ema(df_1h['close'], length=200)
-            rsi = ta.rsi(df_1h['close'], length=14)
-            adx_res = ta.adx(df_1h['high'], df_1h['low'], df_1h['close'], length=14)
+            # Fixed column names to match main.py ('c', 'h', 'l', 'o', 'v')
+            ema50 = ta.ema(df_1h['c'], length=50)
+            ema200 = ta.ema(df_1h['c'], length=200)
+            rsi = ta.rsi(df_1h['c'], length=14)
+            adx_res = ta.adx(df_1h['h'], df_1h['l'], df_1h['c'], length=14)
             adx = adx_res['ADX_14'] if adx_res is not None else pd.Series(dtype='float64')
 
             if ema50.empty or ema200.empty or rsi.empty or adx.empty: return "NEUTRAL"
@@ -44,9 +55,6 @@ class StrategyEngine:
 
     @staticmethod
     def analyze_coin(df_1h, df_15m, df_5m, symbol, btc_bias, ask, bid):
-        """
-        All DataFrames MUST be strictly sliced so df.iloc[-1] is the last CLOSED candle.
-        """
         try:
             # 1. BTC GATE
             if btc_bias == "NEUTRAL": return {"reject": "BTC_NEUTRAL"}
@@ -64,10 +72,10 @@ class StrategyEngine:
                 return {"reject": "INVALID_SPREAD"}
 
             # 3. 1H TREND GATE
-            ema50_1h = ta.ema(df_1h['close'], length=50)
-            ema200_1h = ta.ema(df_1h['close'], length=200)
-            rsi_1h = ta.rsi(df_1h['close'], length=14)
-            adx_res_1h = ta.adx(df_1h['high'], df_1h['low'], df_1h['close'], length=14)
+            ema50_1h = ta.ema(df_1h['c'], length=50)
+            ema200_1h = ta.ema(df_1h['c'], length=200)
+            rsi_1h = ta.rsi(df_1h['c'], length=14)
+            adx_res_1h = ta.adx(df_1h['h'], df_1h['l'], df_1h['c'], length=14)
             adx_1h = adx_res_1h['ADX_14'] if adx_res_1h is not None else pd.Series(dtype='float64')
 
             c_1h = df_1h.iloc[-1]
@@ -88,12 +96,12 @@ class StrategyEngine:
             if not (Config.ADX_MIN <= adx_current <= Config.ADX_MAX): return {"reject": "ADX_OUT_OF_BOUNDS"}
 
             # 4. 15M PULLBACK GATE
-            bb_15 = ta.bbands(df_15m['close'], length=20, std=2.0)
-            rsi_15 = ta.rsi(df_15m['close'], length=14)
+            bb_15 = ta.bbands(df_15m['c'], length=20, std=2.0)
+            rsi_15 = ta.rsi(df_15m['c'], length=14)
             if bb_15 is None or pd.isna(rsi_15.iloc[-1]): return {"reject": "15M_IND_NAN"}
 
-            c_15m_close = float(df_15m['close'].iloc[-1])
-            p_15m_close = float(df_15m['close'].iloc[-2])
+            c_15m_close = float(df_15m['c'].iloc[-1])
+            p_15m_close = float(df_15m['c'].iloc[-2])
             c_rsi_15 = float(rsi_15.iloc[-1])
 
             if not (40 <= c_rsi_15 <= 60): return {"reject": "15M_RSI_INVALID"}
@@ -107,14 +115,14 @@ class StrategyEngine:
             if setup_15m != trend_1h: return {"reject": "15M_PULLBACK_INVALID"}
 
             # 5. 5M WICK GATE
-            bb_5 = ta.bbands(df_5m['close'], length=Config.BB_LENGTH, std=Config.BB_STD)
-            vol_ma = ta.sma(df_5m['volume'], length=20)
-            atr_5 = ta.atr(df_5m['high'], df_5m['low'], df_5m['close'], length=14)
+            bb_5 = ta.bbands(df_5m['c'], length=Config.BB_LENGTH, std=Config.BB_STD)
+            vol_ma = ta.sma(df_5m['v'], length=20)
+            atr_5 = ta.atr(df_5m['h'], df_5m['l'], df_5m['c'], length=14)
 
             if bb_5 is None or pd.isna(atr_5.iloc[-1]) or pd.isna(vol_ma.iloc[-1]): return {"reject": "5M_IND_NAN"}
 
             c_5m = df_5m.iloc[-1]
-            c_o, c_h, c_l, c_c = float(c_5m['open']), float(c_5m['high']), float(c_5m['low']), float(c_5m['close'])
+            c_o, c_h, c_l, c_c = float(c_5m['o']), float(c_5m['h']), float(c_5m['l']), float(c_5m['c'])
             c_range = c_h - c_l
             if c_range <= 0: return {"reject": "ZERO_RANGE_CANDLE"}
 
@@ -138,7 +146,7 @@ class StrategyEngine:
             if not trigger_5m: return {"reject": "NO_5M_TRIGGER"}
 
             # 6. VOLUME GATE
-            vol_ratio = float(c_5m['volume']) / float(vol_ma.iloc[-1]) if float(vol_ma.iloc[-1]) > 0 else 0
+            vol_ratio = float(c_5m['v']) / float(vol_ma.iloc[-1]) if float(vol_ma.iloc[-1]) > 0 else 0
             if vol_ratio < Config.MIN_VOLUME_RATIO: return {"reject": "LOW_VOLUME"}
 
             # 7. ENTRY DEVIATION
@@ -150,11 +158,11 @@ class StrategyEngine:
             last_15 = df_5m.iloc[-15:]
             
             if trigger_5m == "LONG":
-                swing_low = float(last_15['low'].min())
+                swing_low = float(last_15['l'].min())
                 sl = swing_low - (atr_val * Config.ATR_SL_BUFFER)
                 if sl >= entry: return {"reject": "INVALID_SL_LOGIC"}
             else:
-                swing_high = float(last_15['high'].max())
+                swing_high = float(last_15['h'].max())
                 sl = swing_high + (atr_val * Config.ATR_SL_BUFFER)
                 if sl <= entry: return {"reject": "INVALID_SL_LOGIC"}
 
@@ -183,7 +191,8 @@ class StrategyEngine:
             if adx_current >= 25: score += 5
             if adx_current > adx_prev: score += 5
             if vol_ratio >= 1.5: score += 5
-            if (trigger_5m == "LONG" and lw_ratio >= 0.50) or (trigger_5m == "SHORT" and uw_ratio >= 0.50): score += 5
+            wick_ratio = lw_ratio if trigger_5m == "LONG" else uw_ratio
+            if wick_ratio >= 0.50: score += 5
 
             if score < Config.MIN_SIGNAL_SCORE: return {"reject": "LOW_SCORE"}
 
