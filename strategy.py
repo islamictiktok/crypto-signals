@@ -15,14 +15,15 @@ class StrategyEngine:
         return float(((exit_price - entry) / entry) * 100.0 * lev) if side == "LONG" else float(((entry - exit_price) / entry) * 100.0 * lev)
 
     @staticmethod
-    def get_swap_symbol(exchange, base_coin='BTC'):
+    def get_dynamic_btc_symbol(exchange, base_coin='BTC'):
+        """ تم تصحيح اسم الدالة ليتطابق مع main.py """
         try:
             for sym, market in exchange.markets.items():
                 if market.get('base') == base_coin and market.get('quote') == 'USDT' and market.get('swap') and market.get('linear'):
                     return sym
         except Exception as e:
-            Log.error("get_swap_symbol", str(e))
-        return f"{base_coin}/USDT:USDT"
+            Log.error("get_dynamic_btc_symbol", str(e))
+        return f"{base_coin}/USDT:USDT" # Fallback
 
     @staticmethod
     def calc_btc_bias(df_1h):
@@ -30,7 +31,6 @@ class StrategyEngine:
         if df_1h is None or len(df_1h) < 210: return "NEUTRAL"
         
         try:
-            # Fixed column names to match main.py ('c', 'h', 'l', 'o', 'v')
             ema50 = ta.ema(df_1h['c'], length=50)
             ema200 = ta.ema(df_1h['c'], length=200)
             rsi = ta.rsi(df_1h['c'], length=14)
