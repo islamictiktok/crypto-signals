@@ -1,19 +1,15 @@
-# Quant Master V61.1 Strict Multi-Timeframe
+# Quant Master V63.0 - Production / Paper Trading
 
-A sophisticated institutional-grade algorithmic trading signal bot. Focuses strictly on high-probability setups by validating multi-timeframe alignment before triggering.
+Institutional-grade, strict multi-timeframe algorithm. Fully event-driven to ensure zero look-ahead bias and mathematical precision in risk management.
 
-## Core Architecture (Strict Gates)
-1. **Mandatory Bias:** BTC 1H Filter (EMA50/200 + RSI). Rejects mismatch.
-2. **Mandatory Trend:** Coin 1H Trend & ADX bounds (15-50). Rejects mismatch.
-3. **Mandatory Setup:** Coin 15m Bollinger Bands True Pullback. Rejects mismatch.
-4. **Mandatory Trigger:** Coin 5m Wick Rejection (>30% wick) with Volume Surge (>1.2x).
-5. **Score Generation:** Base 70, bonuses for exceptional wick size, volume, and momentum.
-6. **Risk Management:** Paper execution. Dynamic Leverage (Max 30% Margin). ATR-based SL. 1:2 Target.
+## 🚀 Setup & Run
+1. Set env vars: `TELEGRAM_TOKEN`, `CHAT_ID`
+2. Install: `pip install -r requirements.txt`
+3. Run Live (Paper): `python main.py`
+4. Run Backtest: `python backtest.py` (Requires CSV data feeding)
 
-## Deployment on Render
-1. Upload this repository.
-2. Build Command: `pip install -r requirements.txt`
-3. Start Command: `python main.py`
-4. **CRITICAL Environment Variables:** `TELEGRAM_TOKEN`, `CHAT_ID`
-
-*Note: Render uses an ephemeral filesystem on free/standard tiers. The `bot_state_v61_1.json` may reset upon forced redeploys unless attached to a Persistent Disk.*
+## ⚖️ Features
+- **Strict Data Alignment:** Indicators ONLY use closed candles `iloc[-1]` after slicing `[:-1]`.
+- **Accurate Spread:** Validation on actual Ask/Bid before entry.
+- **Robust Risk:** SL calculated via Swing + ATR Buffer. Fixed 1:2 R:R.
+- **Atomic State:** Protection against JSON corruption via tempfiles.
