@@ -2,51 +2,50 @@ import os
 from datetime import datetime, timezone
 
 class Log:
-    GREEN = '\033[92m'
-    RED = '\033[91m'
-    YELLOW = '\033[93m'
-    RESET = '\033[0m'
+    @staticmethod
+    def _print(level, category, msg, color):
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        print(f"{color}[{level}] [{ts}] [{category}] {msg}\033[0m", flush=True)
 
     @staticmethod
-    def print(msg, color=RESET):
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        print(f"{color}[INFO] [{ts}] {msg}{Log.RESET}", flush=True)
-
+    def info(category, msg): Log._print("INFO", category, msg, "\033[92m")
+    
     @staticmethod
-    def error(func, msg):
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        print(f"{Log.RED}[ERROR] [{ts}] {func}: {msg}{Log.RESET}", flush=True)
+    def error(category, msg): Log._print("ERROR", category, msg, "\033[91m")
+    
+    @staticmethod
+    def warn(category, msg): Log._print("WARN", category, msg, "\033[93m")
 
 class Config:
-    PAPER_TRADING = True 
+    PAPER_TRADING = True # MANDATORY: Do not change to False
     
     # Credentials
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
     CHAT_ID = os.getenv("CHAT_ID")
-    RENDER_URL = os.getenv("RENDER_URL", "http://localhost:10000")
     
-    VERSION = "V64.0 (Golden Key Strategy)"
+    VERSION = "V64.0 (Whale Flow Engine)"
     STATE_FILE = "bot_state_v64.json"
-    
-    # 📌 الفريم الزمني كما في الصورة (شارت اليوم)
-    TF_MAIN = '1d' 
-    
-    # 📌 إعدادات استراتيجية المفتاح الذهبي
-    EMA_FAST = 5
-    EMA_SLOW = 12
-    RSI_LEN = 21
     
     # Market Limits
     TOP_COINS_LIMIT = 50 
-    MIN_24H_VOLUME_USDT = 15_000_000 
+    MIN_24H_VOLUME_USDT = 10_000_000 
     MAX_TRADES_AT_ONCE = 5 
-    COOLDOWN_SECONDS = 3600  
+    COOLDOWN_SECONDS = 1800  
     
-    # Risk Limits (Safety Nets)
+    # Strategy & Flow Thresholds
+    MIN_WHALE_SCORE = 80
+    MIN_RVOL = 1.2
+    OB_DEPTH_LIMIT = 20
+    TRADE_HISTORY_LIMIT = 500
+    
+    # Risk Limits
+    MAX_ENTRY_DEVIATION = 0.003
+    MAX_ALLOWED_SPREAD = 0.005 
+    ATR_SL_BUFFER = 0.5
+    MIN_ATR_RISK_RATIO = 0.8
+    MAX_ATR_RISK_RATIO = 3.0
+    RR_TARGET = 2.0
+    
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
-    MAX_MARGIN_RISK_PCT = 30.0 
-    
-    # أهداف وستوب افتراضية للأمان (الخروج الأساسي سيكون ديناميكي حسب التقاطع العكسي)
-    DEFAULT_SL_PCT = 0.10 
-    DEFAULT_TP_PCT = 0.20
+    MAX_MARGIN_RISK_PCT = 10.0 # Strict Risk Control
