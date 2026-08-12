@@ -17,7 +17,7 @@ class Log:
     def warn(category, msg): Log._print("WARN", category, msg, "\033[93m")
 
 class Config:
-    PAPER_TRADING = True # MANDATORY: Do not change to False
+    PAPER_TRADING = True # إجباري
     
     # Credentials
     TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -25,6 +25,11 @@ class Config:
     
     VERSION = "V64.0 (Whale Flow Engine)"
     STATE_FILE = "bot_state_v64.json"
+    
+    # Timeframes (هذه هي المتغيرات التي كانت ناقصة)
+    TREND_TF = '1h'
+    SETUP_TF = '15m'
+    ENTRY_TF = '5m'
     
     # Market Limits
     TOP_COINS_LIMIT = 50 
@@ -48,4 +53,4 @@ class Config:
     
     MIN_LEVERAGE = 2  
     MAX_LEVERAGE_CAP = 50 
-    MAX_MARGIN_RISK_PCT = 10.0 # Strict Risk Control
+    MAX_MARGIN_RISK_PCT = 10.0 # إدارة مخاطر صارمة
