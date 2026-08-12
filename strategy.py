@@ -24,7 +24,6 @@ class StrategyEngine:
         total_vol = buy_vol + sell_vol
         buy_ratio = buy_vol / total_vol if total_vol > 0 else 0.5
         
-        # Large trade detection (95th percentile)
         large_trade_threshold = np.percentile(trade_sizes, 95) if trade_sizes else 0
         large_buy_vol = sum(float(t['amount']) for t in trades if t.get('side') == 'buy' and float(t.get('amount', 0)) >= large_trade_threshold)
         
@@ -42,18 +41,16 @@ class StrategyEngine:
     def detect_liquidity_sweep(df_15m, current_low, current_high):
         if df_15m is None or len(df_15m) < 20: return "NONE", 0.0
         
-        recent_low = df_15m['low'].iloc[-20:].min()
-        recent_high = df_15m['high'].iloc[-20:].max()
+        recent_low = df_15m['l'].iloc[-20:].min()
+        recent_high = df_15m['h'].iloc[-20:].max()
         
         sweep = "NONE"
         sweep_level = 0.0
         
-        # Sell-side sweep (Bullish) - Price pierced recent 15M low
         if current_low < recent_low * 1.002 and current_low >= recent_low * 0.995:
             sweep = "SELL_SIDE_SWEEP"
             sweep_level = recent_low
             
-        # Buy-side sweep (Bearish)
         elif current_high > recent_high * 0.998 and current_high <= recent_high * 1.005:
             sweep = "BUY_SIDE_SWEEP"
             sweep_level = recent_high
@@ -73,13 +70,13 @@ class StrategyEngine:
             if spread > Config.MAX_ALLOWED_SPREAD or spread < 0:
                 return {"reject": "INVALID_SPREAD"}
 
-            # 1. Price Action & RVOL
+            # 1. Price Action & RVOL (using 'v' instead of 'volume')
             c_5m = df_5m.iloc[-1]
-            vol_ma = df_5m['volume'].rolling(20).mean().iloc[-1]
-            rvol = c_5m['volume'] / vol_ma if vol_ma > 0 else 1.0
+            vol_ma = df_5m['v'].rolling(20).mean().iloc[-1]
+            rvol = c_5m['v'] / vol_ma if vol_ma > 0 else 1.0
             
             # 2. Sweep Detection
-            sweep_type, sweep_level = StrategyEngine.detect_liquidity_sweep(df_15m, c_5m['low'], c_5m['high'])
+            sweep_type, sweep_level = StrategyEngine.detect_liquidity_sweep(df_15m, c_5m['l'], c_5m['h'])
             
             # 3. Microstructure & Order Flow
             buy_ratio, _, large_buy_vol, lt_thresh = StrategyEngine.analyze_flow(trades)
@@ -88,7 +85,6 @@ class StrategyEngine:
             # 4. Open Interest
             oi_change = 0.0
             if oi_data and isinstance(oi_data, dict):
-                # Approximation if historical OI not available in raw fetch
                 oi_change = float(oi_data.get('percentage', 0.0) or 0.0)
 
             # 5. Determine Bias & Evidence
@@ -115,7 +111,7 @@ class StrategyEngine:
             if not side or len(evidence) < 2:
                 return {"reject": "WEAK_FLOW_EVIDENCE"}
 
-            # 6. Calculate Whale Score (Dynamic Weighting)
+            # 6. Calculate Whale Score
             score = 0
             if rvol > 2.0: score += 20
             elif rvol > 1.5: score += 10
@@ -137,18 +133,18 @@ class StrategyEngine:
             if score < Config.MIN_WHALE_SCORE:
                 return {"reject": "LOW_WHALE_SCORE"}
 
-            # 7. Risk Management & SL/TP
+            # 7. Risk Management
             entry = ask if side == "LONG" else bid
-            if abs(entry - c_5m['close']) / c_5m['close'] > Config.MAX_ENTRY_DEVIATION:
+            if abs(entry - c_5m['c']) / c_5m['c'] > Config.MAX_ENTRY_DEVIATION:
                 return {"reject": "LATE_ENTRY"}
 
-            atr = ta.atr(df_5m['high'], df_5m['low'], df_5m['close'], length=14).iloc[-1]
+            atr = ta.atr(df_5m['h'], df_5m['l'], df_5m['c'], length=14).iloc[-1]
             if pd.isna(atr): return {"reject": "ATR_NAN"}
 
             if side == "LONG":
-                sl = (sweep_level if sweep_level > 0 else df_5m['low'].iloc[-15:].min()) - (atr * Config.ATR_SL_BUFFER)
+                sl = (sweep_level if sweep_level > 0 else df_5m['l'].iloc[-15:].min()) - (atr * Config.ATR_SL_BUFFER)
             else:
-                sl = (sweep_level if sweep_level > 0 else df_5m['high'].iloc[-15:].max()) + (atr * Config.ATR_SL_BUFFER)
+                sl = (sweep_level if sweep_level > 0 else df_5m['h'].iloc[-15:].max()) + (atr * Config.ATR_SL_BUFFER)
 
             risk = abs(entry - sl)
             if risk <= 0: return {"reject": "ZERO_RISK"}
