@@ -35,7 +35,8 @@ class Config:
     TOP_COINS_LIMIT = 50 
     MIN_24H_VOLUME_USDT = 10_000_000 
     MAX_TRADES_AT_ONCE = 5 
-    COOLDOWN_SECONDS = 1800  
+    COOLDOWN_SECONDS = 1800
+    MAX_PROCESSED_SIGNALS = 500
     
     # Strategy & Flow Thresholds
     MIN_WHALE_SCORE = 80
