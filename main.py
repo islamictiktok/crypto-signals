@@ -231,8 +231,9 @@ class TradingSystem:
 bot = TradingSystem()
 app = FastAPI()
 
-@app.get("/")
-async def root(): return {"status": "ONLINE", "mode": "PAPER", "version": Config.VERSION}
+# 📌 هنا أضفنا HEAD لكي يقبل طلبات برامج الـ Uptime ويرد بـ 200 OK
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
+async def root(): return f"<html><body><h1>QUANT MASTER {Config.VERSION}</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -243,6 +244,6 @@ async def lifespan(app: FastAPI):
     await bot.shutdown()
 
 app.router.lifespan_context = lifespan
+
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
