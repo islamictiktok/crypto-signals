@@ -4,6 +4,7 @@ import json
 import time
 import pandas as pd
 import ccxt.async_support as ccxt
+import aiohttp
 from fastapi import FastAPI, Response
 from fastapi.responses import HTMLResponse
 import uvicorn
@@ -64,38 +65,41 @@ class TradingSystem:
     async def fetch_and_analyze(self, sym, sem):
         async with sem:
             try:
-                # 1. Fetch OHLCV (Strictly [:-1] for closed candles)
                 t15m = await self.exchange.fetch_ohlcv(sym, Config.SETUP_TF, limit=100)
                 t5m = await self.exchange.fetch_ohlcv(sym, Config.ENTRY_TF, limit=100)
                 
-                # 2. Fetch Microstructure Data
                 trades = await self.exchange.fetch_trades(sym, limit=Config.TRADE_HISTORY_LIMIT)
                 ob = await self.exchange.fetch_order_book(sym, limit=Config.OB_DEPTH_LIMIT)
                 ticker = await self.exchange.fetch_ticker(sym)
                 
-                # 3. Optional Data (Handled Gracefully)
                 oi_data = None
                 try: oi_data = await self.exchange.fetch_open_interest(sym)
                 except: pass
 
-                if not t15m or not t5m or not ticker: return None
+                if not t15m or not t5m or not ticker: 
+                    return {"symbol": sym, "reject": "API_DATA_MISSING"}
                 
                 df_15m = pd.DataFrame(t15m[:-1], columns=['t', 'o', 'h', 'l', 'c', 'v'])
                 df_5m = pd.DataFrame(t5m[:-1], columns=['t', 'o', 'h', 'l', 'c', 'v'])
                 
-                return StrategyEngine.analyze_market_data(
+                res = StrategyEngine.analyze_market_data(
                     sym, df_15m, df_5m, trades, ob, oi_data, ticker.get('ask'), ticker.get('bid')
                 )
+                
+                # إرفاق اسم العملة لنتيجة الرفض لكي نطبعها في السجل
+                if res and "reject" in res:
+                    res["symbol"] = sym
+                    
+                return res
             except Exception as e:
-                Log.error("Scanner", f"{sym} fetch failed: {e}")
-                return None
+                return {"symbol": sym, "reject": f"FETCH_ERROR"}
 
     async def scan_market(self):
         while self.running:
             try:
                 now = int(time.time())
                 sleep_secs = 300 - (now % 300) + 5 
-                Log.info("Scanner", f"Waiting {sleep_secs}s for 5M close...")
+                Log.info("Scanner", f"⏳ Waiting {sleep_secs}s for the next 5M candle close...")
                 await asyncio.sleep(sleep_secs)
 
                 self.cooldown_list = {k: v for k, v in self.cooldown_list.items() if (int(time.time()) - v) < Config.COOLDOWN_SECONDS}
@@ -107,27 +111,53 @@ class TradingSystem:
                     self.daily_stats = {k: 0 for k in self.daily_stats}
                     self.daily_stats['net_r'] = 0.0
 
+                Log.info("Scanner", "🔄 5M Candle Closed. Starting Market Scan...")
+
+                btc_sym = StrategyEngine.get_dynamic_btc_symbol(self.exchange)
+                btc_ohlcv = await self.exchange.fetch_ohlcv(btc_sym, Config.TREND_TF, limit=250)
+                btc_df = pd.DataFrame(btc_ohlcv[:-1], columns=['t', 'o', 'h', 'l', 'c', 'v']) if btc_ohlcv else None
+                btc_bias = StrategyEngine.calc_btc_bias(btc_df)
+                
+                Log.info("Scanner", f"₿ BTC Market Bias: {btc_bias}")
+                
+                if btc_bias == "NEUTRAL":
+                    self.log_reject("BTC_NEUTRAL")
+                    Log.info("Scanner", "🛑 BTC is NEUTRAL. Skipping altcoin scan to protect capital.")
+                    continue
+
                 tickers = await self.exchange.fetch_tickers()
                 coins = [s for s, d in tickers.items() if 'USDT' in s and d.get('quoteVolume', 0) >= Config.MIN_24H_VOLUME_USDT]
                 coins = [c for c in coins if c not in self.active_trades and c not in self.cooldown_list][:Config.TOP_COINS_LIMIT]
+
+                Log.info("Scanner", f"🔍 Deep scanning {len(coins)} valid markets for Whale Flow...")
 
                 sem = asyncio.Semaphore(4)
                 results = await asyncio.gather(*[self.fetch_and_analyze(sym, sem) for sym in coins], return_exceptions=True)
 
                 for res in results:
                     if isinstance(res, Exception) or not res: continue
+                    
                     if "reject" in res:
                         self.log_reject(res["reject"])
+                        # سطر التفاصيل الدقيقة: طباعة سبب رفض كل عملة
+                        Log.info("Analyze", f"⏭️ {res.get('symbol', 'Unknown')} skipped: {res['reject']}")
                         continue
 
                     sig_id = f"{res['symbol']}_{res['side']}_{res['timestamp']}"
-                    if sig_id in self.processed_signals: continue
-                    if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: break
+                    if sig_id in self.processed_signals: 
+                        Log.info("Analyze", f"⏭️ {res['symbol']} skipped: DUPLICATE_SIGNAL")
+                        continue
+                        
+                    if len(self.active_trades) >= Config.MAX_TRADES_AT_ONCE: 
+                        Log.info("Scanner", "⚠️ Max active trades reached. Ignoring further signals.")
+                        break
 
                     self.processed_signals.append(sig_id)
                     self.processed_signals = self.processed_signals[-Config.MAX_PROCESSED_SIGNALS:]
                     
                     await self.execute_trade(res)
+                    
+                Log.info("Scanner", "✅ Scan Cycle Complete.")
                 
             except Exception as e:
                 Log.error("ScannerLoop", str(e))
@@ -157,7 +187,7 @@ class TradingSystem:
         self.active_trades[sym] = trade
         self.daily_stats["signals"] += 1
         self.save_state()
-        Log.info("Trade", f"SIGNAL SENT: {sym} (Score {trade['score']})")
+        Log.info("Trade", f"🚀 SIGNAL SENT: {sym} (Score {trade['score']})")
 
     async def monitor_open_trades(self):
         while self.running:
@@ -231,17 +261,20 @@ class TradingSystem:
 bot = TradingSystem()
 app = FastAPI()
 
-# 📌 هنا أضفنا HEAD لكي يقبل طلبات برامج الـ Uptime ويرد بـ 200 OK
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def root(): return f"<html><body><h1>QUANT MASTER {Config.VERSION}</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await bot.initialize()
-    asyncio.create_task(bot.scan_market())
-    asyncio.create_task(bot.monitor_open_trades())
+    t1 = asyncio.create_task(bot.scan_market())
+    t2 = asyncio.create_task(bot.monitor_open_trades())
     yield
     await bot.shutdown()
+    try: t1.cancel() 
+    except: pass
+    try: t2.cancel() 
+    except: pass
 
 app.router.lifespan_context = lifespan
 
