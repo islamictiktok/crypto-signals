@@ -11,6 +11,45 @@ class StrategyEngine:
         return f"{price:.8f}".rstrip('0').rstrip('.') if '.' in f"{price:.8f}" else f"{price:.8f}"
 
     @staticmethod
+    def get_dynamic_btc_symbol(exchange):
+        try:
+            for sym, market in exchange.markets.items():
+                if market.get('base') == 'BTC' and market.get('quote') == 'USDT' and market.get('swap') and market.get('linear'):
+                    return sym
+        except Exception as e:
+            Log.error("get_dynamic_btc_symbol", str(e))
+        return "BTC/USDT:USDT" # Fallback
+
+    @staticmethod
+    def calc_btc_bias(df_1h):
+        if df_1h is None or len(df_1h) < 210: return "NEUTRAL"
+        try:
+            ema50 = ta.ema(df_1h['c'], length=50)
+            ema200 = ta.ema(df_1h['c'], length=200)
+            rsi = ta.rsi(df_1h['c'], length=14)
+            adx_res = ta.adx(df_1h['h'], df_1h['l'], df_1h['c'], length=14)
+            
+            if adx_res is None or ema50 is None or rsi is None: return "NEUTRAL"
+            adx = adx_res['ADX_14'] if 'ADX_14' in adx_res.columns else pd.Series(dtype='float64')
+
+            if ema50.empty or ema200.empty or rsi.empty or adx.empty: return "NEUTRAL"
+            
+            c_ema50 = float(ema50.iloc[-1])
+            c_ema200 = float(ema200.iloc[-1])
+            c_rsi = float(rsi.iloc[-1])
+            c_adx = float(adx.iloc[-1])
+
+            if math.isnan(c_ema50) or math.isnan(c_adx): return "NEUTRAL"
+
+            # نعتمد 20 كحد أدنى للزخم في فريم الساعة للبيتكوين
+            if c_ema50 > c_ema200 and c_rsi >= 50 and c_adx >= 20: return "LONG"
+            if c_ema50 < c_ema200 and c_rsi <= 50 and c_adx >= 20: return "SHORT"
+            return "NEUTRAL"
+        except Exception as e:
+            Log.error("calc_btc_bias", str(e))
+            return "NEUTRAL"
+
+    @staticmethod
     def analyze_flow(trades):
         if not trades: return 0, 0, 0, 0
         buy_vol, sell_vol = 0.0, 0.0
@@ -70,7 +109,7 @@ class StrategyEngine:
             if spread > Config.MAX_ALLOWED_SPREAD or spread < 0:
                 return {"reject": "INVALID_SPREAD"}
 
-            # 1. Price Action & RVOL (using 'v' instead of 'volume')
+            # 1. Price Action & RVOL 
             c_5m = df_5m.iloc[-1]
             vol_ma = df_5m['v'].rolling(20).mean().iloc[-1]
             rvol = c_5m['v'] / vol_ma if vol_ma > 0 else 1.0
