@@ -3,5 +3,3 @@ uvicorn
 aiohttp
 ccxt
 pandas
-pandas-ta
-pytest
