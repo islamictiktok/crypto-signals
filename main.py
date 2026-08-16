@@ -19,24 +19,28 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 RENDER_URL = os.getenv("RENDER_URL", "http://localhost:10000")
 
-STATE_FILE = "bot_state_sd.json"
-TIMEFRAME = '15m'  
+STATE_FILE = "bot_state_sd_mtf.json"
+
+TF_HTF1 = '4h'   
+TF_HTF2 = '1h'   
+TF_LTF  = '3m'   
+
 TOP_COINS_LIMIT = 50
 MIN_24H_VOLUME = 10_000_000
 MAX_TRADES = 5
 COOLDOWN_SEC = 1800
 
-# إدارة المخاطر والرافعة
-RR_RATIO = 2.0  
+# إدارة المخاطر
+FALLBACK_RR = 2.0  # يستخدم فقط إذا لم توجد منطقة مقابلة في الشارت
 MIN_LEVERAGE = 2
 MAX_LEVERAGE_CAP = 50
 MAX_MARGIN_RISK_PCT = 30.0 
 PAPER_TRADING = True
 
 # ==========================================
-# 2. محرك استراتيجية العرض والطلب (SUPPLY & DEMAND ENGINE)
+# 2. محرك الفريمات المتعددة (MTF SUPPLY & DEMAND ENGINE)
 # ==========================================
-class SupplyDemandEngine:
+class SupplyDemandMTFEngine:
     @staticmethod
     def format_price(price):
         if price is None or math.isnan(price): return "0.0"
@@ -52,37 +56,43 @@ class SupplyDemandEngine:
         return true_range.rolling(period).mean()
 
     @staticmethod
-    def analyze_chart(df, symbol, current_price):
-        if df is None or len(df) < 50: return None
-        if current_price is None or current_price <= 0: return None
-
-        df['atr'] = SupplyDemandEngine.calculate_atr(df)
+    def extract_zones(df):
+        zones = []
+        if df is None or len(df) < 50: return zones
         
-        last_demand_zone = None
-        last_supply_zone = None
-
+        df['atr'] = SupplyDemandMTFEngine.calculate_atr(df)
+        
         for i in range(5, len(df) - 1):
             c0, c1, c2 = df.iloc[i], df.iloc[i-1], df.iloc[i-2]
             base_candle = df.iloc[i-3]
             atr = df['atr'].iloc[i]
 
             if c0['c'] > c0['o'] and c1['c'] > c1['o'] and c2['c'] > c2['o']:
-                move_size = c0['c'] - c2['o']
-                if move_size > (atr * 2):
-                    last_demand_zone = {
+                if (c0['c'] - c2['o']) > (atr * 2):
+                    zones.append({
+                        'type': 'DEMAND',
                         'top': max(base_candle['o'], base_candle['c']),
-                        'bottom': base_candle['l'],
-                    }
+                        'bottom': base_candle['l']
+                    })
 
             if c0['c'] < c0['o'] and c1['c'] < c1['o'] and c2['c'] < c2['o']:
-                move_size = c2['o'] - c0['c']
-                if move_size > (atr * 2):
-                    last_supply_zone = {
+                if (c2['o'] - c0['c']) > (atr * 2):
+                    zones.append({
+                        'type': 'SUPPLY',
                         'top': base_candle['h'],
-                        'bottom': min(base_candle['o'], base_candle['c']),
-                    }
+                        'bottom': min(base_candle['o'], base_candle['c'])
+                    })
+        return zones
 
-        last_closed = df.iloc[-1]
+    @staticmethod
+    def analyze_mtf(df_4h, df_1h, df_3m, symbol, current_price):
+        if df_3m is None or len(df_3m) < 10: return None
+        if current_price is None or current_price <= 0: return None
+
+        htf_zones = SupplyDemandMTFEngine.extract_zones(df_4h) + SupplyDemandMTFEngine.extract_zones(df_1h)
+        if not htf_zones: return None
+
+        last_closed = df_3m.iloc[-1]
         candle_range = last_closed['h'] - last_closed['l']
         if candle_range == 0: return None
 
@@ -94,27 +104,57 @@ class SupplyDemandEngine:
 
         side = None
         sl = 0.0
-        
-        if last_demand_zone:
-            if last_demand_zone['bottom'] <= last_closed['l'] <= last_demand_zone['top']:
-                if (lower_wick / candle_range) >= 0.40 and last_closed['c'] > last_closed['o']: 
-                    side = "LONG"
-                    sl = last_demand_zone['bottom'] * 0.999 
+        zone_type_found = ""
 
-        elif last_supply_zone and not side:
-            if last_supply_zone['bottom'] <= last_closed['h'] <= last_supply_zone['top']:
-                if (upper_wick / candle_range) >= 0.40 and last_closed['c'] < last_closed['o']:
-                    side = "SHORT"
-                    sl = last_supply_zone['top'] * 1.001 
+        # اختبار ملامسة السعر للمناطق
+        for zone in htf_zones:
+            if zone['type'] == 'DEMAND':
+                if zone['bottom'] <= last_closed['l'] <= zone['top']:
+                    if (lower_wick / candle_range) >= 0.40 and last_closed['c'] > last_closed['o']: 
+                        side = "LONG"
+                        sl = zone['bottom'] * 0.999 
+                        zone_type_found = "HTF Demand"
+                        break
+
+            elif zone['type'] == 'SUPPLY':
+                if zone['bottom'] <= last_closed['h'] <= zone['top']:
+                    if (upper_wick / candle_range) >= 0.40 and last_closed['c'] < last_closed['o']:
+                        side = "SHORT"
+                        sl = zone['top'] * 1.001 
+                        zone_type_found = "HTF Supply"
+                        break
 
         if not side: return None
 
         entry = float(current_price)
         risk = abs(entry - sl)
-        
         if risk <= 0 or (risk/entry) > 0.15: return None 
         
-        tp = entry + (risk * RR_RATIO) if side == "LONG" else entry - (risk * RR_RATIO)
+        # 📌 تحديد الهدف (TP) بناءً على المنطقة المقابلة
+        tp = 0.0
+        if side == "LONG":
+            # البحث عن أقرب منطقة عرض فوق سعر الدخول
+            valid_supplies = [z['bottom'] for z in htf_zones if z['type'] == 'SUPPLY' and z['bottom'] > entry]
+            if valid_supplies:
+                nearest_supply = min(valid_supplies)
+                tp = nearest_supply * 0.999 # قبل بداية منطقة العرض بقليل
+            else:
+                tp = entry + (risk * FALLBACK_RR)
+
+        elif side == "SHORT":
+            # البحث عن أقرب منطقة طلب تحت سعر الدخول
+            valid_demands = [z['top'] for z in htf_zones if z['type'] == 'DEMAND' and z['top'] < entry]
+            if valid_demands:
+                nearest_demand = max(valid_demands)
+                tp = nearest_demand * 1.001 # قبل بداية منطقة الطلب بقليل
+            else:
+                tp = entry - (risk * FALLBACK_RR)
+
+        # 📌 فلتر رفض الصفقة إذا كان الهدف قريب جداً (R:R سيء أقل من 1:1)
+        reward = abs(tp - entry)
+        if reward < risk: return None
+
+        actual_rr = reward / risk
 
         margin_risk_pct = (risk / entry) * 100
         lev = max(MIN_LEVERAGE, min(MAX_LEVERAGE_CAP, int(MAX_MARGIN_RISK_PCT / margin_risk_pct)))
@@ -125,7 +165,7 @@ class SupplyDemandEngine:
         return {
             "symbol": symbol, "side": side, "entry": entry, 
             "sl": sl, "tp": tp, "leverage": lev, "tp_roe": tp_roe, "sl_roe": sl_roe,
-            "timestamp": int(last_closed['t'])
+            "actual_rr": actual_rr, "timestamp": int(last_closed['t']), "zone_type": zone_type_found
         }
 
 # ==========================================
@@ -143,11 +183,8 @@ class TradingBot:
         self.active_trades = {}
         self.cooldown_list = {}
         self.processed = []
-        
-        # 📌 إضافة إحصائيات التقرير اليومي
         self.daily_stats = {"signals": 0, "wins": 0, "losses": 0, "closed_trades": 0}
         self.current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        
         self.running = True
 
     async def send_tg(self, text, reply_to=None):
@@ -191,25 +228,20 @@ class TradingBot:
     async def init_bot(self):
         await self.exchange.load_markets()
         self.load_state()
-        print_log(f"🚀 SUPPLY & DEMAND ENGINE ONLINE - PAPER TRADING ONLY")
+        print_log(f"🚀 MTF SUPPLY & DEMAND ENGINE ONLINE (Dynamic Targets) - PAPER TRADING")
 
     async def daily_report(self):
-        """ 📌 دالة إرسال التقرير اليومي """
         closed = self.daily_stats['closed_trades']
         wr = (self.daily_stats['wins'] / closed * 100) if closed > 0 else 0
-        
         msg = (
             f"📊 <b>التقرير اليومي الدقيق</b>\n"
-            f"📅 التاريخ: {self.current_date}\n"
-            f"━━━━━━━━━━━━━━\n"
+            f"📅 التاريخ: {self.current_date}\n━━━━━━━━━━━━━━\n"
             f"🎯 الإشارات المرسلة: {self.daily_stats['signals']}\n"
-            f"🏁 الصفقات المغلقة: {closed}\n"
-            f"━━━━━━━━━━━━━━\n"
+            f"🏁 الصفقات المغلقة: {closed}\n━━━━━━━━━━━━━━\n"
             f"🏆 الأرباح (Wins): {self.daily_stats['wins']}\n"
             f"🛑 الخسائر (Losses): {self.daily_stats['losses']}\n"
-            f"📈 نسبة النجاح: {wr:.1f}%\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"📌 نظام مناطق العرض والطلب"
+            f"📈 نسبة النجاح: {wr:.1f}%\n━━━━━━━━━━━━━━\n"
+            f"📌 نظام الفريمات المتعددة والأهداف الديناميكية"
         )
         await self.send_tg(msg)
 
@@ -217,9 +249,8 @@ class TradingBot:
         while self.running:
             try:
                 await asyncio.sleep(60)
-                print_log(f"🔍 Scanning market for Supply & Demand Zones...")
+                print_log(f"🔍 Scanning MTF (4H, 1H, 3M) for Zones & Targets...")
 
-                # 📌 التحقق من تغير اليوم لإرسال التقرير وتصفير العدادات
                 utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 if utc_date != self.current_date:
                     await self.daily_report()
@@ -233,14 +264,21 @@ class TradingBot:
                 coins = [s for s, d in tickers.items() if 'USDT' in s and d.get('quoteVolume', 0) >= MIN_24H_VOLUME]
                 coins = [c for c in coins if c not in self.active_trades and c not in self.cooldown_list][:TOP_COINS_LIMIT]
 
-                sem = asyncio.Semaphore(5)
+                sem = asyncio.Semaphore(4)
                 async def fetch_and_analyze(sym):
                     async with sem:
                         try:
-                            ohlcv = await self.exchange.fetch_ohlcv(sym, TIMEFRAME, limit=100)
-                            if not ohlcv: return None
-                            df = pd.DataFrame(ohlcv[:-1], columns=['t', 'o', 'h', 'l', 'c', 'v'])
-                            return SupplyDemandEngine.analyze_chart(df, sym, tickers[sym].get('last'))
+                            t4h = await self.exchange.fetch_ohlcv(sym, TF_HTF1, limit=100)
+                            t1h = await self.exchange.fetch_ohlcv(sym, TF_HTF2, limit=100)
+                            t3m = await self.exchange.fetch_ohlcv(sym, TF_LTF, limit=50)
+                            
+                            if not t4h or not t1h or not t3m: return None
+                            
+                            df_4h = pd.DataFrame(t4h[:-1], columns=['t', 'o', 'h', 'l', 'c', 'v'])
+                            df_1h = pd.DataFrame(t1h[:-1], columns=['t', 'o', 'h', 'l', 'c', 'v'])
+                            df_3m = pd.DataFrame(t3m[:-1], columns=['t', 'o', 'h', 'l', 'c', 'v'])
+                            
+                            return SupplyDemandMTFEngine.analyze_mtf(df_4h, df_1h, df_3m, sym, tickers[sym].get('last'))
                         except: return None
 
                 results = await asyncio.gather(*[fetch_and_analyze(sym) for sym in coins])
@@ -268,19 +306,20 @@ class TradingBot:
         base_name = market_info.get('info', {}).get('baseCoinName', '')
         app_name = f"{base_name}/USDT" if base_name else sym.replace('/USDT:USDT', '/USDT')
         
-        en = SupplyDemandEngine.format_price(trade['entry'])
-        sl = SupplyDemandEngine.format_price(trade['sl'])
-        tp = SupplyDemandEngine.format_price(trade['tp'])
+        en = SupplyDemandMTFEngine.format_price(trade['entry'])
+        sl = SupplyDemandMTFEngine.format_price(trade['sl'])
+        tp = SupplyDemandMTFEngine.format_price(trade['tp'])
 
         msg = (
-            f"⚡ {app_name} | {icon}\n"
+            f"⚡ <code>{app_name}</code> | {icon}\n"
             f"⚖️ Leverage: {trade['leverage']}x\n"
             f"💰 Entry: <code>{en}</code>\n"
             f"━━━━━━━━━━━━━━━\n"
             f"🎯 Target: <code>{tp}</code> (+{trade['tp_roe']:.1f}%)\n"
             f"━━━━━━━━━━━━━━━\n"
             f"🛑 Stop: <code>{sl}</code> (-{trade['sl_roe']:.1f}%)\n"
-            f"━━━━━━━━━━━━━━━"
+            f"━━━━━━━━━━━━━━━\n"
+            f"🧠 Zone: {trade['zone_type']} | R:R (1:{trade['actual_rr']:.1f})"
         )
         msg_id = await self.send_tg(msg)
         
@@ -289,7 +328,7 @@ class TradingBot:
         trade['entry_time'] = int(time.time())
         
         self.active_trades[sym] = trade
-        self.daily_stats['signals'] += 1 # زيادة عداد الإشارات
+        self.daily_stats['signals'] += 1
         self.save_state()
         print_log(f"SIGNAL SENT: {app_name} {trade['side']}")
 
@@ -319,15 +358,12 @@ class TradingBot:
             await asyncio.sleep(3)
 
     async def close_trade(self, sym, trade, title, exit_price, is_win):
-        en = SupplyDemandEngine.format_price(trade['entry'])
-        ex = SupplyDemandEngine.format_price(exit_price)
+        en = SupplyDemandMTFEngine.format_price(trade['entry'])
+        ex = SupplyDemandMTFEngine.format_price(exit_price)
         
-        # 📌 تحديث إحصائيات التقرير اليومي
         self.daily_stats['closed_trades'] += 1
-        if is_win:
-            self.daily_stats['wins'] += 1
-        else:
-            self.daily_stats['losses'] += 1
+        if is_win: self.daily_stats['wins'] += 1
+        else: self.daily_stats['losses'] += 1
 
         msg = (
             f"<b>{title}</b>\n━━━━━━━━━━━━━━\n"
@@ -363,7 +399,7 @@ bot = TradingBot()
 app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body><h1>SUPPLY & DEMAND ENGINE ONLINE</h1></body></html>"
+async def root(): return f"<html><body><h1>MTF SUPPLY & DEMAND ENGINE ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
