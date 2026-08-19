@@ -31,7 +31,7 @@ MAX_TRADES = 5
 COOLDOWN_SEC = 1800
 
 # إدارة المخاطر
-FALLBACK_RR = 2.0  # يستخدم فقط إذا لم توجد منطقة مقابلة في الشارت
+FALLBACK_RR = 2.0  
 MIN_LEVERAGE = 2
 MAX_LEVERAGE_CAP = 50
 MAX_MARGIN_RISK_PCT = 30.0 
@@ -57,32 +57,51 @@ class SupplyDemandMTFEngine:
 
     @staticmethod
     def extract_zones(df):
-        zones = []
-        if df is None or len(df) < 50: return zones
+        valid_zones = []
+        if df is None or len(df) < 50: return valid_zones
         
         df['atr'] = SupplyDemandMTFEngine.calculate_atr(df)
+        temp_zones = []
         
+        # 1. تحديد كل المناطق (حتى لو تم كسرها)
         for i in range(5, len(df) - 1):
             c0, c1, c2 = df.iloc[i], df.iloc[i-1], df.iloc[i-2]
             base_candle = df.iloc[i-3]
             atr = df['atr'].iloc[i]
 
+            # شروط شمعة الزخم (خففناها لـ 1.5 عشان نلتقط فرص أكثر بجودة عالية)
             if c0['c'] > c0['o'] and c1['c'] > c1['o'] and c2['c'] > c2['o']:
-                if (c0['c'] - c2['o']) > (atr * 2):
-                    zones.append({
+                if (c0['c'] - c2['o']) > (atr * 1.5):
+                    temp_zones.append({
                         'type': 'DEMAND',
                         'top': max(base_candle['o'], base_candle['c']),
-                        'bottom': base_candle['l']
+                        'bottom': base_candle['l'],
+                        'idx': i
                     })
 
             if c0['c'] < c0['o'] and c1['c'] < c1['o'] and c2['c'] < c2['o']:
-                if (c2['o'] - c0['c']) > (atr * 2):
-                    zones.append({
+                if (c2['o'] - c0['c']) > (atr * 1.5):
+                    temp_zones.append({
                         'type': 'SUPPLY',
                         'top': base_candle['h'],
-                        'bottom': min(base_candle['o'], base_candle['c'])
+                        'bottom': min(base_candle['o'], base_candle['c']),
+                        'idx': i
                     })
-        return zones
+
+        # 2. فلترة المناطق المكسورة (Zone Mitigation - الحل السحري للمشكلة)
+        for z in temp_zones:
+            is_broken = False
+            for j in range(z['idx'] + 1, len(df)):
+                if z['type'] == 'DEMAND' and df['c'].iloc[j] < z['bottom']:
+                    is_broken = True
+                    break
+                if z['type'] == 'SUPPLY' and df['c'].iloc[j] > z['top']:
+                    is_broken = True
+                    break
+            if not is_broken:
+                valid_zones.append(z)
+                
+        return valid_zones
 
     @staticmethod
     def analyze_mtf(df_4h, df_1h, df_3m, symbol, current_price):
@@ -92,37 +111,43 @@ class SupplyDemandMTFEngine:
         htf_zones = SupplyDemandMTFEngine.extract_zones(df_4h) + SupplyDemandMTFEngine.extract_zones(df_1h)
         if not htf_zones: return None
 
-        last_closed = df_3m.iloc[-1]
-        candle_range = last_closed['h'] - last_closed['l']
-        if candle_range == 0: return None
-
-        body_top = max(last_closed['o'], last_closed['c'])
-        body_bottom = min(last_closed['o'], last_closed['c'])
-        
-        lower_wick = body_bottom - last_closed['l']
-        upper_wick = last_closed['h'] - body_top
-
         side = None
         sl = 0.0
         zone_type_found = ""
+        trigger_candle = None
 
-        # اختبار ملامسة السعر للمناطق
-        for zone in htf_zones:
-            if zone['type'] == 'DEMAND':
-                if zone['bottom'] <= last_closed['l'] <= zone['top']:
-                    if (lower_wick / candle_range) >= 0.40 and last_closed['c'] > last_closed['o']: 
-                        side = "LONG"
-                        sl = zone['bottom'] * 0.999 
-                        zone_type_found = "HTF Demand"
-                        break
+        # فحص آخر شمعتين (بدل شمعة واحدة) عشان ما نضيعش الارتداد السريع
+        for offset in [-1, -2]:
+            candle = df_3m.iloc[offset]
+            candle_range = candle['h'] - candle['l']
+            if candle_range == 0: continue
 
-            elif zone['type'] == 'SUPPLY':
-                if zone['bottom'] <= last_closed['h'] <= zone['top']:
-                    if (upper_wick / candle_range) >= 0.40 and last_closed['c'] < last_closed['o']:
-                        side = "SHORT"
-                        sl = zone['top'] * 1.001 
-                        zone_type_found = "HTF Supply"
-                        break
+            body_top = max(candle['o'], candle['c'])
+            body_bottom = min(candle['o'], candle['c'])
+            lower_wick = body_bottom - candle['l']
+            upper_wick = candle['h'] - body_top
+
+            for zone in htf_zones:
+                if zone['type'] == 'DEMAND':
+                    # هل السعر لمس منطقة الطلب القوية؟
+                    if zone['bottom'] <= candle['l'] <= zone['top']:
+                        if (lower_wick / candle_range) >= 0.40 and candle['c'] > candle['o']: 
+                            side = "LONG"
+                            sl = zone['bottom'] * 0.999 
+                            zone_type_found = "HTF Demand"
+                            trigger_candle = candle
+                            break
+
+                elif zone['type'] == 'SUPPLY':
+                    # هل السعر لمس منطقة العرض القوية؟
+                    if zone['bottom'] <= candle['h'] <= zone['top']:
+                        if (upper_wick / candle_range) >= 0.40 and candle['c'] < candle['o']:
+                            side = "SHORT"
+                            sl = zone['top'] * 1.001 
+                            zone_type_found = "HTF Supply"
+                            trigger_candle = candle
+                            break
+            if side: break
 
         if not side: return None
 
@@ -130,27 +155,23 @@ class SupplyDemandMTFEngine:
         risk = abs(entry - sl)
         if risk <= 0 or (risk/entry) > 0.15: return None 
         
-        # 📌 تحديد الهدف (TP) بناءً على المنطقة المقابلة
+        # تحديد الهدف (TP) من المناطق الصالحة فقط
         tp = 0.0
         if side == "LONG":
-            # البحث عن أقرب منطقة عرض فوق سعر الدخول
             valid_supplies = [z['bottom'] for z in htf_zones if z['type'] == 'SUPPLY' and z['bottom'] > entry]
             if valid_supplies:
-                nearest_supply = min(valid_supplies)
-                tp = nearest_supply * 0.999 # قبل بداية منطقة العرض بقليل
+                tp = min(valid_supplies) * 0.999
             else:
                 tp = entry + (risk * FALLBACK_RR)
 
         elif side == "SHORT":
-            # البحث عن أقرب منطقة طلب تحت سعر الدخول
             valid_demands = [z['top'] for z in htf_zones if z['type'] == 'DEMAND' and z['top'] < entry]
             if valid_demands:
-                nearest_demand = max(valid_demands)
-                tp = nearest_demand * 1.001 # قبل بداية منطقة الطلب بقليل
+                tp = max(valid_demands) * 1.001
             else:
                 tp = entry - (risk * FALLBACK_RR)
 
-        # 📌 فلتر رفض الصفقة إذا كان الهدف قريب جداً (R:R سيء أقل من 1:1)
+        # التأكد إن الربح يستاهل المخاطرة (R:R ممتاز)
         reward = abs(tp - entry)
         if reward < risk: return None
 
@@ -165,7 +186,7 @@ class SupplyDemandMTFEngine:
         return {
             "symbol": symbol, "side": side, "entry": entry, 
             "sl": sl, "tp": tp, "leverage": lev, "tp_roe": tp_roe, "sl_roe": sl_roe,
-            "actual_rr": actual_rr, "timestamp": int(last_closed['t']), "zone_type": zone_type_found
+            "actual_rr": actual_rr, "timestamp": int(trigger_candle['t']), "zone_type": zone_type_found
         }
 
 # ==========================================
@@ -228,7 +249,7 @@ class TradingBot:
     async def init_bot(self):
         await self.exchange.load_markets()
         self.load_state()
-        print_log(f"🚀 MTF SUPPLY & DEMAND ENGINE ONLINE (Dynamic Targets) - PAPER TRADING")
+        print_log(f"🚀 MTF SUPPLY & DEMAND ENGINE ONLINE (Fixed Zones) - PAPER TRADING")
 
     async def daily_report(self):
         closed = self.daily_stats['closed_trades']
@@ -249,7 +270,7 @@ class TradingBot:
         while self.running:
             try:
                 await asyncio.sleep(60)
-                print_log(f"🔍 Scanning MTF (4H, 1H, 3M) for Zones & Targets...")
+                print_log(f"🔍 Scanning MTF (4H, 1H, 3M) for Valid Zones...")
 
                 utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 if utc_date != self.current_date:
