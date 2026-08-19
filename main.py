@@ -21,9 +21,9 @@ RENDER_URL = os.getenv("RENDER_URL", "http://localhost:10000")
 
 STATE_FILE = "bot_state_sd_mtf.json"
 
-TF_HTF1 = '4h'   
-TF_HTF2 = '1h'   
-TF_LTF  = '3m'   
+TF_HTF1 = '4h'
+TF_HTF2 = '1h'
+TF_LTF  = '3m'
 
 TOP_COINS_LIMIT = 50
 MIN_24H_VOLUME = 10_000_000
@@ -31,7 +31,7 @@ MAX_TRADES = 5
 COOLDOWN_SEC = 1800
 
 # إدارة المخاطر
-FALLBACK_RR = 2.0  
+FALLBACK_RR = 2.0
 MIN_LEVERAGE = 2
 MAX_LEVERAGE_CAP = 50
 MAX_MARGIN_RISK_PCT = 30.0 
@@ -69,7 +69,7 @@ class SupplyDemandMTFEngine:
             base_candle = df.iloc[i-3]
             atr = df['atr'].iloc[i]
 
-            # شروط شمعة الزخم (خففناها لـ 1.5 عشان نلتقط فرص أكثر بجودة عالية)
+            # شروط شمعة الزخم (خففناها لـ 1.5)
             if c0['c'] > c0['o'] and c1['c'] > c1['o'] and c2['c'] > c2['o']:
                 if (c0['c'] - c2['o']) > (atr * 1.5):
                     temp_zones.append({
@@ -88,7 +88,7 @@ class SupplyDemandMTFEngine:
                         'idx': i
                     })
 
-        # 2. فلترة المناطق المكسورة (Zone Mitigation - الحل السحري للمشكلة)
+        # 2. فلترة المناطق المكسورة 
         for z in temp_zones:
             is_broken = False
             for j in range(z['idx'] + 1, len(df)):
@@ -116,7 +116,7 @@ class SupplyDemandMTFEngine:
         zone_type_found = ""
         trigger_candle = None
 
-        # فحص آخر شمعتين (بدل شمعة واحدة) عشان ما نضيعش الارتداد السريع
+        # فحص آخر شمعتين
         for offset in [-1, -2]:
             candle = df_3m.iloc[offset]
             candle_range = candle['h'] - candle['l']
@@ -129,21 +129,22 @@ class SupplyDemandMTFEngine:
 
             for zone in htf_zones:
                 if zone['type'] == 'DEMAND':
-                    # هل السعر لمس منطقة الطلب القوية؟
-                    if zone['bottom'] <= candle['l'] <= zone['top']:
-                        if (lower_wick / candle_range) >= 0.40 and candle['c'] > candle['o']: 
+                    # الحل السحري: ذيل الشمعة وصل للمنطقة، لكن الإغلاق لم يكسر قاع المنطقة!
+                    if candle['l'] <= zone['top'] and candle['c'] >= zone['bottom']:
+                        # ذيل 35% على الأقل مع إغلاق أخضر إيجابي
+                        if (lower_wick / candle_range) >= 0.35 and candle['c'] > candle['o']: 
                             side = "LONG"
-                            sl = zone['bottom'] * 0.999 
+                            sl = min(zone['bottom'], candle['l']) * 0.999 
                             zone_type_found = "HTF Demand"
                             trigger_candle = candle
                             break
 
                 elif zone['type'] == 'SUPPLY':
-                    # هل السعر لمس منطقة العرض القوية؟
-                    if zone['bottom'] <= candle['h'] <= zone['top']:
-                        if (upper_wick / candle_range) >= 0.40 and candle['c'] < candle['o']:
+                    # الحل السحري: ذيل الشمعة وصل للمنطقة، لكن الإغلاق لم يخترق قمة المنطقة!
+                    if candle['h'] >= zone['bottom'] and candle['c'] <= zone['top']:
+                        if (upper_wick / candle_range) >= 0.35 and candle['c'] < candle['o']:
                             side = "SHORT"
-                            sl = zone['top'] * 1.001 
+                            sl = max(zone['top'], candle['h']) * 1.001 
                             zone_type_found = "HTF Supply"
                             trigger_candle = candle
                             break
@@ -155,7 +156,7 @@ class SupplyDemandMTFEngine:
         risk = abs(entry - sl)
         if risk <= 0 or (risk/entry) > 0.15: return None 
         
-        # تحديد الهدف (TP) من المناطق الصالحة فقط
+        # تحديد الهدف (TP)
         tp = 0.0
         if side == "LONG":
             valid_supplies = [z['bottom'] for z in htf_zones if z['type'] == 'SUPPLY' and z['bottom'] > entry]
@@ -171,7 +172,6 @@ class SupplyDemandMTFEngine:
             else:
                 tp = entry - (risk * FALLBACK_RR)
 
-        # التأكد إن الربح يستاهل المخاطرة (R:R ممتاز)
         reward = abs(tp - entry)
         if reward < risk: return None
 
@@ -249,7 +249,7 @@ class TradingBot:
     async def init_bot(self):
         await self.exchange.load_markets()
         self.load_state()
-        print_log(f"🚀 MTF SUPPLY & DEMAND ENGINE ONLINE (Fixed Zones) - PAPER TRADING")
+        print_log(f"🚀 MTF SUPPLY & DEMAND ENGINE ONLINE (Sweep Fixed) - PAPER TRADING")
 
     async def daily_report(self):
         closed = self.daily_stats['closed_trades']
@@ -289,8 +289,8 @@ class TradingBot:
                 async def fetch_and_analyze(sym):
                     async with sem:
                         try:
-                            t4h = await self.exchange.fetch_ohlcv(sym, TF_HTF1, limit=100)
-                            t1h = await self.exchange.fetch_ohlcv(sym, TF_HTF2, limit=100)
+                            t4h = await self.exchange.fetch_ohlcv(sym, TF_HTF1, limit=250)
+                            t1h = await self.exchange.fetch_ohlcv(sym, TF_HTF2, limit=250)
                             t3m = await self.exchange.fetch_ohlcv(sym, TF_LTF, limit=50)
                             
                             if not t4h or not t1h or not t3m: return None
@@ -302,10 +302,11 @@ class TradingBot:
                             return SupplyDemandMTFEngine.analyze_mtf(df_4h, df_1h, df_3m, sym, tickers[sym].get('last'))
                         except: return None
 
-                results = await asyncio.gather(*[fetch_and_analyze(sym) for sym in coins])
+                # استخدام return_exceptions لتجنب إيقاف اللوب إذا فشل استدعاء لعملة معينة
+                results = await asyncio.gather(*[fetch_and_analyze(sym) for sym in coins], return_exceptions=True)
 
                 for res in results:
-                    if not res: continue
+                    if isinstance(res, Exception) or not res: continue
                     sig_id = f"{res['symbol']}_{res['side']}_{res['timestamp']}"
                     
                     if sig_id in self.processed: continue
