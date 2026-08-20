@@ -19,23 +19,23 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 RENDER_URL = os.getenv("RENDER_URL", "http://localhost:10000")
 
-STATE_FILE = "bot_state_golden_key.json"
-TIMEFRAME = '1h'  # فريم الساعة كما طلبت
+STATE_FILE = "bot_state_golden_scored.json"
+TIMEFRAME = '1h'  
 
-TOP_COINS_LIMIT = 100 # تم زيادتها إلى 100 عملة
-MIN_24H_VOLUME = 1_000_000 # تم تخفيض الفوليوم إلى مليون دولار
+TOP_COINS_LIMIT = 100 
+MIN_24H_VOLUME = 1_000_000 
 MAX_TRADES = 5
-COOLDOWN_SEC = 3600 # تبريد لمدة ساعة بعد إغلاق الصفقة
+COOLDOWN_SEC = 3600 
 
 # إدارة المخاطر
-RR_RATIO = 2.0  # الهدف ضعف الاستوب
+RR_RATIO = 2.0  
 MIN_LEVERAGE = 2
 MAX_LEVERAGE_CAP = 50
 MAX_MARGIN_RISK_PCT = 20.0 
 PAPER_TRADING = True
 
 # ==========================================
-# 2. محرك استراتيجية المفتاح الذهبي (GOLDEN KEY ENGINE)
+# 2. محرك استراتيجية المفتاح الذهبي المتقدم (SCORED GOLDEN KEY)
 # ==========================================
 class GoldenKeyEngine:
     @staticmethod
@@ -45,9 +45,10 @@ class GoldenKeyEngine:
 
     @staticmethod
     def calculate_indicators(df):
-        # 1. المتوسطات المتحركة (EMA 5 & EMA 12)
+        # 1. المتوسطات الأساسية للاستراتيجية (EMA 5, EMA 12) والاتجاه العام (EMA 50)
         df['ema5'] = df['c'].ewm(span=5, adjust=False).mean()
         df['ema12'] = df['c'].ewm(span=12, adjust=False).mean()
+        df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
 
         # 2. مؤشر القوة النسبية (RSI 21)
         delta = df['c'].diff()
@@ -58,57 +59,94 @@ class GoldenKeyEngine:
         rs = ema_up / ema_down
         df['rsi21'] = 100 - (100 / (1 + rs))
 
-        # 3. مؤشر التذبذب (ATR) لحساب الاستوب لوز بدقة
-        high_low = df['h'] - df['l']
-        high_close = (df['h'] - df['c'].shift()).abs()
-        low_close = (df['l'] - df['c'].shift()).abs()
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        df['atr'] = tr.rolling(14).mean()
+        # 3. مؤشر الماكد (MACD) لتأكيد الزخم
+        df['macd'] = df['c'].ewm(span=12, adjust=False).mean() - df['c'].ewm(span=26, adjust=False).mean()
+        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+
+        # 4. متوسط السيولة (Volume SMA)
+        df['vol_sma'] = df['v'].rolling(20).mean()
 
         return df
 
     @staticmethod
     def analyze_chart(df, symbol, current_price):
-        if df is None or len(df) < 30: return None
+        if df is None or len(df) < 50: return None
         if current_price is None or current_price <= 0: return None
 
         df = GoldenKeyEngine.calculate_indicators(df)
         
-        # نأخذ آخر شمعتين مغلقتين لتأكيد التقاطع
         prev = df.iloc[-2]
         curr = df.iloc[-1]
         
-        # التأكد من عدم وجود قيم فارغة (NaN)
-        if pd.isna(curr['ema5']) or pd.isna(curr['rsi21']) or pd.isna(curr['atr']):
-            return None
+        if pd.isna(curr['ema5']) or pd.isna(curr['rsi21']): return None
 
         side = None
         sl = 0.0
 
-        # 🟢 إشارة الشراء (LONG)
-        # التقاطع الذهبي لأعلى + RSI فوق 50
+        # التحقق من التقاطع (شرط الدخول الأساسي)
         cross_up = (prev['ema5'] <= prev['ema12']) and (curr['ema5'] > curr['ema12'])
-        if cross_up and curr['rsi21'] > 50:
-            side = "LONG"
-            sl = current_price - (curr['atr'] * 2) # الاستوب لوز أسفل السعر بمسافة أمان (2 ATR)
-
-        # 🔴 إشارة البيع (SHORT)
-        # التقاطع الميت لأسفل + RSI تحت 50
         cross_down = (prev['ema5'] >= prev['ema12']) and (curr['ema5'] < curr['ema12'])
-        if cross_down and curr['rsi21'] < 50:
-            side = "SHORT"
-            sl = current_price + (curr['atr'] * 2) # الاستوب لوز أعلى السعر بمسافة أمان
 
+        if cross_up: side = "LONG"
+        elif cross_down: side = "SHORT"
+        
         if not side: return None
+
+        # 📌 نظام التقييم (Scoring System 100)
+        score = 0
+        evidence = []
+
+        if side == "LONG":
+            if curr['rsi21'] > 55: 
+                score += 30; evidence.append("Strong RSI (>55)")
+            elif curr['rsi21'] > 50: 
+                score += 15
+
+            if curr['macd'] > curr['macd_signal']: 
+                score += 30; evidence.append("MACD Bullish")
+                
+            if curr['v'] > curr['vol_sma']: 
+                score += 20; evidence.append("Volume Surge")
+                
+            if curr['c'] > curr['ema50']: 
+                score += 20; evidence.append("Trend Confirmed (EMA50)")
+
+        elif side == "SHORT":
+            if curr['rsi21'] < 45: 
+                score += 30; evidence.append("Strong RSI (<45)")
+            elif curr['rsi21'] < 50: 
+                score += 15
+
+            if curr['macd'] < curr['macd_signal']: 
+                score += 30; evidence.append("MACD Bearish")
+                
+            if curr['v'] > curr['vol_sma']: 
+                score += 20; evidence.append("Volume Surge")
+                
+            if curr['c'] < curr['ema50']: 
+                score += 20; evidence.append("Trend Confirmed (EMA50)")
+
+        # رفض الصفقة إذا لم تحقق درجة الامتياز (80/100)
+        if score < 80: return None
+
+        # 📌 الاستوب لوز الهيكلي المضمون (Structural SL)
+        # البحث عن أدنى/أعلى نقطة في آخر 15 شمعة لتكون جدار حماية للصفقة
+        if side == "LONG":
+            swing_low = df['l'].iloc[-15:-1].min()
+            sl = swing_low * 0.998 # أسفل القاع بشعرة
+        else:
+            swing_high = df['h'].iloc[-15:-1].max()
+            sl = swing_high * 1.002 # أعلى القمة بشعرة
 
         entry = float(current_price)
         risk = abs(entry - sl)
+        
+        # حماية من الاستوبات الواسعة جداً أو الضيقة جداً
         if risk <= 0 or (risk/entry) > 0.15: return None 
         
-        # 📌 تحديد الهدف (TP) بضعف المخاطرة
+        # 📌 تحديد الهدف بضعف المخاطرة الهيكلية
         tp = entry + (risk * RR_RATIO) if side == "LONG" else entry - (risk * RR_RATIO)
 
-        # حساب الرافعة المالية ونسبة العائد
         margin_risk_pct = (risk / entry) * 100
         lev = max(MIN_LEVERAGE, min(MAX_LEVERAGE_CAP, int(MAX_MARGIN_RISK_PCT / margin_risk_pct)))
         
@@ -118,17 +156,14 @@ class GoldenKeyEngine:
         return {
             "symbol": symbol, "side": side, "entry": entry, 
             "sl": sl, "tp": tp, "leverage": lev, "tp_roe": tp_roe, "sl_roe": sl_roe,
-            "timestamp": int(curr['t'])
+            "score": score, "evidence": evidence, "timestamp": int(curr['t'])
         }
 
     @staticmethod
     def check_dynamic_exit(df, side):
-        """ للتحقق من شرط الخروج الديناميكي (تقاطع عكسي) إذا استمرت الصفقة طويلاً """
         curr = df.iloc[-1]
-        if side == "LONG" and (curr['ema5'] < curr['ema12'] or curr['rsi21'] < 50):
-            return True
-        if side == "SHORT" and (curr['ema5'] > curr['ema12'] or curr['rsi21'] > 50):
-            return True
+        if side == "LONG" and (curr['ema5'] < curr['ema12']): return True
+        if side == "SHORT" and (curr['ema5'] > curr['ema12']): return True
         return False
 
 # ==========================================
@@ -191,7 +226,7 @@ class TradingBot:
     async def init_bot(self):
         await self.exchange.load_markets()
         self.load_state()
-        print_log(f"🚀 GOLDEN KEY ENGINE (1H) ONLINE - PAPER TRADING")
+        print_log(f"🚀 SCORED GOLDEN KEY ENGINE (1H) ONLINE - PAPER TRADING")
 
     async def daily_report(self):
         closed = self.daily_stats['closed_trades']
@@ -204,16 +239,15 @@ class TradingBot:
             f"🏆 الأرباح (Wins): {self.daily_stats['wins']}\n"
             f"🛑 الخسائر (Losses): {self.daily_stats['losses']}\n"
             f"📈 نسبة النجاح: {wr:.1f}%\n━━━━━━━━━━━━━━\n"
-            f"🔑 استراتيجية المفتاح الذهبي (1H)"
+            f"🔑 استراتيجية المفتاح الذهبي مع التقييم"
         )
         await self.send_tg(msg)
 
     async def scan_market(self):
         while self.running:
             try:
-                # الفحص بانتظام كل دقيقة
                 await asyncio.sleep(60)
-                print_log(f"🔍 Scanning {TIMEFRAME} Market for Golden Key Crosses...")
+                print_log(f"🔍 Scanning {TIMEFRAME} Market for Validated Setups...")
 
                 utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 if utc_date != self.current_date:
@@ -227,7 +261,6 @@ class TradingBot:
                 tickers = await self.exchange.fetch_tickers()
                 coins = [s for s, d in tickers.items() if 'USDT' in s and d.get('quoteVolume', 0) >= MIN_24H_VOLUME]
                 
-                # فحص الخروج الديناميكي للصفقات المفتوحة
                 for sym, trade in list(self.active_trades.items()):
                     try:
                         ohlcv = await self.exchange.fetch_ohlcv(sym, TIMEFRAME, limit=30)
@@ -280,9 +313,12 @@ class TradingBot:
         en = GoldenKeyEngine.format_price(trade['entry'])
         sl = GoldenKeyEngine.format_price(trade['sl'])
         tp = GoldenKeyEngine.format_price(trade['tp'])
+        
+        ev_text = " | ".join(trade['evidence'])
 
         msg = (
             f"⚡ <code>{app_name}</code> | {icon}\n"
+            f"🎯 Score: {trade['score']}/100\n"
             f"⚖️ Leverage: {trade['leverage']}x\n"
             f"💰 Entry: <code>{en}</code>\n"
             f"━━━━━━━━━━━━━━━\n"
@@ -290,7 +326,7 @@ class TradingBot:
             f"━━━━━━━━━━━━━━━\n"
             f"🛑 Stop: <code>{sl}</code> (-{trade['sl_roe']:.1f}%)\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"🔑 Golden Key (1H)"
+            f"🧠 {ev_text}"
         )
         msg_id = await self.send_tg(msg)
         
@@ -301,7 +337,7 @@ class TradingBot:
         self.active_trades[sym] = trade
         self.daily_stats['signals'] += 1
         self.save_state()
-        print_log(f"SIGNAL SENT: {app_name} {trade['side']}")
+        print_log(f"SIGNAL SENT: {app_name} {trade['side']} (Score: {trade['score']})")
 
     async def monitor_trades(self):
         while self.running:
@@ -371,7 +407,7 @@ bot = TradingBot()
 app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body><h1>GOLDEN KEY ENGINE (1H) ONLINE</h1></body></html>"
+async def root(): return f"<html><body><h1>SCORED GOLDEN KEY ENGINE ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
