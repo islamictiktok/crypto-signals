@@ -19,13 +19,13 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 RENDER_URL = os.getenv("RENDER_URL", "http://localhost:10000")
 
-STATE_FILE = "bot_state_golden_pure_5m.json"
-TIMEFRAME = '5m'  
+STATE_FILE = "bot_state_golden_pure_30m.json"
+TIMEFRAME = '30m'  # تم التغيير لفريم 30 دقيقة
 
 TOP_COINS_LIMIT = 300 
 MIN_24H_VOLUME = 5_000_000 
 MAX_TRADES = 5
-COOLDOWN_SEC = 1800 
+COOLDOWN_SEC = 1800 # تبريد لمدة شمعة واحدة (30 دقيقة)
 
 # إدارة المخاطر
 RR_RATIO = 2.0  
@@ -104,8 +104,8 @@ class GoldenKeyEngine:
         entry = float(current_price)
         risk = abs(entry - sl)
         
-        # حماية من الاستوبات غير المنطقية
-        if risk <= 0 or (risk/entry) > 0.05: return None 
+        # حماية من الاستوبات غير المنطقية (تصل إلى 10% كحد أقصى للـ 30 دقيقة)
+        if risk <= 0 or (risk/entry) > 0.10: return None 
         
         # 📌 الهدف بضعف مسافة الاستوب الهيكلي
         tp = entry + (risk * RR_RATIO) if side == "LONG" else entry - (risk * RR_RATIO)
@@ -125,7 +125,7 @@ class GoldenKeyEngine:
     @staticmethod
     def check_dynamic_exit(df, side):
         curr = df.iloc[-1]
-        # خروج سريع عند الانعكاس المؤكد
+        # خروج سريع عند الانعكاس المؤكد بعد إغلاق شمعة الـ 30 دقيقة
         if side == "LONG" and (curr['ema5'] < curr['ema12']): return True
         if side == "SHORT" and (curr['ema5'] > curr['ema12']): return True
         return False
@@ -193,28 +193,36 @@ class TradingBot:
     async def init_bot(self):
         await self.exchange.load_markets()
         self.load_state()
-        print_log(f"🚀 PURE SCALPER GOLDEN KEY (5M) ONLINE")
+        print_log(f"🚀 PURE GOLDEN KEY (30M) ONLINE")
 
     async def daily_report(self):
         closed = self.daily_stats['closed_trades']
         wr = (self.daily_stats['wins'] / closed * 100) if closed > 0 else 0
         msg = (
-            f"📊 <b>التقرير اليومي للسكالبينج</b>\n"
+            f"📊 <b>التقرير اليومي الدقيق</b>\n"
             f"📅 التاريخ: {self.current_date}\n━━━━━━━━━━━━━━\n"
             f"🎯 الإشارات المرسلة: {self.daily_stats['signals']}\n"
             f"🏁 الصفقات المغلقة: {closed}\n━━━━━━━━━━━━━━\n"
             f"🏆 الأرباح (Wins): {self.daily_stats['wins']}\n"
             f"🛑 الخسائر (Losses): {self.daily_stats['losses']}\n"
             f"📈 نسبة النجاح: {wr:.1f}%\n━━━━━━━━━━━━━━\n"
-            f"🔑 استراتيجية المفتاح الذهبي الصافية (5M)"
+            f"🔑 استراتيجية المفتاح الذهبي الصافية (30M)"
         )
         await self.send_tg(msg)
 
     async def scan_market(self):
         while self.running:
             try:
-                await asyncio.sleep(30) 
-                print_log(f"🔍 Scanning {TIMEFRAME} Scalping Market for Pure Crosses...")
+                # 📌 النوم الذكي: حساب الثواني حتى إغلاق شمعة الـ 30 دقيقة القادمة
+                now = datetime.now(timezone.utc)
+                minutes_to_wait = 30 - (now.minute % 30)
+                # إضافة 5 ثواني لضمان تحديث بيانات المنصة
+                seconds_to_wait = (minutes_to_wait * 60) - now.second + 5 
+                
+                print_log(f"💤 Sleeping for {int(seconds_to_wait)} seconds until the next 30m candle closes...")
+                await asyncio.sleep(seconds_to_wait)
+                
+                print_log(f"🔍 Scanning {TIMEFRAME} Market for Pure Crosses...")
 
                 utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 if utc_date != self.current_date:
@@ -290,7 +298,7 @@ class TradingBot:
             f"━━━━━━━━━━━━━━━\n"
             f"🛑 Stop: <code>{sl}</code> (-{trade['sl_roe']:.1f}%)\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"🔑 Pure Golden Key (5M)"
+            f"🔑 Pure Golden Key (30M)"
         )
         msg_id = await self.send_tg(msg)
         
@@ -372,7 +380,7 @@ bot = TradingBot()
 app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body><h1>PURE SCALPER GOLDEN KEY ENGINE ONLINE</h1></body></html>"
+async def root(): return f"<html><body><h1>PURE GOLDEN KEY ENGINE ONLINE (30M)</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
