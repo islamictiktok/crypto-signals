@@ -19,7 +19,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 RENDER_URL = os.getenv("RENDER_URL", "http://localhost:10000")
 
-STATE_FILE = "bot_state_golden_5m_v2.json"
+STATE_FILE = "bot_state_golden_pure_5m.json"
 TIMEFRAME = '5m'  
 
 TOP_COINS_LIMIT = 300 
@@ -35,7 +35,7 @@ MAX_MARGIN_RISK_PCT = 20.0
 PAPER_TRADING = True
 
 # ==========================================
-# 2. محرك استراتيجية السكالبينج (5M SCALPING ENGINE)
+# 2. محرك استراتيجية المفتاح الذهبي الصافية (PURE GOLDEN KEY)
 # ==========================================
 class GoldenKeyEngine:
     @staticmethod
@@ -45,10 +45,9 @@ class GoldenKeyEngine:
 
     @staticmethod
     def calculate_indicators(df):
-        # 1. المتوسطات
+        # 1. المتوسطات المتحركة السريعة
         df['ema5'] = df['c'].ewm(span=5, adjust=False).mean()
         df['ema12'] = df['c'].ewm(span=12, adjust=False).mean()
-        df['ema200'] = df['c'].ewm(span=200, adjust=False).mean() 
 
         # 2. مؤشر القوة النسبية (RSI 21)
         delta = df['c'].diff()
@@ -59,11 +58,7 @@ class GoldenKeyEngine:
         rs = ema_up / ema_down
         df['rsi21'] = 100 - (100 / (1 + rs))
 
-        # 3. الماكد (MACD)
-        df['macd'] = df['c'].ewm(span=12, adjust=False).mean() - df['c'].ewm(span=26, adjust=False).mean()
-        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-
-        # 4. التذبذب (ATR) للاستوب لوز الهيكلي
+        # 3. التذبذب (ATR) للاستوب لوز الهيكلي
         high_low = df['h'] - df['l']
         high_close = (df['h'] - df['c'].shift()).abs()
         low_close = (df['l'] - df['c'].shift()).abs()
@@ -74,7 +69,7 @@ class GoldenKeyEngine:
 
     @staticmethod
     def analyze_chart(df, symbol, current_price):
-        if df is None or len(df) < 250: return None 
+        if df is None or len(df) < 50: return None 
         if current_price is None or current_price <= 0: return None
 
         df = GoldenKeyEngine.calculate_indicators(df)
@@ -82,56 +77,23 @@ class GoldenKeyEngine:
         prev = df.iloc[-2]
         curr = df.iloc[-1]
         
-        if pd.isna(curr['ema5']) or pd.isna(curr['rsi21']) or pd.isna(curr['ema200']): return None
+        if pd.isna(curr['ema5']) or pd.isna(curr['rsi21']): return None
 
         side = None
         sl = 0.0
 
-        # شرط التقاطع
+        # 📌 شرط التقاطع الصافي مع فلتر الـ RSI فقط
         cross_up = (prev['ema5'] <= prev['ema12']) and (curr['ema5'] > curr['ema12'])
         cross_down = (prev['ema5'] >= prev['ema12']) and (curr['ema5'] < curr['ema12'])
 
-        if cross_up: side = "LONG"
-        elif cross_down: side = "SHORT"
+        if cross_up and curr['rsi21'] > 55: 
+            side = "LONG"
+        elif cross_down and curr['rsi21'] < 55: 
+            side = "SHORT"
         
         if not side: return None
 
-        # 📌 نظام التقييم الجديد للسكالبينج (100 نقطة)
-        score = 0
-        evidence = []
-
-        if side == "LONG":
-            # 1. RSI (25 نقطة)
-            if curr['rsi21'] > 55: 
-                score += 25; evidence.append("RSI > 55")
-            # 2. MACD (25 نقطة)
-            if curr['macd'] > curr['macd_signal']: 
-                score += 25; evidence.append("MACD Bullish")
-            # 3. EMA 200 (25 نقطة)
-            if curr['c'] > curr['ema200']: 
-                score += 25; evidence.append("Trend Up (EMA200)")
-            # 4. Price Action (25 نقطة)
-            if curr['c'] > curr['o']: 
-                score += 25; evidence.append("Green Candle")
-
-        elif side == "SHORT":
-            # 1. RSI (25 نقطة)
-            if curr['rsi21'] < 55: 
-                score += 25; evidence.append("RSI < 55")
-            # 2. MACD (25 نقطة)
-            if curr['macd'] < curr['macd_signal']: 
-                score += 25; evidence.append("MACD Bearish")
-            # 3. EMA 200 (25 نقطة)
-            if curr['c'] < curr['ema200']: 
-                score += 25; evidence.append("Trend Down (EMA200)")
-            # 4. Price Action (25 نقطة)
-            if curr['c'] < curr['o']: 
-                score += 25; evidence.append("Red Candle")
-
-        # يجب أن تجمع الصفقة 100/100
-        if score < 100: return None
-
-        # 📌 الاستوب لوز الهيكلي + ATR
+        # 📌 الاستوب لوز الهيكلي + ATR (لحماية قوية من ضرب الاستوبات)
         if side == "LONG":
             swing_low = df['l'].iloc[-15:-1].min()
             sl = swing_low - curr['atr'] 
@@ -142,6 +104,7 @@ class GoldenKeyEngine:
         entry = float(current_price)
         risk = abs(entry - sl)
         
+        # حماية من الاستوبات غير المنطقية
         if risk <= 0 or (risk/entry) > 0.05: return None 
         
         # 📌 الهدف بضعف مسافة الاستوب الهيكلي
@@ -156,13 +119,13 @@ class GoldenKeyEngine:
         return {
             "symbol": symbol, "side": side, "entry": entry, 
             "sl": sl, "tp": tp, "leverage": lev, "tp_roe": tp_roe, "sl_roe": sl_roe,
-            "score": score, "evidence": evidence, "timestamp": int(curr['t'])
+            "timestamp": int(curr['t'])
         }
 
     @staticmethod
     def check_dynamic_exit(df, side):
         curr = df.iloc[-1]
-        # خروج سريع عند الانعكاس
+        # خروج سريع عند الانعكاس المؤكد
         if side == "LONG" and (curr['ema5'] < curr['ema12']): return True
         if side == "SHORT" and (curr['ema5'] > curr['ema12']): return True
         return False
@@ -230,7 +193,7 @@ class TradingBot:
     async def init_bot(self):
         await self.exchange.load_markets()
         self.load_state()
-        print_log(f"🚀 SCALPER GOLDEN KEY (5M) ONLINE - NO FOMO")
+        print_log(f"🚀 PURE SCALPER GOLDEN KEY (5M) ONLINE")
 
     async def daily_report(self):
         closed = self.daily_stats['closed_trades']
@@ -243,7 +206,7 @@ class TradingBot:
             f"🏆 الأرباح (Wins): {self.daily_stats['wins']}\n"
             f"🛑 الخسائر (Losses): {self.daily_stats['losses']}\n"
             f"📈 نسبة النجاح: {wr:.1f}%\n━━━━━━━━━━━━━━\n"
-            f"🔑 فريم 5 دقائق (شروط 100/100)"
+            f"🔑 استراتيجية المفتاح الذهبي الصافية (5M)"
         )
         await self.send_tg(msg)
 
@@ -251,7 +214,7 @@ class TradingBot:
         while self.running:
             try:
                 await asyncio.sleep(30) 
-                print_log(f"🔍 Scanning {TIMEFRAME} Scalping Market for Perfect Setups...")
+                print_log(f"🔍 Scanning {TIMEFRAME} Scalping Market for Pure Crosses...")
 
                 utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 if utc_date != self.current_date:
@@ -265,7 +228,6 @@ class TradingBot:
                 tickers = await self.exchange.fetch_tickers()
                 coins = [s for s, d in tickers.items() if 'USDT' in s and d.get('quoteVolume', 0) >= MIN_24H_VOLUME]
                 
-                # فحص الخروج الديناميكي السريع
                 for sym, trade in list(self.active_trades.items()):
                     try:
                         ohlcv = await self.exchange.fetch_ohlcv(sym, TIMEFRAME, limit=30)
@@ -284,7 +246,7 @@ class TradingBot:
                 async def fetch_and_analyze(sym):
                     async with sem:
                         try:
-                            ohlcv = await self.exchange.fetch_ohlcv(sym, TIMEFRAME, limit=250)
+                            ohlcv = await self.exchange.fetch_ohlcv(sym, TIMEFRAME, limit=100)
                             if not ohlcv: return None
                             df = pd.DataFrame(ohlcv[:-1], columns=['t', 'o', 'h', 'l', 'c', 'v'])
                             return GoldenKeyEngine.analyze_chart(df, sym, tickers[sym].get('last'))
@@ -319,11 +281,8 @@ class TradingBot:
         sl = GoldenKeyEngine.format_price(trade['sl'])
         tp = GoldenKeyEngine.format_price(trade['tp'])
         
-        ev_text = " | ".join(trade['evidence'])
-
         msg = (
             f"⚡ <code>{app_name}</code> | {icon}\n"
-            f"🎯 Score: {trade['score']}/100\n"
             f"⚖️ Leverage: {trade['leverage']}x\n"
             f"💰 Entry: <code>{en}</code>\n"
             f"━━━━━━━━━━━━━━━\n"
@@ -331,7 +290,7 @@ class TradingBot:
             f"━━━━━━━━━━━━━━━\n"
             f"🛑 Stop: <code>{sl}</code> (-{trade['sl_roe']:.1f}%)\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"🧠 {ev_text}"
+            f"🔑 Pure Golden Key (5M)"
         )
         msg_id = await self.send_tg(msg)
         
@@ -343,7 +302,7 @@ class TradingBot:
             self.active_trades[sym] = trade
             self.daily_stats['signals'] += 1
             self.save_state()
-            print_log(f"SIGNAL SENT: {app_name} {trade['side']} (Score: {trade['score']})")
+            print_log(f"SIGNAL SENT: {app_name} {trade['side']}")
 
     async def monitor_trades(self):
         while self.running:
@@ -413,7 +372,7 @@ bot = TradingBot()
 app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body><h1>SCALPER GOLDEN KEY ENGINE ONLINE</h1></body></html>"
+async def root(): return f"<html><body><h1>PURE SCALPER GOLDEN KEY ENGINE ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
