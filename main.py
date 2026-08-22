@@ -19,13 +19,13 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 RENDER_URL = os.getenv("RENDER_URL", "http://localhost:10000")
 
-STATE_FILE = "bot_state_golden_scored.json"
-TIMEFRAME = '1h'  
+STATE_FILE = "bot_state_golden_5m_v2.json"
+TIMEFRAME = '5m'  
 
-TOP_COINS_LIMIT = 300 # تم توسيع الفحص إلى 300 عملة
-MIN_24H_VOLUME = 500_000 # تم تقليل الفوليوم إلى 500 ألف لضم عملات أكثر
+TOP_COINS_LIMIT = 300 
+MIN_24H_VOLUME = 5_000_000 
 MAX_TRADES = 5
-COOLDOWN_SEC = 3600 
+COOLDOWN_SEC = 1800 
 
 # إدارة المخاطر
 RR_RATIO = 2.0  
@@ -35,7 +35,7 @@ MAX_MARGIN_RISK_PCT = 20.0
 PAPER_TRADING = True
 
 # ==========================================
-# 2. محرك استراتيجية المفتاح الذهبي المتقدم (SCORED GOLDEN KEY)
+# 2. محرك استراتيجية السكالبينج (5M SCALPING ENGINE)
 # ==========================================
 class GoldenKeyEngine:
     @staticmethod
@@ -45,12 +45,12 @@ class GoldenKeyEngine:
 
     @staticmethod
     def calculate_indicators(df):
-        # 1. المتوسطات الأساسية للاستراتيجية والاتجاه العام
+        # 1. المتوسطات
         df['ema5'] = df['c'].ewm(span=5, adjust=False).mean()
         df['ema12'] = df['c'].ewm(span=12, adjust=False).mean()
-        df['ema50'] = df['c'].ewm(span=50, adjust=False).mean()
+        df['ema200'] = df['c'].ewm(span=200, adjust=False).mean() 
 
-        # 2. مؤشر القوة النسبية
+        # 2. مؤشر القوة النسبية (RSI 21)
         delta = df['c'].diff()
         up = delta.clip(lower=0)
         down = -1 * delta.clip(upper=0)
@@ -59,18 +59,22 @@ class GoldenKeyEngine:
         rs = ema_up / ema_down
         df['rsi21'] = 100 - (100 / (1 + rs))
 
-        # 3. مؤشر الماكد
+        # 3. الماكد (MACD)
         df['macd'] = df['c'].ewm(span=12, adjust=False).mean() - df['c'].ewm(span=26, adjust=False).mean()
         df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
 
-        # 4. متوسط السيولة
-        df['vol_sma'] = df['v'].rolling(20).mean()
+        # 4. التذبذب (ATR) للاستوب لوز الهيكلي
+        high_low = df['h'] - df['l']
+        high_close = (df['h'] - df['c'].shift()).abs()
+        low_close = (df['l'] - df['c'].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['atr'] = tr.rolling(14).mean()
 
         return df
 
     @staticmethod
     def analyze_chart(df, symbol, current_price):
-        if df is None or len(df) < 50: return None
+        if df is None or len(df) < 250: return None 
         if current_price is None or current_price <= 0: return None
 
         df = GoldenKeyEngine.calculate_indicators(df)
@@ -78,11 +82,12 @@ class GoldenKeyEngine:
         prev = df.iloc[-2]
         curr = df.iloc[-1]
         
-        if pd.isna(curr['ema5']) or pd.isna(curr['rsi21']): return None
+        if pd.isna(curr['ema5']) or pd.isna(curr['rsi21']) or pd.isna(curr['ema200']): return None
 
         side = None
         sl = 0.0
 
+        # شرط التقاطع
         cross_up = (prev['ema5'] <= prev['ema12']) and (curr['ema5'] > curr['ema12'])
         cross_down = (prev['ema5'] >= prev['ema12']) and (curr['ema5'] < curr['ema12'])
 
@@ -91,55 +96,55 @@ class GoldenKeyEngine:
         
         if not side: return None
 
+        # 📌 نظام التقييم الجديد للسكالبينج (100 نقطة)
         score = 0
         evidence = []
 
-        # 📌 إصلاح مشكلة تليجرام: تجنب استخدام علامات < و >
         if side == "LONG":
+            # 1. RSI (25 نقطة)
             if curr['rsi21'] > 55: 
-                score += 30; evidence.append("Strong RSI (Over 55)")
-            elif curr['rsi21'] > 50: 
-                score += 15
-
+                score += 25; evidence.append("RSI > 55")
+            # 2. MACD (25 نقطة)
             if curr['macd'] > curr['macd_signal']: 
-                score += 30; evidence.append("MACD Bullish")
-                
-            if curr['v'] > curr['vol_sma']: 
-                score += 20; evidence.append("Volume Surge")
-                
-            if curr['c'] > curr['ema50']: 
-                score += 20; evidence.append("Trend Confirmed (EMA50)")
+                score += 25; evidence.append("MACD Bullish")
+            # 3. EMA 200 (25 نقطة)
+            if curr['c'] > curr['ema200']: 
+                score += 25; evidence.append("Trend Up (EMA200)")
+            # 4. Price Action (25 نقطة)
+            if curr['c'] > curr['o']: 
+                score += 25; evidence.append("Green Candle")
 
         elif side == "SHORT":
-            if curr['rsi21'] < 45: 
-                score += 30; evidence.append("Strong RSI (Under 45)")
-            elif curr['rsi21'] < 50: 
-                score += 15
-
+            # 1. RSI (25 نقطة)
+            if curr['rsi21'] < 55: 
+                score += 25; evidence.append("RSI < 55")
+            # 2. MACD (25 نقطة)
             if curr['macd'] < curr['macd_signal']: 
-                score += 30; evidence.append("MACD Bearish")
-                
-            if curr['v'] > curr['vol_sma']: 
-                score += 20; evidence.append("Volume Surge")
-                
-            if curr['c'] < curr['ema50']: 
-                score += 20; evidence.append("Trend Confirmed (EMA50)")
+                score += 25; evidence.append("MACD Bearish")
+            # 3. EMA 200 (25 نقطة)
+            if curr['c'] < curr['ema200']: 
+                score += 25; evidence.append("Trend Down (EMA200)")
+            # 4. Price Action (25 نقطة)
+            if curr['c'] < curr['o']: 
+                score += 25; evidence.append("Red Candle")
 
-        # 📌 رفض الصفقة إذا لم تحقق العلامة الكاملة 100/100
+        # يجب أن تجمع الصفقة 100/100
         if score < 100: return None
 
+        # 📌 الاستوب لوز الهيكلي + ATR
         if side == "LONG":
             swing_low = df['l'].iloc[-15:-1].min()
-            sl = swing_low * 0.998 
+            sl = swing_low - curr['atr'] 
         else:
             swing_high = df['h'].iloc[-15:-1].max()
-            sl = swing_high * 1.002 
+            sl = swing_high + curr['atr'] 
 
         entry = float(current_price)
         risk = abs(entry - sl)
         
-        if risk <= 0 or (risk/entry) > 0.15: return None 
+        if risk <= 0 or (risk/entry) > 0.05: return None 
         
+        # 📌 الهدف بضعف مسافة الاستوب الهيكلي
         tp = entry + (risk * RR_RATIO) if side == "LONG" else entry - (risk * RR_RATIO)
 
         margin_risk_pct = (risk / entry) * 100
@@ -157,6 +162,7 @@ class GoldenKeyEngine:
     @staticmethod
     def check_dynamic_exit(df, side):
         curr = df.iloc[-1]
+        # خروج سريع عند الانعكاس
         if side == "LONG" and (curr['ema5'] < curr['ema12']): return True
         if side == "SHORT" and (curr['ema5'] > curr['ema12']): return True
         return False
@@ -193,8 +199,7 @@ class TradingBot:
                     else:
                         err = await resp.text()
                         print_log(f"Telegram API Error: {err}", True)
-        except Exception as e: 
-            print_log(f"Telegram Exception: {e}", True)
+        except Exception as e: pass
         return None
 
     def save_state(self):
@@ -225,28 +230,28 @@ class TradingBot:
     async def init_bot(self):
         await self.exchange.load_markets()
         self.load_state()
-        print_log(f"🚀 SCORED GOLDEN KEY ENGINE (1H - PERFECT SCORE) ONLINE")
+        print_log(f"🚀 SCALPER GOLDEN KEY (5M) ONLINE - NO FOMO")
 
     async def daily_report(self):
         closed = self.daily_stats['closed_trades']
         wr = (self.daily_stats['wins'] / closed * 100) if closed > 0 else 0
         msg = (
-            f"📊 <b>التقرير اليومي الدقيق</b>\n"
+            f"📊 <b>التقرير اليومي للسكالبينج</b>\n"
             f"📅 التاريخ: {self.current_date}\n━━━━━━━━━━━━━━\n"
             f"🎯 الإشارات المرسلة: {self.daily_stats['signals']}\n"
             f"🏁 الصفقات المغلقة: {closed}\n━━━━━━━━━━━━━━\n"
             f"🏆 الأرباح (Wins): {self.daily_stats['wins']}\n"
             f"🛑 الخسائر (Losses): {self.daily_stats['losses']}\n"
             f"📈 نسبة النجاح: {wr:.1f}%\n━━━━━━━━━━━━━━\n"
-            f"🔑 استراتيجية المفتاح الذهبي (100/100)"
+            f"🔑 فريم 5 دقائق (شروط 100/100)"
         )
         await self.send_tg(msg)
 
     async def scan_market(self):
         while self.running:
             try:
-                await asyncio.sleep(60)
-                print_log(f"🔍 Scanning {TIMEFRAME} Market for PERFECT Setups (100/100)...")
+                await asyncio.sleep(30) 
+                print_log(f"🔍 Scanning {TIMEFRAME} Scalping Market for Perfect Setups...")
 
                 utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 if utc_date != self.current_date:
@@ -260,6 +265,7 @@ class TradingBot:
                 tickers = await self.exchange.fetch_tickers()
                 coins = [s for s, d in tickers.items() if 'USDT' in s and d.get('quoteVolume', 0) >= MIN_24H_VOLUME]
                 
+                # فحص الخروج الديناميكي السريع
                 for sym, trade in list(self.active_trades.items()):
                     try:
                         ohlcv = await self.exchange.fetch_ohlcv(sym, TIMEFRAME, limit=30)
@@ -278,7 +284,7 @@ class TradingBot:
                 async def fetch_and_analyze(sym):
                     async with sem:
                         try:
-                            ohlcv = await self.exchange.fetch_ohlcv(sym, TIMEFRAME, limit=100)
+                            ohlcv = await self.exchange.fetch_ohlcv(sym, TIMEFRAME, limit=250)
                             if not ohlcv: return None
                             df = pd.DataFrame(ohlcv[:-1], columns=['t', 'o', 'h', 'l', 'c', 'v'])
                             return GoldenKeyEngine.analyze_chart(df, sym, tickers[sym].get('last'))
@@ -338,8 +344,6 @@ class TradingBot:
             self.daily_stats['signals'] += 1
             self.save_state()
             print_log(f"SIGNAL SENT: {app_name} {trade['side']} (Score: {trade['score']})")
-        else:
-            print_log(f"FAILED TO SEND SIGNAL TO TG: {app_name}", True)
 
     async def monitor_trades(self):
         while self.running:
@@ -409,7 +413,7 @@ bot = TradingBot()
 app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body><h1>SCORED GOLDEN KEY ENGINE ONLINE</h1></body></html>"
+async def root(): return f"<html><body><h1>SCALPER GOLDEN KEY ENGINE ONLINE</h1></body></html>"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
