@@ -1,0 +1,5 @@
+aiohttp>=3.9,<4
+ccxt>=4.4,<5
+fastapi>=0.110,<1
+pandas>=2.0,<3
+uvicorn[standard]>=0.29,<1
