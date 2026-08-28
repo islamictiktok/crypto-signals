@@ -5,4 +5,4 @@ fastapi
 uvicorn
 pandas-ta
 stable-baselines3
-numpy<2.0
+gymnasium
