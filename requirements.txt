@@ -4,5 +4,4 @@ aiohttp
 fastapi
 uvicorn
 pandas-ta
-stable-baselines3
-gymnasium
+onnxruntime
