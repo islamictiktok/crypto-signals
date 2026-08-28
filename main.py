@@ -32,7 +32,7 @@ RR_RATIO = 2.0
 COOLDOWN_SEC = 1800 
 
 # ==========================================
-# 2. محرك الذكاء الاصطناعي للإشارات (AI ENGINE) - للتنفيذ فقط
+# 2. محرك الذكاء الاصطناعي للإشارات (AI ENGINE)
 # ==========================================
 class AITradingEngine:
     @staticmethod
@@ -74,7 +74,6 @@ class AITradingEngine:
         account_state = np.array([0.0, 0.0]) 
         final_obs = np.concatenate((window_flat, account_state)).astype(np.float32)
         
-        # التنفيذ فقط (predict) وهو خفيف جداً على الرامات
         action, _states = model.predict(final_obs, deterministic=True)
         if action != 1: return None 
         
@@ -133,9 +132,10 @@ class TradingBot:
 
     def load_ai_model(self):
         try:
+            print_log("⏳ جاري تحميل العقل الكمي في الخلفية (قد يستغرق بضع دقائق)...")
             if os.path.exists(MODEL_PATH):
                 self.ai_model = PPO.load(MODEL_PATH)
-                print_log("🧠 تم تحميل العقل الكمي بنجاح! البوت مستقر وجاهز.")
+                print_log("🧠 تم تحميل العقل الكمي بنجاح! البوت مستقر وجاهز للقنص.")
             else:
                 print_log(f"⚠️ تحذير: ملف '{MODEL_PATH}' غير موجود!", True)
         except Exception as e:
@@ -143,8 +143,10 @@ class TradingBot:
 
     async def init_bot(self):
         await self.exchange.load_markets()
-        self.load_ai_model()
+        # 📌 هنا السر: نحمل الموديل في Thread منفصل لكي لا نجمد السيرفر
+        await asyncio.to_thread(self.load_ai_model)
         print_log(f"🚀 DEEP QUANT AI AGENT (LITE VERSION) ONLINE")
+        await self.send_tg("🚀 <b>تم تشغيل نظام الذكاء الاصطناعي العميق بنجاح!</b>\nأنا الآن أراقب شارت البيتكوين 📊🤖")
 
     async def daily_report(self):
         closed = self.daily_stats['closed_trades']
@@ -164,7 +166,6 @@ class TradingBot:
         while self.running:
             try:
                 await asyncio.sleep(60) 
-                
                 if not self.ai_model: continue
 
                 utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -175,8 +176,7 @@ class TradingBot:
 
                 self.cooldown_list = {k: v for k, v in self.cooldown_list.items() if (int(time.time()) - v) < COOLDOWN_SEC}
 
-                if SYMBOL in self.active_trades or SYMBOL in self.cooldown_list:
-                    continue
+                if SYMBOL in self.active_trades or SYMBOL in self.cooldown_list: continue
 
                 tickers = await self.exchange.fetch_tickers([SYMBOL])
                 current_price = tickers[SYMBOL].get('last')
@@ -218,7 +218,6 @@ class TradingBot:
             f"🧠 60-Candles Neural Network Analysis"
         )
         msg_id = await self.send_tg(msg)
-        
         if msg_id:
             trade['telegram_message_id'] = msg_id
             trade['clean_sym'] = sym 
@@ -264,11 +263,9 @@ class TradingBot:
             f"━━━━━━━━━━━━━━\n📌 Trade Closed"
         )
         print_log(f"AI TRADE CLOSED: {sym} | {title}")
-        
         self.cooldown_list[sym] = int(time.time())
         await self.send_tg(msg, reply_to=trade.get('telegram_message_id'))
-        if sym in self.active_trades:
-            del self.active_trades[sym]
+        if sym in self.active_trades: del self.active_trades[sym]
 
     async def keep_alive(self):
         while self.running:
@@ -283,27 +280,31 @@ class TradingBot:
         await self.exchange.close()
 
 # ==========================================
-# 4. تشغيل السيرفر
+# 4. تشغيل السيرفر بدون تجميد
 # ==========================================
 bot = TradingBot()
 app = FastAPI()
 
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-async def root(): return f"<html><body><h1>DEEP QUANT AI (LITE) ONLINE</h1></body></html>"
+async def root(): return f"<html><body><h1>DEEP QUANT AI ONLINE</h1></body></html>"
+
+# 📌 نقلنا التشغيل إلى مسار خلفي لكي يفتح المنفذ (Port) فوراً لـ Render
+async def run_bot_background():
+    await bot.init_bot()
+    asyncio.create_task(bot.scan_market())
+    asyncio.create_task(bot.monitor_trades())
+    asyncio.create_task(bot.keep_alive())
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await bot.init_bot()
-    t1 = asyncio.create_task(bot.scan_market())
-    t2 = asyncio.create_task(bot.monitor_trades())
-    t3 = asyncio.create_task(bot.keep_alive())
+    # تشغيل البوت في مسار منفصل دون انتظار
+    bg_task = asyncio.create_task(run_bot_background())
     yield
     await bot.shutdown()
-    for t in [t1, t2, t3]:
-        try: t.cancel() 
-        except: pass
+    bg_task.cancel()
 
 app.router.lifespan_context = lifespan
 
 if __name__ == "__main__":
+    # تشغيل خادم الويب ليفتح المنفذ فوراً
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
