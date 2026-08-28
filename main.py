@@ -145,8 +145,8 @@ class TradingBot:
 
 bot = TradingBot()
 app = FastAPI()
-@app.get("/")
-def read_root(): return HTMLResponse("<h1>MLOps Sniper Bot (ONNX) is LIVE!</h1>")
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
+def read_root(): return "<h1>MLOps Sniper Bot (ONNX) is LIVE!</h1>"
 
 async def run_bot_background():
     await bot.init_bot()
