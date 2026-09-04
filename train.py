@@ -40,14 +40,18 @@ class ProQuantEnv(gym.Env):
     def step(self, action):
         current_price = self.df.loc[self.current_step, 'close']
         reward = 0
+        
+        # 📌 تعديل المكافآت لتشجيع الذكاء الاصطناعي على التداول (تقليل عقوبة الانتظار والخسارة)
         if action == 1 and self.is_holding == 0:
-            self.is_holding = 1; self.entry_price = current_price; reward = 0.01
+            self.is_holding = 1; self.entry_price = current_price; reward = 0.05
         elif action == 2 and self.is_holding == 1:
             self.is_holding = 0
             profit = (current_price - self.entry_price) / self.entry_price
-            reward = profit * 3000.0 if profit > 0.003 else (profit * 500.0 - 1.0)
+            reward = profit * 3000.0 if profit > 0.003 else (profit * 200.0 - 0.5)
             self.entry_price = 0.0
-        elif action == 0 and self.is_holding == 0: reward = -0.005
+        elif action == 0 and self.is_holding == 0: 
+            reward = -0.001 # عقوبة بسيطة جداً على الانتظار
+            
         if self.is_holding == 1: reward -= 0.001
         self.current_step += 1
         return self._get_observation(), float(reward), self.current_step >= self.max_steps, False, {}
@@ -66,27 +70,33 @@ exchange = ccxt.mexc()
 ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=2000)
 df = pd.DataFrame(ohlcv[:-1], columns=['t', 'open', 'high', 'low', 'close', 'volume'])
 df = prepare_data(df)
+env = make_vec_env(lambda: ProQuantEnv(df), n_envs=1)
 
+# 📌 السحر هنا: بناء عقل جديد وشجاع إذا تم مسح العقل القديم
 if os.path.exists(MODEL_PATH):
-    print("🧠 Loading model for daily training...")
-    model = PPO.load(MODEL_PATH)
-    model.set_env(make_vec_env(lambda: ProQuantEnv(df), n_envs=1))
-    print("🚀 Training started (15,000 steps)...")
-    model.learn(total_timesteps=15000)
-    model.save(MODEL_PATH)
-    print("✅ Training complete! Updating ONNX file...")
-    
-    class OnnxablePolicy(th.nn.Module):
-        def __init__(self, policy):
-            super().__init__()
-            self.policy = policy
-        def forward(self, observation):
-            features = self.policy.extract_features(observation)
-            latent_pi, _ = self.policy.mlp_extractor(features)
-            logits = self.policy.action_net(latent_pi)
-            return th.argmax(logits, dim=1)
+    print("🧠 Loading existing model...")
+    model = PPO.load(MODEL_PATH, env=env)
+else:
+    print("🌱 Creating a FRESH, BRAVE AI Model...")
+    # ent_coef=0.05 هو "معامل الشجاعة والفضول" ليجرب صفقات أكثر!
+    model = PPO("MlpPolicy", env, ent_coef=0.05, learning_rate=0.0005, verbose=1)
 
-    onnx_policy = OnnxablePolicy(model.policy)
-    dummy_input = th.randn(1, 422)
-    th.onnx.export(onnx_policy, dummy_input, ONNX_PATH, opset_version=11, input_names=["input"], output_names=["output"])
-    print("✅ MLOps Pipeline Complete. ONNX Ready.")
+print("🚀 Training started (15,000 steps)...")
+model.learn(total_timesteps=15000)
+model.save(MODEL_PATH)
+print("✅ Training complete! Updating ONNX file...")
+
+class OnnxablePolicy(th.nn.Module):
+    def __init__(self, policy):
+        super().__init__()
+        self.policy = policy
+    def forward(self, observation):
+        features = self.policy.extract_features(observation)
+        latent_pi, _ = self.policy.mlp_extractor(features)
+        logits = self.policy.action_net(latent_pi)
+        return th.argmax(logits, dim=1)
+
+onnx_policy = OnnxablePolicy(model.policy)
+dummy_input = th.randn(1, 422)
+th.onnx.export(onnx_policy, dummy_input, ONNX_PATH, opset_version=11, input_names=["input"], output_names=["output"])
+print("✅ MLOps Pipeline Complete. ONNX Ready.")
