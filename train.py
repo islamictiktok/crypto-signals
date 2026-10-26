@@ -22,7 +22,8 @@ class ProQuantEnv(gym.Env):
         self.window_size = WINDOW_SIZE
         self.max_steps = len(self.df) - 1
         self.action_space = spaces.Discrete(3)
-        self.obs_features = ['close_pct', 'EMA_5_pct', 'EMA_12_pct', 'EMA_200_pct', 'RSI_norm', 'MACD_norm', 'volume_norm']
+        # تمت إضافة مؤشرات Order Blocks لمساحة المراقبة
+        self.obs_features = ['close_pct', 'EMA_5_pct', 'EMA_200_pct', 'RSI_norm', 'MACD_norm', 'dist_bull_ob', 'dist_bear_ob']
         self.observation_space = spaces.Box(low=-10, high=10, shape=((len(self.obs_features) * self.window_size) + 2,), dtype=np.float32)
 
     def reset(self, seed=None):
@@ -41,7 +42,6 @@ class ProQuantEnv(gym.Env):
         current_price = self.df.loc[self.current_step, 'close']
         reward = 0
         
-        # 📌 تعديل المكافآت لتشجيع الذكاء الاصطناعي على التداول (تقليل عقوبة الانتظار والخسارة)
         if action == 1 and self.is_holding == 0:
             self.is_holding = 1; self.entry_price = current_price; reward = 0.05
         elif action == 2 and self.is_holding == 1:
@@ -50,19 +50,29 @@ class ProQuantEnv(gym.Env):
             reward = profit * 3000.0 if profit > 0.003 else (profit * 200.0 - 0.5)
             self.entry_price = 0.0
         elif action == 0 and self.is_holding == 0: 
-            reward = -0.001 # عقوبة بسيطة جداً على الانتظار
+            reward = -0.001 
             
         if self.is_holding == 1: reward -= 0.001
         self.current_step += 1
         return self._get_observation(), float(reward), self.current_step >= self.max_steps, False, {}
 
 def prepare_data(df):
-    df.ta.ema(length=5, append=True); df.ta.ema(length=12, append=True); df.ta.ema(length=200, append=True)
+    # المؤشرات الكلاسيكية
+    df.ta.ema(length=5, append=True); df.ta.ema(length=200, append=True)
     df.ta.rsi(length=21, append=True); df.ta.macd(fast=12, slow=26, signal=9, append=True); df.ta.atr(length=14, append=True)
-    for col in ['open', 'high', 'low', 'close', 'EMA_5', 'EMA_12', 'EMA_200']: df[f'{col}_pct'] = df[col].pct_change() * 100
-    df['volume_norm'] = df['volume'] / df['volume'].rolling(50).max()
+    for col in ['open', 'high', 'low', 'close', 'EMA_5', 'EMA_200']: df[f'{col}_pct'] = df[col].pct_change() * 100
     df['RSI_norm'] = df['RSI_21'] / 100.0
     df['MACD_norm'] = np.tanh(df['MACD_12_26_9'])
+    
+    # 📌 استخراج كتل السيولة (Order Blocks)
+    df['rolling_high'] = df['high'].rolling(5).max()
+    df['rolling_low'] = df['low'].rolling(5).min()
+    df['bear_ob'] = df['high'].where(df['high'] == df['rolling_high']).ffill()
+    df['bull_ob'] = df['low'].where(df['low'] == df['rolling_low']).ffill()
+    # حساب المسافة بين السعر ومناطق السيولة
+    df['dist_bear_ob'] = (df['bear_ob'] - df['close']) / df['close'] * 100
+    df['dist_bull_ob'] = (df['close'] - df['bull_ob']) / df['close'] * 100
+
     return df.dropna().reset_index(drop=True)
 
 print("📥 Fetching latest market data...")
@@ -72,17 +82,16 @@ df = pd.DataFrame(ohlcv[:-1], columns=['t', 'open', 'high', 'low', 'close', 'vol
 df = prepare_data(df)
 env = make_vec_env(lambda: ProQuantEnv(df), n_envs=1)
 
-# 📌 السحر هنا: بناء عقل جديد وشجاع إذا تم مسح العقل القديم
 if os.path.exists(MODEL_PATH):
     print("🧠 Loading existing model...")
     model = PPO.load(MODEL_PATH, env=env)
 else:
-    print("🌱 Creating a FRESH, BRAVE AI Model...")
-    # ent_coef=0.05 هو "معامل الشجاعة والفضول" ليجرب صفقات أكثر!
-    model = PPO("MlpPolicy", env, ent_coef=0.05, learning_rate=0.0005, verbose=1)
+    print("🌱 Creating a FRESH, BRAVE AI Model with Order Blocks...")
+    model = PPO("MlpPolicy", env, ent_coef=0.08, learning_rate=0.0005, verbose=1)
 
-print("🚀 Training started (15,000 steps)...")
-model.learn(total_timesteps=15000)
+# 📌 تم رفع التدريب إلى 100 ألف خطوة للقضاء على الشلل
+print("🚀 Training started (100,000 steps)...")
+model.learn(total_timesteps=100000)
 model.save(MODEL_PATH)
 print("✅ Training complete! Updating ONNX file...")
 
@@ -97,6 +106,6 @@ class OnnxablePolicy(th.nn.Module):
         return th.argmax(logits, dim=1)
 
 onnx_policy = OnnxablePolicy(model.policy)
-dummy_input = th.randn(1, 422)
+dummy_input = th.randn(1, 422) # (60 * 7) + 2 = 422
 th.onnx.export(onnx_policy, dummy_input, ONNX_PATH, opset_version=11, input_names=["input"], output_names=["output"])
 print("✅ MLOps Pipeline Complete. ONNX Ready.")
