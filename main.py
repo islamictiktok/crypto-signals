@@ -32,12 +32,18 @@ def print_log(msg, is_error=False):
 class AITradingEngine:
     @staticmethod
     def prepare_data(df):
-        df.ta.ema(length=5, append=True); df.ta.ema(length=12, append=True); df.ta.ema(length=200, append=True)
+        df.ta.ema(length=5, append=True); df.ta.ema(length=200, append=True)
         df.ta.rsi(length=21, append=True); df.ta.macd(fast=12, slow=26, signal=9, append=True); df.ta.atr(length=14, append=True)
-        for col in ['open', 'high', 'low', 'close', 'EMA_5', 'EMA_12', 'EMA_200']: df[f'{col}_pct'] = df[col].pct_change() * 100
-        df['volume_norm'] = df['volume'] / df['volume'].rolling(50).max()
+        for col in ['open', 'high', 'low', 'close', 'EMA_5', 'EMA_200']: df[f'{col}_pct'] = df[col].pct_change() * 100
         df['RSI_norm'] = df['RSI_21'] / 100.0
         df['MACD_norm'] = np.tanh(df['MACD_12_26_9'])
+        
+        df['rolling_high'] = df['high'].rolling(5).max()
+        df['rolling_low'] = df['low'].rolling(5).min()
+        df['bear_ob'] = df['high'].where(df['high'] == df['rolling_high']).ffill()
+        df['bull_ob'] = df['low'].where(df['low'] == df['rolling_low']).ffill()
+        df['dist_bear_ob'] = (df['bear_ob'] - df['close']) / df['close'] * 100
+        df['dist_bull_ob'] = (df['close'] - df['bull_ob']) / df['close'] * 100
         return df.dropna().reset_index(drop=True)
 
     @staticmethod
@@ -47,20 +53,25 @@ class AITradingEngine:
         if len(df) < WINDOW_SIZE: return None
         
         curr_candle = df.iloc[-1]
-        obs_features = ['close_pct', 'EMA_5_pct', 'EMA_12_pct', 'EMA_200_pct', 'RSI_norm', 'MACD_norm', 'volume_norm']
+        obs_features = ['close_pct', 'EMA_5_pct', 'EMA_200_pct', 'RSI_norm', 'MACD_norm', 'dist_bull_ob', 'dist_bear_ob']
         window_flat = df.loc[len(df) - WINDOW_SIZE :, obs_features].values.flatten()
         
         final_obs = np.concatenate((window_flat, np.array([0.0, 0.0]))).astype(np.float32).reshape(1, -1)
-        
         onnx_output = model_session.run(None, {'input': final_obs})
         action = int(onnx_output[0][0])
+        
+        print_log(f"🔍 AI Scan | Price: {current_price:.2f} | Action: {action}")
         
         if action != 1: return None 
         
         sl = df['low'].iloc[-15:-1].min() - curr_candle['ATRr_14']
         entry = float(current_price)
         risk = abs(entry - sl)
-        if risk <= 0 or (risk/entry) > 0.05: return None 
+        
+        # 📌 تم تخفيف القيد من 0.05 إلى 0.15 للسماح بمرور الصفقات
+        if risk <= 0 or (risk/entry) > 0.15:
+            print_log("⚠️ AI Setup Found -> Risk filter rejected.")
+            return None 
         
         tp = entry + (risk * RR_RATIO)
         lev = max(2, min(50, int(20.0 / ((risk / entry) * 100))))
@@ -92,8 +103,8 @@ class TradingBot:
         await self.exchange.load_markets()
         if os.path.exists(MODEL_PATH):
             self.ai_model = ort.InferenceSession(MODEL_PATH)
-            print_log("🧠 ONNX AI Agent Loaded Successfully!")
-            await self.send_tg("🚀 <b>تم تشغيل نظام التداول (MLOps) بنجاح!</b>\nالذكاء الاصطناعي يعمل الآن بخفة وسرعة. 📊🤖")
+            print_log("🧠 ONNX Order Block Agent Loaded Successfully!")
+            await self.send_tg("🚀 <b>تم تحديث الذكاء الاصطناعي (Order Blocks)!</b>\nالعقل الجديد جاهز للقنص. 📊🤖")
         else:
             print_log("❌ ONNX Model File Missing!")
 
@@ -113,7 +124,7 @@ class TradingBot:
                 if trade and trade['timestamp'] not in self.processed:
                     self.processed.append(trade['timestamp'])
                     self.active_trades[SYMBOL] = trade
-                    msg = (f"🤖 <b>AI SIGNAL</b> 🟢 LONG\n⚡ <code>{SYMBOL}</code>\n"
+                    msg = (f"🤖 <b>AI SIGNAL (Order Block)</b> 🟢 LONG\n⚡ <code>{SYMBOL}</code>\n"
                            f"⚖️ Lev: {trade['leverage']}x\n💰 Entry: <code>{trade['entry']:.2f}</code>\n"
                            f"🎯 TP: <code>{trade['tp']:.2f}</code> (+{trade['tp_roe']:.1f}%)\n"
                            f"🛑 SL: <code>{trade['sl']:.2f}</code> (-{trade['sl_roe']:.1f}%)")
